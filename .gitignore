@@ -1,0 +1,32 @@
+# 题库数据、加密密钥、上传中间产物 —— 全部是本机私有内容，绝不提交
+data/
+
+# vendor/project_alpha 的运行期产物与真实密钥
+vendor/project_alpha/output/
+vendor/project_alpha/.env
+
+# 导出产物（生成的 PDF/Tex）
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# 任意 .env（真实密钥），只保留 .env.example
+.env
+*.env
+!.env.example
+!vendor/project_alpha/.env.example
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Obsidian 库配置（机器特定）
+.obsidian/

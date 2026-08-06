@@ -1,0 +1,138 @@
+{% if preview is not none %}
+  {% if queue_id %}
+    <div class="flash flash-ok">
+      批量校对：第 {{ queue_pos }} / {{ queue_total }} 项
+      —— <strong>{{ queue_filename }}</strong>（切分出 {{ preview|length }} 题）
+    </div>
+  {% elif batch_id %}
+    <div class="flash flash-ok">
+      多组批量·校对本组 —— <strong>{{ queue_filename }}</strong>（切分出 {{ preview|length }} 题）
+      &nbsp;<a href="{{ url_for('batch_dashboard', batch_id=batch_id) }}" class="link">← 返回看板</a>
+    </div>
+  {% endif %}
+  <h3>切分预览：共 {{ preview|length }} 题</h3>
+  {% if preview %}
+    <form method="post" id="confirm-form" action="{{ url_for('import_md') }}">
+      <input type="hidden" name="job_id" value="{{ job_id or '' }}">
+      {% if queue_id %}<input type="hidden" name="queue_id" value="{{ queue_id }}">{% endif %}
+      {% if batch_id %}
+        <input type="hidden" name="batch_id" value="{{ batch_id }}">
+        <input type="hidden" name="batch_gid" value="{{ batch_gid }}">
+      {% endif %}
+
+      <!-- 顶部工具栏 -->
+      <div class="prev-toolbar">
+        <label>整批标签
+          <input type="text" name="tags" id="batch-tags" value="{{ batch_tag or '' }}"
+                 class="input" style="width:200px" placeholder="全部题共有的标签">
+        </label>
+        <span class="preset-tags">
+          {% for t in ['模考', '预赛', '线上联考', '真题'] %}
+            <button type="button" class="btn btn-ghost btn-sm preset-tag"
+                    data-tag="{{ t }}">+{{ t }}</button>
+          {% endfor %}
+        </span>
+        <label>导入目标
+          <select name="collection" class="input" style="width:200px">
+            <option value="">仅入题库</option>
+            {% for c in all_collections %}
+              <option value="{{ c['id'] }}">{{ c['name'] }}</option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" name="action" value="confirm" class="btn btn-primary">
+          {% if queue_id %}导入本文件并进入下一个{% elif batch_id %}导入本组并返回看板{% else %}导入勾选的题{% endif %}
+        </button>
+        {% if queue_id %}
+          <button type="submit" form="skip-form" class="btn">跳过本文件</button>
+        {% elif batch_id %}
+          <button type="submit" form="skip-form" class="btn">跳过本组</button>
+        {% endif %}
+      </div>
+      <div class="prev-toolbar">
+        <button type="button" class="btn" id="sel-all">全选</button>
+        <button type="button" class="btn" id="sel-none">反选</button>
+        <input type="text" id="batch-tag-input" class="input" style="width:180px"
+               placeholder="给选中题加标签">
+        <button type="button" class="btn" id="batch-tag-btn">打标签到选中</button>
+        <button type="button" class="btn link-danger" id="batch-del-btn">删除选中</button>
+        <span class="muted">重复题已标红、默认不勾。每题可直接编辑、实时预览。</span>
+      </div>
+
+      <!-- 左 PDF 对照（仅上传路径有 job_id）+ 右题卡 -->
+      <div class="prev-layout {% if not job_id %}no-pdf{% endif %}">
+        {% if job_id %}
+        <div class="prev-pdf">
+          <div class="pane-label">原文件对照</div>
+          <iframe src="{{ url_for('convert_file_view', job_id=job_id) }}" title="原文件"></iframe>
+        </div>
+        {% endif %}
+
+        <div class="prev-cards" id="prev-cards">
+          {% for p in preview %}
+            <article class="card qcard {% if p['dup'] %}dup-card{% endif %}" data-idx="{{ p['idx'] }}">
+              <div class="card-head">
+                <label class="sel-box">
+                  <input type="checkbox" class="keep-cb" name="keep" value="{{ p['idx'] }}"
+                         {% if not p['dup'] %}checked{% endif %}>
+                  导入
+                </label>
+                {# 题型可改：逐块识别路径能靠分区标题判出「多选」，但正文特征判不出来，
+                   所以这里给下拉而不是只读徽章，入库时以此为准 #}
+                <select name="type_{{ p['idx'] }}" class="input type-sel"
+                        style="width:auto;font-size:12px;padding:2px 6px">
+                  {% for t in types %}
+                    <option value="{{ t }}" {% if t == p['type'] %}selected{% endif %}>{{ t }}</option>
+                  {% endfor %}
+                </select>
+                <span class="muted">第 {{ loop.index }} 题</span>
+                {% if p['dup'] %}<span class="badge badge-exact">{{ p['dup'] }}</span>{% endif %}
+                <div class="spacer"></div>
+                <button type="button" class="link link-danger card-remove">移除</button>
+              </div>
+              <div class="qcard-render">{{ p['body'] | qimage }}</div>
+              <textarea class="input qcard-src" name="body_{{ p['idx'] }}" rows="4">{{ p['body'] }}</textarea>
+              <details class="qcard-sol-wrap" {% if p['solution'] %}open{% endif %}>
+                <summary class="muted">解析（可编辑，留空则不导入解析）</summary>
+                <textarea class="input qcard-solution" name="solution_{{ p['idx'] }}"
+                          rows="3" placeholder="本题解析 / 答案">{{ p['solution'] }}</textarea>
+              </details>
+              <div class="qcard-meta">
+                <span class="qcard-diff-label muted">难度</span>
+                <span class="diff-dots qcard-diff" title="点击设置难度 1-5，再点当前值清除">
+                  {% for n in range(1, 6) %}
+                    <span class="diff-dot" data-level="{{ n }}">{{ n }}</span>
+                  {% endfor %}
+                </span>
+                <input type="hidden" name="diff_{{ p['idx'] }}" class="qcard-diff-val" value="">
+                <span class="star-toggle qcard-star" title="标星：标记高质量题（点击切换）">★</span>
+                <input type="hidden" name="star_{{ p['idx'] }}" class="qcard-star-val" value="">
+                <input type="text" name="tag_{{ p['idx'] }}" class="input qcard-tag"
+                       placeholder="本题额外标签（逗号分隔）">
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+      </div>
+    </form>
+    {% if queue_id %}
+      <!-- 跳过表单：独立于 confirm-form，由「跳过本文件」按钮 form= 关联提交 -->
+      <form id="skip-form" method="post"
+            action="{{ url_for('import_queue_skip', queue_id=queue_id) }}"></form>
+    {% elif batch_id %}
+      <form id="skip-form" method="post"
+            action="{{ url_for('batch_group_skip', batch_id=batch_id, gid=batch_gid) }}"></form>
+    {% endif %}
+  {% else %}
+    <p class="flash flash-err">没有切分出题目，请检查格式（每题需以 <code>- </code> 开头）。</p>
+    {% if queue_id %}
+      <form method="post" action="{{ url_for('import_queue_skip', queue_id=queue_id) }}">
+        <button type="submit" class="btn btn-primary">跳过本文件，进入下一个</button>
+      </form>
+    {% elif batch_id %}
+      <form method="post" action="{{ url_for('batch_group_skip', batch_id=batch_id, gid=batch_gid) }}">
+        <button type="submit" class="btn btn-primary">跳过本组，返回看板</button>
+      </form>
+    {% endif %}
+  {% endif %}
+{% endif %}

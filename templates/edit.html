@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{% if q %}编辑题目{% else %}新增题目{% endif %} · QuizForge{% endblock %}
+{% block content %}
+<h2>{% if q %}编辑题目 #{{ q['id'] }}{% else %}新增题目{% endif %}</h2>
+
+<form method="post" class="edit-form">
+  <div class="field">
+    <label>题目正文（规范化 Markdown，公式用 <code>$\displaystyle ...$</code>）</label>
+    <textarea name="body" rows="10" class="input" required
+      oninput="renderPreview()">{{ q['body'] if q else '' }}</textarea>
+  </div>
+
+  <div class="field">
+    <label>解析（可选，公式同样用 <code>$...$</code>）</label>
+    <textarea name="solution" rows="6" class="input"
+      placeholder="题目的解析 / 答案，留空则无">{{ q['solution'] if q and q['solution'] else '' }}</textarea>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label>题型</label>
+      <select name="type" class="input">
+        <option value="">未分类</option>
+        {% for ty in types %}
+          <option value="{{ ty }}" {% if q and q['type']==ty %}selected{% endif %}>{{ ty }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field">
+      <label>难度</label>
+      <select name="difficulty" class="input">
+        <option value="">未设</option>
+        {% for d in difficulties %}
+          <option value="{{ d }}" {% if q and q['difficulty']==d %}selected{% endif %}>{{ d }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>题源（可空）</label>
+    <input type="text" name="source" class="input"
+           value="{{ q['source'] if q and q['source'] else '' }}">
+  </div>
+
+  <div class="field">
+    <label>标签（逗号分隔）</label>
+    <input type="text" name="tags" class="input" value="{{ q_tags|join(', ') }}"
+           placeholder="导数, 高考真题, 压轴题">
+  </div>
+
+  <div class="field">
+    <label>实时预览</label>
+    <div id="preview" class="preview-box"></div>
+  </div>
+
+  <button type="submit" class="btn btn-primary">保存</button>
+  <a href="{{ url_for('index') }}" class="btn btn-ghost">取消</a>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function escapeHtml(s) {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function renderPreview() {
+  const txt = document.querySelector('textarea[name=body]').value;
+  const box = document.getElementById('preview');
+  // 先转义（保护数学式里的 <），再把 Obsidian 嵌入 ![[filename]] 换成 <img>；
+  // filename 只在 /assets/ 下找（见 app.py 的 asset_serve 路由）
+  box.innerHTML = escapeHtml(txt).replace(
+    /!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]/g,
+    (m, filename) => '<img src="/assets/' + encodeURIComponent(filename) +
+      '" alt="" style="max-width:100%;height:auto;display:block;margin:6px 0;">');
+  if (window.MathJax && MathJax.typesetPromise) {
+    MathJax.typesetPromise([box]);
+  }
+}
+window.addEventListener('load', renderPreview);
+</script>
+{% endblock %}

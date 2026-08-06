@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}QuizForge 题库{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <!-- MathJax：渲染 $...$ 行内公式 -->
+  <script>
+    window.MathJax = {
+      tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] },
+      svg: { fontCache: 'global' }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="{{ url_for('index') }}" class="brand">📚 QuizForge</a>
+      <a href="{{ url_for('index') }}">题库</a>
+      <a href="{{ url_for('question_new') }}">新增题目</a>
+      <a href="{{ url_for('import_md') }}">批量导入</a>
+      <a href="{{ url_for('dedup_page') }}">查重</a>
+      <a href="{{ url_for('recycle_bin') }}">回收站</a>
+      <a href="{{ url_for('settings_page') }}">设置</a>
+    </nav>
+  </header>
+
+  <main>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, msg in messages %}
+          <div class="flash flash-{{ category }}">{{ msg }}</div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </main>
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

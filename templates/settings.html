@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}设置 · QuizForge{% endblock %}
+{% block content %}
+<h2>设置</h2>
+
+<section class="import-box">
+  <h3>识别模型（LLM）</h3>
+  <p class="muted">
+    MinerU 识别出的内容要交给大模型整理成题目。不配这里也能用——会走
+    内置默认 DeepSeek（读 <code>vendor/project_alpha/.env</code>，老行为），但那条路的
+    max_tokens 写死 8192，换推理模型会因思维链占满预算而「返回空内容」。
+    支持任意 OpenAI 兼容接口（DeepSeek / 阿里云百炼 / 硅基流动 / 中转站 / 自建等）。
+    可以存多套，在列表里点「启用」随时切换，同时只有一套生效。
+  </p>
+  <p class="muted">
+    <strong>Base URL</strong>：填 API 根地址即可，会自动补全 <code>/v1</code>，
+    也不用管 <code>/chat/completions</code> 后缀——中转站直接填域名（如
+    <code>https://yapi.click</code>）就行，和 CC Switch 里的写法一致。
+  </p>
+  <p class="muted">
+    <strong>max_tokens</strong>：推理模型（如 deepseek-v4-pro）的思维链和正文共用这份预算，
+    填小了会思维链占满、正文一个字都不吐，建议 32000 以上；非推理模型（如 deepseek-chat）8192 够用。
+  </p>
+  <p class="muted">
+    API Key 以密文存库（密钥在 <code>data/.enc_key</code>），页面不回显。
+    <strong>删掉那个密钥文件已存的 Key 就解不开了</strong>，需要重新填。
+  </p>
+
+  <p style="margin-top:12px">
+    当前识别用的是：
+    {% set active = providers | selectattr('is_active') | first %}
+    {% if active %}
+      <strong>{{ active['name'] }}</strong>（{{ active['model'] }} · max_tokens {{ active['max_tokens'] }}）
+    {% else %}
+      <strong>内置默认 DeepSeek</strong>
+    {% endif %}
+  </p>
+
+  {% if providers %}
+  <table class="data-table" style="margin-top:12px;width:100%;border-collapse:collapse">
+    <thead>
+      <tr><th>状态</th><th>名称</th><th>Base URL</th><th>模型</th><th>max_tokens</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for p in providers %}
+      <tr>
+        <td>{% if p['is_active'] %}<strong>✅ 生效中</strong>{% else %}<span class="muted">未启用</span>{% endif %}</td>
+        <td>{{ p['name'] }}</td>
+        <td class="muted">{{ p['base_url'] }}</td>
+        <td class="muted">{{ p['model'] }}</td>
+        <td class="muted">{{ p['max_tokens'] }}</td>
+        <td>
+          <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline">
+            <input type="hidden" name="llm_id" value="{{ p['id'] }}">
+            {% if p['is_active'] %}
+              <input type="hidden" name="llm_action" value="deactivate">
+              <button type="submit" class="btn btn-sm">停用（改用默认 DeepSeek）</button>
+            {% else %}
+              <input type="hidden" name="llm_action" value="activate">
+              <button type="submit" class="btn btn-sm">启用</button>
+            {% endif %}
+          </form>
+          <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline"
+                onsubmit="return confirm('删除「{{ p['name'] }}」？删掉后会回落到默认 DeepSeek。')">
+            <input type="hidden" name="llm_action" value="remove">
+            <input type="hidden" name="llm_id" value="{{ p['id'] }}">
+            <button type="submit" class="btn btn-sm link-danger">删除</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted" style="margin-top:12px">还没配过模型，当前用内置默认 DeepSeek。</p>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('settings_llm') }}" style="margin-top:16px">
+    <input type="hidden" name="llm_action" value="add">
+    <div class="conv-row">
+      <span class="conv-label">名称</span>
+      <input type="text" name="llm_name" class="input" placeholder="比如 我的 DeepSeek" required>
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">Base URL</span>
+      <input type="text" name="llm_base_url" class="input" style="min-width:22em"
+             placeholder="https://api.deepseek.com" required>
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">API Key</span>
+      <input type="password" name="llm_api_key" class="input" style="min-width:22em"
+             placeholder="sk-..." required autocomplete="new-password">
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">模型名</span>
+      <input type="text" name="llm_model" class="input" placeholder="deepseek-chat" required>
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">max_tokens</span>
+      <input type="number" name="llm_max_tokens" class="input" min="256" max="200000"
+             value="{{ default_max_tokens }}" style="width:7em">
+    </div>
+    {% if providers %}
+    <label class="conv-sol">
+      <input type="checkbox" name="llm_activate_now" value="1" checked> 添加后立即启用
+    </label>
+    {% endif %}
+    <button type="submit" class="btn btn-primary">添加</button>
+  </form>
+</section>
+{% endblock %}

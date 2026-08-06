@@ -1,0 +1,531 @@
+{% extends "base.html" %}
+{% block title %}批量导入 · QuizForge{% endblock %}
+{% block content %}
+<h2>批量导入</h2>
+<p class="muted">两种方式：① 上传 PDF/图片自动转换（转换后直接进入题目对照校对）；② 直接粘贴规范化 md。</p>
+
+{% if preview is none %}
+<div class="import-tabs">
+  <!-- 方式一：上传文件转换 -->
+  <section class="import-box">
+    <h3>方式一：上传 PDF / 图片</h3>
+    <p class="muted">经 MinerU + DeepSeek 转换（数十秒~几分钟），完成后自动进入「原文件 ↔ 题目」对照校对。</p>
+    <div class="conv-row">
+      <span class="conv-label">题干文件</span>
+      <input type="file" id="conv-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp">
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">解析文件</span>
+      <input type="file" id="conv-solution-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp">
+      <span class="muted">可选。单独的答案/解析文件，会按题号自动关联到各题。</span>
+    </div>
+    <label class="conv-sol"><input type="checkbox" id="conv-solution"> 同时识别解析（较慢；若已选解析文件则自动开启）</label>
+
+    <!-- 只导入指定题号（压轴题过滤）：点圈选中=要导入的题，不选=丢弃 -->
+    <div class="picknum">
+      <label class="conv-sol">
+        <input type="checkbox" id="picknum-on"> 只导入指定题号（其余整题丢弃，省时省额度）
+      </label>
+      <div id="picknum-panel" class="picknum-panel" style="display:none">
+        <div class="picknum-presets">
+          <span class="muted">预设：</span>
+          <button type="button" class="btn btn-ghost btn-sm" data-preset="8,11,14,18,19">压轴题 8·11·14·18·19</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-preset-drop="1-6,9,15,16">舍弃基础题 1-6·9·15-16</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="picknum-clear">全不选</button>
+          <span class="muted picknum-range">题号范围
+            <input type="number" id="picknum-max" value="25" min="1" max="99" style="width:3.2em">
+          </span>
+        </div>
+        <div id="picknum-circles" class="picknum-circles"></div>
+        <p class="muted">已选：<span id="picknum-summary">无</span></p>
+      </div>
+    </div>
+
+    <label class="conv-sol">识别方式
+      <select id="conv-engine" class="input" style="width:auto;margin-left:6px">
+        <option value="whole" selected>整篇识别（默认）</option>
+        <option value="block">逐题识别（先按题号切块，再逐块判定，题目更不易漏）</option>
+      </select>
+    </label>
+
+    <button type="button" class="btn" id="conv-btn">开始转换</button>
+    <span id="conv-status" class="muted"></span>
+  </section>
+
+  <!-- 方式二：批量上传 md 文件，逐个校对导入 -->
+  <form method="post" action="{{ url_for('import_batch_start') }}"
+        enctype="multipart/form-data" class="import-box">
+    <h3>方式二：批量上传 md 文件</h3>
+    <p class="muted">选择多个已规范化的 <code>.md</code> 文件，逐个进入校对页导入（每个文件名默认作整批标签）。</p>
+    <div class="conv-row">
+      <span class="conv-label">md 文件</span>
+      <input type="file" name="md_files" accept=".md,.markdown,.txt" multiple required>
+      <span class="muted">可多选。</span>
+    </div>
+    <button type="submit" class="btn btn-primary">开始逐个校对</button>
+  </form>
+
+  <!-- 方式三：直接贴 md -->
+  <form method="post" class="import-box">
+    <h3>方式三：粘贴规范化 Markdown</h3>
+    <div class="field">
+      <textarea name="md" rows="12" class="input"
+                placeholder="- 第一题...&#10;&#10;- 第二题...">{{ raw or '' }}</textarea>
+    </div>
+    <button type="submit" name="action" value="preview" class="btn btn-primary">切分预览</button>
+  </form>
+
+  <!-- 方式四：多组 PDF 批量导入 -->
+  <section class="import-box">
+    <h3>方式四：多组 PDF 批量导入</h3>
+    <p class="muted">一次配置多组任务，每组独立设题干/解析文件与选项，串行转换后<strong>逐组进校对页人工审核入库</strong>（不自动入库）。</p>
+
+    <div id="batch-groups"><!-- 任务组由 JS 动态生成 --></div>
+
+    <label class="conv-sol" style="display:block;margin:8px 0">识别方式（整批统一）
+      <select id="batch-engine" class="input" style="width:auto;margin-left:6px">
+        <option value="whole" selected>整篇识别（默认）</option>
+        <option value="block">逐题识别（先按题号切块，再逐块判定，题目更不易漏）</option>
+      </select>
+    </label>
+
+    <div class="batch-actions">
+      <button type="button" class="btn" id="batch-add">+ 添加任务组</button>
+      <button type="button" class="btn btn-primary" id="batch-start">开始批量转换</button>
+    </div>
+    <span id="batch-status" class="muted"></span>
+  </section>
+</div>
+
+<!-- 任务组模板：JS clone 后填入 #batch-groups -->
+<template id="batch-group-tpl">
+  <div class="batch-group card">
+    <div class="card-head">
+      <strong class="bg-title">任务组</strong>
+      <div class="spacer"></div>
+      <button type="button" class="link link-danger bg-remove">移除此组</button>
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">题干文件</span>
+      <input type="file" class="bg-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp" multiple>
+      <span class="muted">可多选图片：一份卷子拍成多张照片时按选择顺序合成一份转换。</span>
+    </div>
+    <div class="conv-row">
+      <span class="conv-label">解析文件</span>
+      <input type="file" class="bg-sol-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp" multiple>
+      <span class="muted">可选，可多选图片，按题号自动关联。</span>
+    </div>
+    <label class="conv-sol"><input type="checkbox" class="bg-include-sol"> 同时识别解析（较慢；若已选解析文件则自动开启）</label>
+    <div class="picknum">
+      <label class="conv-sol"><input type="checkbox" class="bg-picknum-on"> 只导入指定题号（其余整题丢弃）</label>
+      <div class="bg-picknum-panel picknum-panel" style="display:none">
+        <div class="picknum-presets">
+          <span class="muted">预设：</span>
+          <button type="button" class="btn btn-ghost btn-sm bg-preset" data-preset="8,11,14,18,19">压轴题 8·11·14·18·19</button>
+          <button type="button" class="btn btn-ghost btn-sm bg-preset-drop" data-drop="1-6,9,15,16">舍弃基础题 1-6·9·15-16</button>
+          <button type="button" class="btn btn-ghost btn-sm bg-picknum-clear">全不选</button>
+          <span class="muted picknum-range">题号范围
+            <input type="number" class="bg-picknum-max" value="25" min="1" max="99" style="width:3.2em">
+          </span>
+        </div>
+        <div class="bg-picknum-circles picknum-circles"></div>
+        <p class="muted">已选：<span class="bg-picknum-summary">无</span></p>
+      </div>
+    </div>
+  </div>
+</template>
+
+<!-- 自动提交用的隐藏表单：转换完成后填入并提交，直接进 preview -->
+<form method="post" id="auto-preview-form" style="display:none">
+  <input type="hidden" name="action" value="preview">
+  <input type="hidden" name="md" id="ap-md">
+  <input type="hidden" name="job_id" id="ap-job">
+  <input type="hidden" name="batch_tag" id="ap-tag">
+</form>
+{% endif %}
+
+{% include "_import_preview.html" %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── 方式一：上传 → 后台转换 → 轮询 → 自动进入 preview 对照页 ──
+const convBtn = document.getElementById('conv-btn');
+if (convBtn) {
+  convBtn.addEventListener('click', async () => {
+    const fileInput = document.getElementById('conv-file');
+    if (!fileInput.files.length) { alert('请先选择文件'); return; }
+    const statusEl = document.getElementById('conv-status');
+    const solInput = document.getElementById('conv-solution-file');
+    const hasSolFile = solInput && solInput.files.length > 0;
+    const fd = new FormData();
+    fd.append('file', fileInput.files[0]);
+    // 选了解析文件 → 走双文件路径；或勾了「同时识别解析」→ 单文件带解析
+    if (hasSolFile) {
+      fd.append('solution_file', solInput.files[0]);
+      fd.append('include_solution', '1');
+    } else if (document.getElementById('conv-solution').checked) {
+      fd.append('include_solution', '1');
+    }
+    // 只导入指定题号：开关打开且选了题才带上
+    if (document.getElementById('picknum-on').checked) {
+      const picked = window._pickedNumbers ? window._pickedNumbers() : '';
+      if (!picked) { alert('已开启「只导入指定题号」但未选任何题号'); convBtn.disabled = false; return; }
+      fd.append('only_numbers', picked);
+    }
+    // 识别方式（后端 _parse_engine 只认 'block'，其余落回整篇识别）
+    const engSel = document.getElementById('conv-engine');
+    if (engSel) fd.append('engine', engSel.value);
+    convBtn.disabled = true;
+    statusEl.textContent = hasSolFile ? '上传中…（题干+解析两份，稍慢）' : '上传中…';
+    try {
+      const res = await fetch('/convert/start', {method: 'POST', body: fd});
+      const data = await res.json();
+      if (!data.ok) { statusEl.textContent = '失败：' + (data.error || ''); convBtn.disabled = false; return; }
+      statusEl.textContent = '转换中，请稍候…（可能几分钟）';
+      poll(data.job_id, data.filename);
+    } catch (e) {
+      statusEl.textContent = '请求出错：' + e.message; convBtn.disabled = false;
+    }
+  });
+}
+
+async function poll(jobId, filename) {
+  const statusEl = document.getElementById('conv-status');
+  try {
+    const res = await fetch('/convert/status/' + jobId);
+    const data = await res.json();
+    if (data.status === 'pending') { setTimeout(() => poll(jobId, filename), 3000); return; }
+    if (data.status === 'done') {
+      // 填隐藏表单并自动提交 → 直接进入 preview 对照页
+      document.getElementById('ap-md').value = data.md || '';
+      document.getElementById('ap-job').value = jobId;
+      document.getElementById('ap-tag').value = (filename || '').replace(/\.[^.]+$/, '');
+      statusEl.textContent = '转换完成，进入校对…';
+      document.getElementById('auto-preview-form').submit();
+    } else {
+      document.getElementById('conv-btn').disabled = false;
+      statusEl.textContent = '转换失败：' + (data.error || '未知错误');
+    }
+  } catch (e) {
+    document.getElementById('conv-btn').disabled = false;
+    statusEl.textContent = '查询出错：' + e.message;
+  }
+}
+
+// ── 只导入指定题号：圆圈点选 + 预设 ──
+(function () {
+  const onCb = document.getElementById('picknum-on');
+  if (!onCb) return;
+  const panel = document.getElementById('picknum-panel');
+  const circles = document.getElementById('picknum-circles');
+  const summary = document.getElementById('picknum-summary');
+  const maxInput = document.getElementById('picknum-max');
+  const picked = new Set();
+
+  function parseSpec(spec) {
+    // '1-6,9,15,16' → [1,2,3,4,5,6,9,15,16]
+    const out = [];
+    spec.split(',').forEach(p => {
+      p = p.trim();
+      if (!p) return;
+      if (p.includes('-')) {
+        const [a, b] = p.split('-').map(Number);
+        for (let i = a; i <= b; i++) out.push(i);
+      } else out.push(Number(p));
+    });
+    return out;
+  }
+  function renderSummary() {
+    const arr = [...picked].sort((a, b) => a - b);
+    summary.textContent = arr.length ? arr.join('、') : '无';
+  }
+  function buildCircles() {
+    const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
+    circles.innerHTML = '';
+    for (let i = 1; i <= max; i++) {
+      const el = document.createElement('span');
+      el.className = 'picknum-circle' + (picked.has(i) ? ' on' : '');
+      el.textContent = i;
+      el.addEventListener('click', () => {
+        if (picked.has(i)) { picked.delete(i); el.classList.remove('on'); }
+        else { picked.add(i); el.classList.add('on'); }
+        renderSummary();
+      });
+      circles.appendChild(el);
+    }
+  }
+  function applyKeep(nums) {   // 选中=保留
+    picked.clear();
+    nums.forEach(n => picked.add(n));
+    buildCircles(); renderSummary();
+  }
+  function applyDrop(nums) {   // 舍弃这些 → 保留其余（在当前题号范围内）
+    const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
+    const drop = new Set(nums);
+    picked.clear();
+    for (let i = 1; i <= max; i++) if (!drop.has(i)) picked.add(i);
+    buildCircles(); renderSummary();
+  }
+
+  onCb.addEventListener('change', () => {
+    panel.style.display = onCb.checked ? '' : 'none';
+    if (onCb.checked && !circles.children.length) buildCircles();
+  });
+  maxInput.addEventListener('change', buildCircles);
+  document.querySelectorAll('#picknum-panel [data-preset]').forEach(b =>
+    b.addEventListener('click', () => applyKeep(parseSpec(b.dataset.preset))));
+  document.querySelectorAll('#picknum-panel [data-preset-drop]').forEach(b =>
+    b.addEventListener('click', () => applyDrop(parseSpec(b.dataset.presetDrop))));
+  document.getElementById('picknum-clear').addEventListener('click',
+    () => applyKeep([]));
+
+  // 暴露给提交逻辑：返回逗号分隔的已选题号串（空串=没选）
+  window._pickedNumbers = () => [...picked].sort((a, b) => a - b).join(',');
+})();
+
+// ── 方式四：多组 PDF 批量导入 ──
+(function () {
+  const groupsBox = document.getElementById('batch-groups');
+  if (!groupsBox) return;
+  const tpl = document.getElementById('batch-group-tpl');
+  const addBtn = document.getElementById('batch-add');
+  const startBtn = document.getElementById('batch-start');
+  const statusEl = document.getElementById('batch-status');
+
+  function parseSpec(spec) {
+    const out = [];
+    spec.split(',').forEach(p => {
+      p = p.trim(); if (!p) return;
+      if (p.includes('-')) { const [a, b] = p.split('-').map(Number); for (let i = a; i <= b; i++) out.push(i); }
+      else out.push(Number(p));
+    });
+    return out;
+  }
+
+  // 每组一套独立的 picknum 状态（picked Set 挂在 DOM 节点上，互不干扰）
+  function wirePicknum(root) {
+    const onCb = root.querySelector('.bg-picknum-on');
+    const panel = root.querySelector('.bg-picknum-panel');
+    const circles = root.querySelector('.bg-picknum-circles');
+    const summary = root.querySelector('.bg-picknum-summary');
+    const maxInput = root.querySelector('.bg-picknum-max');
+    const picked = new Set();
+    root._picked = picked;   // 供收集时读取
+
+    function renderSummary() {
+      const arr = [...picked].sort((a, b) => a - b);
+      summary.textContent = arr.length ? arr.join('、') : '无';
+    }
+    function buildCircles() {
+      const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
+      circles.innerHTML = '';
+      for (let i = 1; i <= max; i++) {
+        const el = document.createElement('span');
+        el.className = 'picknum-circle' + (picked.has(i) ? ' on' : '');
+        el.textContent = i;
+        el.addEventListener('click', () => {
+          if (picked.has(i)) { picked.delete(i); el.classList.remove('on'); }
+          else { picked.add(i); el.classList.add('on'); }
+          renderSummary();
+        });
+        circles.appendChild(el);
+      }
+    }
+    function applyKeep(nums) { picked.clear(); nums.forEach(n => picked.add(n)); buildCircles(); renderSummary(); }
+    function applyDrop(nums) {
+      const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
+      const drop = new Set(nums); picked.clear();
+      for (let i = 1; i <= max; i++) if (!drop.has(i)) picked.add(i);
+      buildCircles(); renderSummary();
+    }
+    onCb.addEventListener('change', () => {
+      panel.style.display = onCb.checked ? '' : 'none';
+      if (onCb.checked && !circles.children.length) buildCircles();
+    });
+    maxInput.addEventListener('change', buildCircles);
+    root.querySelector('.bg-preset').addEventListener('click', e => applyKeep(parseSpec(e.target.dataset.preset)));
+    root.querySelector('.bg-preset-drop').addEventListener('click', e => applyDrop(parseSpec(e.target.dataset.drop)));
+    root.querySelector('.bg-picknum-clear').addEventListener('click', () => applyKeep([]));
+    // 返回该组题号串（未开启开关则空串）
+    root._pickedNumbers = () => onCb.checked ? [...picked].sort((a, b) => a - b).join(',') : '';
+  }
+
+  function renumber() {
+    groupsBox.querySelectorAll('.batch-group').forEach((g, i) => {
+      g.querySelector('.bg-title').textContent = '任务组 ' + (i + 1);
+    });
+  }
+
+  function addGroup() {
+    const node = tpl.content.firstElementChild.cloneNode(true);
+    node.querySelector('.bg-remove').addEventListener('click', () => { node.remove(); renumber(); });
+    // 选了解析文件 → 自动勾「同时识别解析」
+    const solFile = node.querySelector('.bg-sol-file');
+    const incSol = node.querySelector('.bg-include-sol');
+    solFile.addEventListener('change', () => { if (solFile.files.length) incSol.checked = true; });
+    wirePicknum(node);
+    groupsBox.appendChild(node);
+    renumber();
+  }
+
+  addBtn.addEventListener('click', addGroup);
+  addGroup();   // 默认给一组
+
+  // ── 提交 → 跳转看板（转换在后台跑，看板实时刷新、转好一组即可审一组）──
+  startBtn.addEventListener('click', async () => {
+    const groups = [...groupsBox.querySelectorAll('.batch-group')];
+    if (!groups.length) { alert('请先添加至少一个任务组'); return; }
+    const fd = new FormData();
+    let ok = true;
+    groups.forEach((g, i) => {
+      const fileInput = g.querySelector('.bg-file');
+      if (!fileInput.files.length) { ok = false; return; }
+      // 题干可多文件：按选择顺序全部追加为同名字段（后端 getlist 收）
+      for (const f of fileInput.files) fd.append('groups[' + i + '][file]', f);
+      const solInput = g.querySelector('.bg-sol-file');
+      for (const f of solInput.files) fd.append('groups[' + i + '][solution_file]', f);
+      if (g.querySelector('.bg-include-sol').checked) fd.append('groups[' + i + '][include_solution]', '1');
+      const picked = g._pickedNumbers ? g._pickedNumbers() : '';
+      if (picked) fd.append('groups[' + i + '][only_numbers]', picked);
+    });
+    if (!ok) { alert('每个任务组都要选题干文件'); return; }
+    // 识别方式整批统一（后端每组也可单独给，组内优先）
+    const bEng = document.getElementById('batch-engine');
+    if (bEng) fd.append('engine', bEng.value);
+
+    startBtn.disabled = true; addBtn.disabled = true;
+    statusEl.textContent = '上传中…';
+    try {
+      const res = await fetch('/batch-convert/create', {method: 'POST', body: fd});
+      const data = await res.json();
+      if (!data.ok) { statusEl.textContent = '失败：' + (data.error || ''); startBtn.disabled = false; addBtn.disabled = false; return; }
+      statusEl.textContent = '已提交，进入看板…';
+      window.location.href = data.dashboard;
+    } catch (e) {
+      statusEl.textContent = '请求出错：' + e.message; startBtn.disabled = false; addBtn.disabled = false;
+    }
+  });
+})();
+
+// ── preview 对照页交互（题卡存在时才绑定）──
+const prevCards = document.getElementById('prev-cards');
+if (prevCards) {
+  // 每题：textarea 改动 → 重渲染上方 render div
+  // 先按纯文本安全转义，再把 ![[文件名]] 换成 <img>（与后端 qimage filter 一致的 Obsidian 嵌入语法）
+  function escapeHtml(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+  function rerender(card) {
+    const src = card.querySelector('.qcard-src').value;
+    const box = card.querySelector('.qcard-render');
+    const html = escapeHtml(src).replace(
+      /!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]/g,
+      (m, filename) => '<img src="/assets/' + encodeURIComponent(filename) +
+        '" alt="" style="max-width:100%;height:auto;display:block;margin:6px 0;">');
+    box.innerHTML = html;
+    if (window.MathJax && MathJax.typesetPromise) {
+      MathJax.typesetClear && MathJax.typesetClear([box]);
+      MathJax.typesetPromise([box]);
+    }
+  }
+  prevCards.querySelectorAll('.qcard').forEach(card => {
+    const ta = card.querySelector('.qcard-src');
+    let timer = null;
+    ta.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => rerender(card), 400);  // 防抖
+    });
+    card.querySelector('.card-remove').addEventListener('click',
+      () => card.remove());
+
+    // 难度圆圈：点选写进隐藏字段 diff_<idx>，再点当前值清除
+    const dots = card.querySelector('.qcard-diff');
+    const val = card.querySelector('.qcard-diff-val');
+    if (dots && val) {
+      dots.querySelectorAll('.diff-dot').forEach(dot => {
+        dot.addEventListener('click', () => {
+          const lv = dot.dataset.level;
+          const clear = val.value === lv;   // 再点当前值 → 清除
+          val.value = clear ? '' : lv;
+          dots.querySelectorAll('.diff-dot').forEach(d =>
+            d.classList.toggle('active', !clear && d.dataset.level === lv));
+        });
+      });
+    }
+
+    // 标星：点击切换，写进隐藏字段 star_<idx>
+    const star = card.querySelector('.qcard-star');
+    const starVal = card.querySelector('.qcard-star-val');
+    if (star && starVal) {
+      star.addEventListener('click', () => {
+        const on = starVal.value !== '1';
+        starVal.value = on ? '1' : '';
+        star.classList.toggle('on', on);
+      });
+    }
+  });
+
+  // 全选 / 反选
+  document.getElementById('sel-all').addEventListener('click', () => {
+    prevCards.querySelectorAll('.keep-cb').forEach(cb => cb.checked = true);
+  });
+  // 反选：只切换「未移除」题卡（已移除的 DOM 已不在，自然不算）
+  document.getElementById('sel-none').addEventListener('click', () => {
+    prevCards.querySelectorAll('.keep-cb').forEach(cb => cb.checked = !cb.checked);
+  });
+
+  // 批量给选中题打标签（追加进选中卡的逐题标签框）
+  document.getElementById('batch-tag-btn').addEventListener('click', () => {
+    const t = document.getElementById('batch-tag-input').value.trim();
+    if (!t) { alert('请先填要加的标签'); return; }
+    let n = 0;
+    prevCards.querySelectorAll('.qcard').forEach(card => {
+      if (card.querySelector('.keep-cb').checked) {
+        const tag = card.querySelector('.qcard-tag');
+        tag.value = tag.value.trim() ? tag.value.trim() + ', ' + t : t;
+        n++;
+      }
+    });
+    document.getElementById('batch-tag-input').value = '';
+    alert('已给 ' + n + ' 道题加标签：' + t);
+  });
+
+  // 批量删除选中题（前端移除，不导入）
+  document.getElementById('batch-del-btn').addEventListener('click', () => {
+    const sel = [...prevCards.querySelectorAll('.qcard')].filter(
+      c => c.querySelector('.keep-cb').checked);
+    if (!sel.length) { alert('没有勾选题目'); return; }
+    if (!confirm('移除选中的 ' + sel.length + ' 道题（不会导入）？')) return;
+    sel.forEach(c => c.remove());
+  });
+}
+
+// ── 整批标签预设：点一下 toggle 该标签在整批标签框里的存在 ──
+(function () {
+  const input = document.getElementById('batch-tags');
+  if (!input) return;
+  function currentTags() {
+    return input.value.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  function syncActive() {
+    const set = new Set(currentTags());
+    document.querySelectorAll('.preset-tag').forEach(b =>
+      b.classList.toggle('on', set.has(b.dataset.tag)));
+  }
+  document.querySelectorAll('.preset-tag').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tag = btn.dataset.tag;
+      const tags = currentTags();
+      const i = tags.indexOf(tag);
+      if (i >= 0) tags.splice(i, 1);   // 已有 → 移除
+      else tags.push(tag);             // 没有 → 追加
+      input.value = tags.join(', ');
+      syncActive();
+    });
+  });
+  input.addEventListener('input', syncActive);
+  syncActive();
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,120 @@
+% pandoc 试卷 LaTeX 模板（ctex 中文 + amsmath 数学）
+% 用法：pandoc 试卷.md -o 试卷.tex --template templates/exam_template.tex
+% 编译：xelatex 试卷.tex
+\documentclass[11pt]{ctexart}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{array,longtable,booktabs,calc}
+\usepackage{graphicx}   % 题目插图 \includegraphics（QuizForge 图片支持）
+\usepackage{wrapfig}    % 填空题左文右图（文字绕排图片，见 exporter._stage_images）
+% 图片默认不超过文本宽度，避免超宽图撑破版心（pandoc 标准写法）
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{\ifdim\Gin@nat@height>\textheight\textheight\else\Gin@nat@height\fi}
+\makeatother
+\setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
+% 新版 pandoc 用 \pandocbounded 包裹图片，把图缩放到不超出版心（需 graphicx）
+\makeatletter
+\newsavebox\pandoc@box
+\newcommand*\pandocbounded[1]{%
+  \sbox\pandoc@box{#1}%
+  \Gscale@div\@tempa\textheight{\dimexpr\ht\pandoc@box+\dp\pandoc@box\relax}%
+  \Gscale@div\@tempb\linewidth{\wd\pandoc@box}%
+  \ifdim\@tempb\p@<\@tempa\p@\let\@tempa\@tempb\fi%
+  \ifdim\@tempa\p@<\p@\scalebox{\@tempa}{\usebox\pandoc@box}%
+  \else\usebox\pandoc@box%
+  \fi%
+}
+\makeatother
+% QuizForge 题目插图统一版式：整题后靠右单独成行、等比缩放、
+% 宽<=3.6cm 且 高<=3cm（keepaspectratio 保证哪边先顶到就按哪边缩，绝不拉伸变形）。
+% exporter._stage_images 把 ![](file) 改写为 \qfig{file} 前的 md 图片引用，
+% 由 _q_md/_solution_md 用本宏包裹。缺定义则 fallback 到普通 includegraphics。
+% 参数：#1=图片文件名，#2=图下说明文字（如「第3题图」，空则不显示）。
+\newcommand{\qfig}[2]{%
+  \par\nobreak\vspace{0.3em}%
+  \noindent\hfill\begin{minipage}{3.6cm}%
+    \centering\includegraphics[width=3.6cm,height=3cm,keepaspectratio]{#1}%
+    \ifx\relax#2\relax\else\par\vspace{0.2em}{\footnotesize #2}\fi%
+  \end{minipage}%
+  \par\vspace{0.3em}%
+}
+% 填空题专用：左文右图。图浮在右侧、正文自动绕排（wrapfigure）。
+% 宽度按图尺寸预留 4cm 栏（含间距），图本体等比缩放到 <=3.6cm x 3cm。
+% 必须放在段首（wrapfig 要求），故 exporter 把它插在题干正文最前。
+% 参数：#1=图片文件名，#2=图下说明文字。
+\newcommand{\qfigwrap}[2]{%
+  \begin{wrapfigure}{r}{4cm}%
+    \vspace{-\baselineskip}%
+    \centering\includegraphics[width=3.6cm,height=3cm,keepaspectratio]{#1}%
+    \ifx\relax#2\relax\else\par\vspace{0.2em}{\footnotesize #2}\fi%
+  \end{wrapfigure}%
+}
+% \qfig 的别名：exporter._stage_images 统一把图引用改写成 \qfigmark 占位，
+% 待 _q_md 按题卡的对齐/宽度/分栏设置决定最终排版宏后再替换（见 exporter._extract_mark）。
+% 解析文本不做自定义排版，直接落回 \qfig 默认效果。
+\newcommand{\qfigmark}[2]{\qfig{#1}{#2}}
+% 用户自定义排版（对齐/宽度）的图片本体：仅负责按宽度占比缩放，左右对齐由
+% exporter 用 \hfill 在外层拼好（见 exporter._place_image）。
+% 参数：#1=宽度占比（0~1 小数，相对 \linewidth），#2=图片文件名，#3=图下说明文字。
+\newcommand{\qfigflexbox}[3]{%
+  \begin{minipage}{#1\linewidth}%
+    \centering\includegraphics[width=\linewidth,height=0.4\textheight,keepaspectratio]{#2}%
+    \ifx\relax#3\relax\else\par\vspace{0.2em}{\footnotesize #3}\fi%
+  \end{minipage}%
+}
+\usepackage{geometry}
+\geometry{a4paper, margin=2.5cm}
+\usepackage{enumitem}
+% 选择题选项整齐分列（QuizForge：短4列/中2列/长1列，由 exporter._choice_tasks 决定列数）
+% 保留题目自带的 A./B./C./D. 标签，故关闭 tasks 自身编号（label 置空、宽度归零）。
+\usepackage{tasks}
+\settasks{label={}, label-width=0pt, label-offset=0pt, item-indent=0pt,
+          after-item-skip=4pt plus 2pt minus 1pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.4em}
+
+% —— 题号独占一列 + 悬挂缩进（QuizForge 排版）——
+% \qopen{num.} 开一层 list，\item 标签即题号（题号列宽 \qnumindent），题目正文作为
+% 该 item 的段落内容，换行后缩进对齐正文起点而非题号；\qclose 收尾。
+% 与多用户版 quizbank-web/exam_template.tex 的同名宏保持一致（该版另有 \qsubopen
+% 小问列，本版无 _render_subquestions，故不需要）。
+\newlength{\qnumindent}\setlength{\qnumindent}{1.3em}
+\newcommand{\qopen}[1]{\begin{list}{}{%
+  \leftmargin=\qnumindent\itemindent=0pt\labelsep=0.4em\labelwidth=\qnumindent%
+  \itemsep=0pt\parsep=0.4em\topsep=0pt\partopsep=0pt}%
+\item[\textbf{#1}]}
+\newcommand{\qclose}{\end{list}}
+
+% pandoc 紧凑列表支持
+\providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+
+% pandoc longtable 兼容（旧版 pandoc 使用 \LTcaptype{none}）
+\newcounter{none}
+
+% —— 页眉页脚（DIY 6 位置）——
+\usepackage{fancyhdr}
+\usepackage{lastpage}   % \pageref{LastPage} = 总页数
+\pagestyle{fancy}
+\fancyhf{}              % 先清空所有默认页眉页脚
+\renewcommand{\headrulewidth}{$if(hf_rule)$0.4pt$else$0pt$endif$}
+\renewcommand{\footrulewidth}{0pt}
+$if(hf_hl)$\fancyhead[L]{$hf_hl$}$endif$
+$if(hf_hc)$\fancyhead[C]{$hf_hc$}$endif$
+$if(hf_hr)$\fancyhead[R]{$hf_hr$}$endif$
+$if(hf_fl)$\fancyfoot[L]{$hf_fl$}$endif$
+$if(hf_fc)$\fancyfoot[C]{$hf_fc$}$endif$
+$if(hf_fr)$\fancyfoot[R]{$hf_fr$}$endif$
+
+$if(title)$\title{$title$}$endif$
+$if(author)$\author{$author$}$endif$
+$if(date)$\date{$date$}$endif$
+
+\begin{document}
+$if(title)$
+\maketitle
+\thispagestyle{fancy}   % 覆盖 \maketitle 默认的 plain，首页也用 DIY 页眉页脚
+$endif$
+
+$body$
+
+\end{document}

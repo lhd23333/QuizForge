@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}回收站 - QuizForge{% endblock %}
+{% block content %}
+<div class="toolbar" style="margin-bottom:var(--sp-4)">
+  <h2 style="margin:0">🗑 回收站</h2>
+  <p class="muted" style="margin:4px 0 0">删除的题目和题集会先进这里，可恢复或彻底删除。彻底删除后无法找回。</p>
+  <div class="spacer"></div>
+  {% if questions or folders %}
+  <form method="post" action="{{ url_for('recycle_empty') }}"
+        onsubmit="return confirm('清空回收站将彻底删除以下所有内容，不可恢复。确定？')">
+    <button type="submit" class="btn btn-danger">清空回收站</button>
+  </form>
+  {% endif %}
+</div>
+
+<h3 class="coll-title" style="border-top:none;padding-top:0">已删题目（{{ questions|length }}）</h3>
+{% if questions %}
+  {% for q in questions %}
+  <article class="card">
+    <div class="card-head">
+      {% if q['type'] %}<span class="badge">{{ q['type'] }}</span>{% endif %}
+      {% if q['difficulty'] %}<span class="badge">难度 {{ q['difficulty'] }}</span>{% endif %}
+      <span class="muted" style="font-size:12px">删除于 {{ q['deleted_at'] }}</span>
+      <div class="spacer"></div>
+      <form method="post" action="{{ url_for('recycle_restore_question', qid=q['id']) }}" style="display:inline">
+        <button type="submit" class="btn btn-sm btn-primary">恢复</button>
+      </form>
+      <form method="post" action="{{ url_for('recycle_purge_question', qid=q['id']) }}" style="display:inline"
+            onsubmit="return confirm('彻底删除这道题？不可恢复。')">
+        <button type="submit" class="btn btn-sm link-danger">彻底删除</button>
+      </form>
+    </div>
+    <div class="body">{{ q['body'] | qimage }}</div>
+  </article>
+  {% endfor %}
+{% else %}
+  <p class="muted empty">没有已删题目。</p>
+{% endif %}
+
+<h3 class="coll-title">已删题集（{{ folders|length }}）</h3>
+{% if folders %}
+  {% for f in folders %}
+  <article class="card">
+    <div class="card-head">
+      📁 <b>{{ f['name'] }}</b>
+      <span class="muted" style="font-size:12px">删除于 {{ f['deleted_at'] }}</span>
+      <div class="spacer"></div>
+      <form method="post" action="{{ url_for('recycle_restore_folder', fid=f['id']) }}" style="display:inline">
+        <button type="submit" class="btn btn-sm btn-primary">恢复</button>
+      </form>
+      <form method="post" action="{{ url_for('recycle_purge_folder', fid=f['id']) }}" style="display:inline"
+            onsubmit="return confirm('彻底删除这个题集？题目本身不会删除，但题集关联会消失。')">
+        <button type="submit" class="btn btn-sm link-danger">彻底删除</button>
+      </form>
+    </div>
+    <p class="muted" style="font-size:12px;margin:4px 0 0">恢复后若原父题集已不在，将恢复为顶级题集。</p>
+  </article>
+  {% endfor %}
+{% else %}
+  <p class="muted empty">没有已删题集。</p>
+{% endif %}
+{% endblock %}

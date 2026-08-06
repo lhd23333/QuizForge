@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}批量转换看板 · QuizForge{% endblock %}
+{% block content %}
+<h2>多组批量转换看板</h2>
+<p class="muted">转换在后台串行进行。<strong>哪组转好了，那组就能点「审核入库」</strong>——不必等其它组。审核关一道不少，逐题确认才入库。可随时离开本页，稍后从这个网址回来继续。</p>
+
+<div class="batch-actions">
+  <a href="{{ url_for('import_md') }}" class="btn btn-ghost">← 回批量导入</a>
+  <a href="{{ url_for('index') }}" class="btn btn-ghost">题库</a>
+  <button type="button" class="btn link-danger" id="bd-cancel">取消整批（弃未审组）</button>
+</div>
+
+<div class="bd-summary muted" id="bd-summary"></div>
+
+<div class="bd-list" id="bd-list" data-batch="{{ batch_id }}">
+  {% for g in groups %}
+    <div class="bd-row card" data-gid="{{ g['gid'] }}">
+      <div class="bd-name"><strong>第 {{ loop.index }} 组</strong> · {{ g['filename'] }}</div>
+      <div class="bd-state"></div>
+      <div class="bd-act"></div>
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const list = document.getElementById('bd-list');
+  if (!list) return;
+  const batchId = list.dataset.batch;
+  const summary = document.getElementById('bd-summary');
+  const cancelBtn = document.getElementById('bd-cancel');
+  const LABEL = {pending: '等待转换', converting: '转换中…', done: '已转换', error: '转换失败'};
+
+  function reviewUrl(gid) { return '/batch/' + batchId + '/group/' + gid; }
+
+  function render(data) {
+    let converting = 0, done = 0, reviewed = 0, failed = 0;
+    data.groups.forEach(g => {
+      const row = list.querySelector('.bd-row[data-gid="' + g.gid + '"]');
+      if (!row) return;
+      const stateEl = row.querySelector('.bd-state');
+      const actEl = row.querySelector('.bd-act');
+      row.className = 'bd-row card bd-' + g.status + (g.reviewed ? ' bd-reviewed' : '');
+
+      if (g.reviewed === 'imported') {
+        reviewed++;
+        stateEl.innerHTML = '<span class="bp-st bp-done-st">已入库 ' + g.imported_count + ' 题</span>';
+        actEl.innerHTML = '<span class="muted">✓ 完成</span>';
+      } else if (g.reviewed === 'skipped') {
+        reviewed++;
+        stateEl.innerHTML = '<span class="bp-st">已跳过</span>';
+        actEl.innerHTML = '<span class="muted">已跳过</span>';
+      } else if (g.status === 'done') {
+        done++;
+        stateEl.innerHTML = '<span class="bp-st bp-ready">待审核</span>';
+        actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + reviewUrl(g.gid) + '">审核入库 →</a>';
+      } else if (g.status === 'error') {
+        failed++;
+        stateEl.innerHTML = '<span class="bp-st bp-err-st">转换失败</span>' +
+          (g.error ? '<span class="bp-err"> ' + g.error + '</span>' : '');
+        actEl.innerHTML = '<span class="muted">跳过</span>';
+      } else {
+        if (g.status === 'converting') converting++;
+        stateEl.innerHTML = '<span class="bp-st">' + (LABEL[g.status] || g.status) + '</span>';
+        actEl.innerHTML = '<span class="muted">请稍候</span>';
+      }
+    });
+    const total = data.groups.length;
+    let s = '共 ' + total + ' 组：待审核 ' + done + ' · 转换中 ' + converting +
+            ' · 已处理 ' + reviewed + ' · 失败 ' + failed;
+    if (data.status !== 'done' && data.status !== 'error') s += ' ｜ 后台转换进行中…';
+    else if (data.all_done) s += ' ｜ 全部处理完毕';
+    summary.textContent = s;
+  }
+
+  let timer = null;
+  async function poll() {
+    try {
+      const res = await fetch('/batch-convert/status/' + batchId);
+      if (res.status === 404) { summary.textContent = '任务已结束或过期。'; return; }
+      const data = await res.json();
+      render(data);
+      // 转换未结束就继续轮询；结束后停轮询（审核状态由页面跳转刷新）
+      if (data.status !== 'done' && data.status !== 'error') {
+        timer = setTimeout(poll, 3000);
+      }
+    } catch (e) {
+      summary.textContent = '状态查询出错：' + e.message;
+    }
+  }
+  poll();
+
+  cancelBtn.addEventListener('click', async () => {
+    if (!confirm('取消整批？未审核的组将被丢弃、上传文件清理。已入库的题不受影响。')) return;
+    clearTimeout(timer);
+    await fetch('/batch-convert/' + batchId + '/cancel', {method: 'POST'});
+    window.location.href = '{{ url_for("import_md") }}';
+  });
+})();
+</script>
+{% endblock %}
