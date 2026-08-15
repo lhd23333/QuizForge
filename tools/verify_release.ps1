@@ -26,6 +26,7 @@ try {
     $compileFiles = @(
         "app.py", "desktop.py", "desktop_product.py", "service_ports.py",
         "license_manager.py", "device_identity.py", "filestore.py", "exporter.py",
+        "export_tables.py", "import_defaults.py",
         "converter.py", "pdf_collection.py", "collection_structure.py",
         "collection_recovery.py", "ocr_pool.py", "mineru_store.py",
         "doc2x_client.py", "doc2x_store.py", "imgorder.py", "blockpipe.py",

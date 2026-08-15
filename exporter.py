@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config
+import export_tables
 
 
 class ExportError(Exception):
@@ -2875,12 +2876,11 @@ def _escape_stray_backslash(text: str) -> str:
 #   会这么出）就会被切成多段、把 tabular 拆坏。base64 令牌只含 A-Za-z0-9-_=：
 #   既没有 `.`（裸标签正则要求 [A-D] 后紧跟点号）、也没有 `$` 和 `（`，上述正则
 #   一个都咬不到它，最后在 _render_block 统一展开。
-_TABLE_RE = re.compile(r"<table[^>]*>(.*?)</table\s*>", re.S | re.I)
-_TR_RE = re.compile(r"<tr[^>]*>(.*?)</tr\s*>", re.S | re.I)
-_CELL_RE = re.compile(r"<t([dh])\b([^>]*)>(.*?)</t\1\s*>", re.S | re.I)
-_BR_RE = re.compile(r"<br\s*/?>", re.I)
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-_COLSPAN_RE = re.compile(r"\bcolspan\s*=\s*[\"']?(\d+)", re.I)
+_TABLE_RE = export_tables.TABLE_RE
+_PIPE_SEP_RE = export_tables.PIPE_SEP_RE
+_cell_text = export_tables.cell_text
+_html_table_rows = export_tables.html_table_rows
+_pipe_text_cells = export_tables.pipe_text_cells
 
 # 非数学区里的 TeX 特殊字符 → 安全写法。逐字符一次性映射（不做链式 replace），
 # 否则先换的 \textbackslash{} 里的花括号会被后一条规则再转义一遍。
@@ -2894,16 +2894,6 @@ _TEX_SPECIALS = {
 def _tex_text(seg: str) -> str:
     """转义一段**非数学**纯文本里的 TeX 特殊字符（见 _TEX_SPECIALS）。"""
     return "".join(_TEX_SPECIALS.get(ch, ch) for ch in seg)
-
-
-def _cell_text(raw: str) -> str:
-    """单元格 HTML → 无标签纯文本，供 PDF 与页面表格共同消费。"""
-    import html
-
-    s = _BR_RE.sub(" ", raw)
-    s = _HTML_TAG_RE.sub("", s)
-    s = html.unescape(s)
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def _cell_tex_text(text: str) -> str:
@@ -2922,29 +2912,6 @@ def _cell_tex(raw: str) -> str:
     直接复用前一步的纯文本，因此两端认到的行列与可见内容不会漂移。
     """
     return _cell_tex_text(_cell_text(raw))
-
-
-def _html_table_rows(inner: str) -> list[list[tuple[str, int]]]:
-    """HTML 表格内部 → 纯文本行；每格为 (内容, colspan)。
-
-    这是页面与 PDF 的共同解析边界。只返回文本与经过整数化的跨度，不返回任何
-    原始 HTML，页面侧据此重新造安全标签，不能把 OCR 的标签直接塞回 DOM。
-    """
-    rows: list[list[tuple[str, int]]] = []
-    for rm in _TR_RE.finditer(inner):
-        cells: list[tuple[str, int]] = []
-        for cm in _CELL_RE.finditer(rm.group(1)):
-            span = _COLSPAN_RE.search(cm.group(2) or "")
-            cells.append((_cell_text(cm.group(3)),
-                          max(1, int(span.group(1))) if span else 1))
-        if cells:
-            rows.append(cells)
-    return rows
-    parts = _MATH_SPLIT_RE.split(s)
-    for i, part in enumerate(parts):
-        if i % 2 == 0:            # 偶数下标=非数学段；奇数下标是 $...$，原样保留
-            parts[i] = _tex_text(part)
-    return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
 # 表格列宽阈值：列数 <= 此值用自然宽 l 列（内容多宽就多宽，紧凑）；超过则改用
@@ -3032,19 +2999,6 @@ def _token(tex: str) -> str:
 # pandoc 本身认这种表，但会写成 longtable —— longtable 要求处在外层竖直模式，塞进
 # minipage/\vbox（note/handout/exam 半页块、图文分栏两栏）会编译报错。故这里也接管，
 # 与 HTML 表格走同一套 tabular 渲染。
-_PIPE_SEP_RE = re.compile(r"^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*:?-{2,}:?\s*\|?\s*$")
-
-
-def _pipe_text_cells(line: str) -> list[tuple[str, int]]:
-    """一行管道表格 → 纯文本单元格，供页面与 PDF 共同消费。"""
-    s = line.strip()
-    if s.startswith("|"):
-        s = s[1:]
-    if s.endswith("|"):
-        s = s[:-1]
-    return [(_cell_text(c), 1) for c in s.split("|")]
-
-
 def _pipe_cells(line: str) -> list[tuple[str, int]]:
     """一行管道表格 → 单元格列表。去掉首尾竖线后按 | 切，逐格转 LaTeX。
     管道表格无 colspan 概念，span 恒为 1。"""

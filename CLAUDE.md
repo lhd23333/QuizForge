@@ -19,7 +19,7 @@ python app.py
 
 # 编译检查 + 标准库回归测试（不新增 pytest 依赖）
 .venv\Scripts\python.exe -m py_compile app.py
-.venv\Scripts\python.exe -m py_compile filestore.py exporter.py converter.py pdf_collection.py collection_structure.py ocr_pool.py mineru_store.py doc2x_client.py doc2x_store.py imgorder.py blockpipe.py blocksplit.py blocknorm.py mechfix.py importer.py dedup.py llm_client.py providers.py qrender.py task_store.py cleanup_output.py corpus.py tools\eval_doc2x.py
+.venv\Scripts\python.exe -m py_compile filestore.py exporter.py export_tables.py import_defaults.py converter.py pdf_collection.py collection_structure.py ocr_pool.py mineru_store.py doc2x_client.py doc2x_store.py imgorder.py blockpipe.py blocksplit.py blocknorm.py mechfix.py importer.py dedup.py llm_client.py providers.py qrender.py task_store.py cleanup_output.py corpus.py tools\eval_doc2x.py
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 
 # 一键运行完整源码验证；构建目录版后去掉 -SkipBundleScan 可同时检查发行文件
@@ -82,6 +82,8 @@ imgorder.py         多图片选择题归属恢复
 exporter.py         PDF 导出：题目列表 → Markdown → pandoc → xelatex → PDF
                     ——分页、选项分列、图片布局、分值区与 WIMath 标志
                     ——双栏大题按 TeX 实际高度占列，16:9 题目区保持 70% 左对齐
+export_tables.py    OCR HTML／Markdown 管道表格的共享纯文本行列解析
+                    ——页面与 PDF 分别安全渲染，不把外来 HTML 直接带回 DOM
 qrender.py          页面侧题目正文结构化渲染
                     ——选项分列/图片位置/表格解析与 exporter 共享规则
                     ——题干与解析各自消费图片分栏设置；公式不碰（留给前端 KaTeX）

@@ -24,6 +24,7 @@ from urllib.parse import quote
 from markupsafe import Markup, escape
 
 import exporter
+import export_tables
 
 
 def _asset_src(filename: str) -> str:
@@ -98,9 +99,9 @@ def _stash_tables(text: str) -> str:
 
     if "<table" in text.lower():
         def _html_sub(match):
-            table = _table_html(exporter._html_table_rows(match.group(1)))
+            table = _table_html(export_tables.html_table_rows(match.group(1)))
             return _table_token(table) if table else match.group(0)
-        text = exporter._TABLE_RE.sub(_html_sub, text)
+        text = export_tables.TABLE_RE.sub(_html_sub, text)
 
     if "|" not in text:
         return text
@@ -110,11 +111,11 @@ def _stash_tables(text: str) -> str:
     while i < len(lines):
         head = lines[i].strip()
         if (head.startswith("|") and i + 1 < len(lines)
-                and exporter._PIPE_SEP_RE.match(lines[i + 1])):
-            rows = [exporter._pipe_text_cells(lines[i])]
+                and export_tables.PIPE_SEP_RE.match(lines[i + 1])):
+            rows = [export_tables.pipe_text_cells(lines[i])]
             j = i + 2
             while j < len(lines) and lines[j].strip().startswith("|"):
-                rows.append(exporter._pipe_text_cells(lines[j]))
+                rows.append(export_tables.pipe_text_cells(lines[j]))
                 j += 1
             table = _table_html(rows)
             if table:
