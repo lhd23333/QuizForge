@@ -1,11 +1,87 @@
 % pandoc 试卷 LaTeX 模板（ctex 中文 + amsmath 数学）
 % 用法：pandoc 试卷.md -o 试卷.tex --template templates/exam_template.tex
 % 编译：xelatex 试卷.tex
-\documentclass[11pt]{ctexart}
+% fontset=fandol：锁定 Fandol 开源字体（随 MiKTeX/TeX Live 分发，可自动安装），
+% 不用系统默认字体（Windows 上是宋体/黑体等系统字体）。原因：本项目要多机部署
+% （config.py 里 PANDOC/XELATEX 路径注释已提到"部署到其他机器"），不锁字体的话
+% 换一台机器渲染出来的字宽、行高都会跟着系统字体变，PDF 效果不可控。
+\documentclass[11pt,fontset=fandol]{ctexart}
+$if(slides)$
+% Fandol 的 CJK 子集在 xdvipdfmx 产物里没有 /ToUnicode，PDFium 能画出来，
+% 但部分 Electron/PDF.js 阅读器会把中文渲染成空白。横版课件优先改用带完整
+% Unicode 映射的 Noto Sans SC；Windows 没装 Noto 时回落到系统自带的微软雅黑。
+% 两者都不存在时保留 ctex 已加载的 Fandol，至少不让导出直接失败。
+\IfFontExistsTF{Noto Sans SC}{%
+  \setCJKmainfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+  \setCJKsansfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+}{%
+  \IfFontExistsTF{Microsoft YaHei}{%
+    \setCJKmainfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
+    \setCJKsansfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
+  }{}%
+}
+% 罗马数字、圈号及部分 Unicode 数学符号默认会被 xeCJK 判给西文字体；Latin Modern
+% 不含这些字形，只报 Missing character 而继续出 PDF，结果是正文悄悄少字。明确归入
+% CJK 字符类，让**文本区**的这些字符走 Noto/微软雅黑；数学区另由 exporter 转成
+% 标准 LaTeX 命令，仍使用数学字体。
+\xeCJKDeclareCharClass{CJK}{
+  "03B1,"03B2,"03B3,"03B7,"03B8,"03BB,"03BE,"03C0,
+  "2032,"2160 -> "217F,"2208,"2220,"2260,"2295,"2299,
+  "2460 -> "2473,"25B3,"2A7D,"2A7E,"3001,"FF0E
+}
+$endif$
+$if(practice)$
+% 双栏 PDF 会直接交给 Codex、Obsidian 等 PDF.js 阅读器预览，不能沿用缺少
+% /ToUnicode 的 Fandol CJK 子集：它在系统阅读器里能画中文，但部分 PDF.js
+% 阅读器会显示为空白。字体选择与横版课件一致，优先使用带完整 Unicode 映射的
+% Noto Sans SC，Windows 未安装时回落到微软雅黑；两者都没有才保留 Fandol。
+\IfFontExistsTF{Noto Sans SC}{%
+  \setCJKmainfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+  \setCJKsansfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+}{%
+  \IfFontExistsTF{Microsoft YaHei}{%
+    \setCJKmainfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
+    \setCJKsansfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
+  }{}%
+}
+% 双栏刷题同样会遇到 OCR 留下的文本态希腊字母/罗马数字，也要先把这些字符
+% 判给中文字体；否则会落到 Latin Modern 并只警告后静默缺字。
+\xeCJKDeclareCharClass{CJK}{
+  "03B1,"03B2,"03B3,"03B7,"03B8,"03BB,"03BE,"03C0,
+  "2032,"2160 -> "217F,"2208,"2220,"2260,"2295,"2299,
+  "2460 -> "2473,"25B3,"2A7D,"2A7E,"3001,"FF0E
+}
+$endif$
 \usepackage{amsmath,amssymb,amsfonts}
+\usepackage{esint}      % \oiint 闭曲面积分（amssymb 不含）；此版本无 \oiiint，下面补
+% 该 TeX Live 的 esint 只给 \oiint，不含 \oiiint（闭合体三重积分）。
+% 本文件是 pandoc 模板，注释里也不能出现裸美元符号（会被当模板变量解析报错）。
+% 故用纯命令写法：在闭曲面积分符号左侧再叠一个积分号，视觉上即三重闭合积分。
+\providecommand{\oiiint}{\intop\!\!\!\oiint}
+% —— 分数保持「外显」，靠行距吸收高度（QuizForge 排版）——
+% 现象：导入管线给**每一条**行内公式都加了 \displaystyle（mechfix.add_displaystyle），
+% 分数因此是行间尺寸，一行里几个分数就把行距顶开，题干和选项看着松散。
+%
+% **别把分数改小来治这个。** 试过一版把 frac 家族重定义成 \genfrac{}{}{}1
+% （textstyle），确实不顶行了，但排出来的卷子不像卷子——真题的做法正相反：
+% 查了语料里 2018–2024 全国卷/新课标真题合集，2024 新课标 II 第 8 题选项
+% A. 1/8 B. 1/4 C. 1/2、2015 全国 II 文 12 选项 (1/3,1) 与 (-∞,-1/3)∪(1/3,+∞)、
+% 同页题干 1/(1+x^2) 和 <= 2/3，**全部是 display 尺寸的大分数**。真卷里
+% 题干与选项不分大小，也没有「选项用小分数」这一说。
+%
+% 真卷不显得挤，靠的是**行距**而不是小字号：选项行的行距明显宽于正文，
+% 分数撑开的高度被行距吸收掉。所以这里也照办——公式尺寸一律不动，
+% 只把选项行距（\settasks 的 after-item-skip，见下方 tasks 配置）放宽。
+%
+% 另两条路也别再试：去掉 \displaystyle 会把 \sum \int \lim 的上下限一起打回
+% 算符右侧（实测 KaTeX 的 op-limits 从 1 掉到 0），把该外显的也毁了；把 \dfrac
+% 改回 \frac 在 \displaystyle 作用域内**渲染完全一致**，可视输出逐字节相同，
+% 只差 MathML 注解里回存的原始 TeX 串，纯属无效改动。
+
 \usepackage{array,longtable,booktabs,calc}
 \usepackage{graphicx}   % 题目插图 \includegraphics（QuizForge 图片支持）
 \usepackage{wrapfig}    % 填空题左文右图（文字绕排图片，见 exporter._stage_images）
+\usepackage{multicol}   % 双栏刷题模板：顺序流排、栏间细分隔线
 % 图片默认不超过文本宽度，避免超宽图撑破版心（pandoc 标准写法）
 \makeatletter
 \def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
@@ -29,7 +105,7 @@
 % 宽<=3.6cm 且 高<=3cm（keepaspectratio 保证哪边先顶到就按哪边缩，绝不拉伸变形）。
 % exporter._stage_images 把 ![](file) 改写为 \qfig{file} 前的 md 图片引用，
 % 由 _q_md/_solution_md 用本宏包裹。缺定义则 fallback 到普通 includegraphics。
-% 参数：#1=图片文件名，#2=图下说明文字（如「第3题图」，空则不显示）。
+% 参数：#1=图片文件名，#2=用户手动填写的图下说明（空则不显示）。
 \newcommand{\qfig}[2]{%
   \par\nobreak\vspace{0.3em}%
   \noindent\hfill\begin{minipage}{3.6cm}%
@@ -49,49 +125,334 @@
     \ifx\relax#2\relax\else\par\vspace{0.2em}{\footnotesize #2}\fi%
   \end{wrapfigure}%
 }
-% \qfig 的别名：exporter._stage_images 统一把图引用改写成 \qfigmark 占位，
-% 待 _q_md 按题卡的对齐/宽度/分栏设置决定最终排版宏后再替换（见 exporter._extract_mark）。
-% 解析文本不做自定义排版，直接落回 \qfig 默认效果。
-\newcommand{\qfigmark}[2]{\qfig{#1}{#2}}
-% 用户自定义排版（对齐/宽度）的图片本体：仅负责按宽度占比缩放，左右对齐由
-% exporter 用 \hfill 在外层拼好（见 exporter._place_image）。
+% 双栏刷题的环绕图必须在本题结束前收口：短题干若尚未消耗完 wrapfig 预留行数，
+% 下一道大题标题会继续绕上一题的图，甚至与图重叠。按宏包记录的剩余行数一次算出
+% 应补高度，再调用公开的 \WFclear 恢复普通段落；不能逐行生成空段——图片多时会让
+% XeLaTeX 反复重算 parshape，显著拖慢导出。长题干已填满时补高为 0，不制造留白。
+% 该宏只由 exporter 的双栏环绕分支调用。
+\makeatletter
+\newcommand{\qwrapclear}{%
+  \par
+  \ifnum\c@WF@wrappedlines>\@ne
+    \@tempcnta=\c@WF@wrappedlines\advance\@tempcnta by -\@ne
+    \@tempdima=\baselineskip\multiply\@tempdima by \@tempcnta
+    \vspace*{\@tempdima}%
+  \fi
+  \WFclear
+}
+% 环绕题开头至少预留一张图的高度；剩余栏高不足时让 TeX 在题前断栏。wrapfigure
+% 本身是叠放盒，samepage 看不到它的真实高度，若不补这层提示，栏底短题可能把最后
+% 一个小问甩到下一栏顶部。写成伸缩胶 + penalty 的 needspace 经典形式，不引入宏包。
+\newcommand{\qwrapneed}[1]{%
+  \par\begingroup
+  \@tempdima=#1\relax
+  \vskip\z@\@plus\@tempdima
+  \penalty-100\vskip\z@\@plus-\@tempdima
+  \vskip\@tempdima
+  \penalty9999\vskip-\@tempdima
+  \vskip\z@skip
+  \endgroup
+}
+% 双栏刷题的大题按真实排版高度决定是否留在当前栏。环境先把“大题标题 + 题干 +
+% 公式/图片 + 作答区”排进 vbox；高度不超过当前页单栏容量时作为不可分盒放出，
+% multicol 会在当前栏余量不足时把整盒移到下一栏。极长题超过整栏时改用 \unvbox，
+% 允许 TeX 自然跨栏，避免把内容裁掉或制造 overfull。后续大题间的 \columnbreak 由
+% exporter 明确写入，因此每栏至多起始一道大题。
+\newbox\qpracticesolvebox
+\newdimen\qpracticesolveheight
+\newdimen\qpracticecolumnheight
+\newenvironment{qpracticesolve}{%
+  \par\penalty0
+  \setbox\qpracticesolvebox=\vbox\bgroup
+  \hsize=\linewidth
+  \linewidth=\hsize
+  \columnwidth=\hsize
+  \setlength{\parindent}{0pt}%
+}{%
+  \par\egroup
+  \qpracticesolveheight=\dimexpr\ht\qpracticesolvebox+\dp\qpracticesolvebox\relax
+  \ifdim\qpracticesolveheight>\qpracticecolumnheight
+    \unvbox\qpracticesolvebox
+  \else
+    \box\qpracticesolvebox
+  \fi
+  \par
+}
+\makeatother
+% 图片高度兜底上限。做成长度寄存器而不是写死在 \qfigflexbox 里，是为了让半页块
+% （exporter._HALF_OPEN）能在自己的 TeX group 内临时压低它：那里正文高度锁死
+% 0.5\textheight，按全页上限排的原位图会直接撑破版面。group 结束自动恢复，
+% 故只有半页块受影响，其它模式的图片尺寸与改动前逐字一致。
+\newlength{\qfigmaxh}
+\setlength{\qfigmaxh}{0.4\textheight}
+% 用户自定义排版的图片本体：仅负责按宽度占比缩放，左右对齐由 exporter 用
+% \hfill 在外层拼好（见 exporter._place_image），避免在 TeX 宏里做字符串比较分支。
+% 高度不设硬上限（keepaspectratio 保证不变形），但用 \qfigmaxh 兜底，
+% 避免超大原图把单页撑爆。
 % 参数：#1=宽度占比（0~1 小数，相对 \linewidth），#2=图片文件名，#3=图下说明文字。
 \newcommand{\qfigflexbox}[3]{%
   \begin{minipage}{#1\linewidth}%
-    \centering\includegraphics[width=\linewidth,height=0.4\textheight,keepaspectratio]{#2}%
+    \centering\includegraphics[width=\linewidth,height=\qfigmaxh,keepaspectratio]{#2}%
     \ifx\relax#3\relax\else\par\vspace{0.2em}{\footnotesize #3}\fi%
   \end{minipage}%
 }
+% 四图配选项（一个选项配一张图）的单格：选项标签在左、图片在右。
+% 不能用 tasks 环境排——\task 里放不了 \includegraphics，这是这套网格另写的唯一
+% 原因（见 exporter._pair_grid_latex）。列数与每格占比都在 Python 侧算好，
+% 这里只负责一格的排版，格间的 \hfill / 换行同样由 exporter 拼。
+% 外层和左右两个 minipage 都用 [t] 顶对齐，四张图高度不同也不会让 A-D 错落。
+% 参数：#1=本格宽度占比（0~1，相对 \linewidth），#2=选项标签+文字，
+%       #3=图片文件名，#4=图下说明文字。
+\newcommand{\qpairitem}[4]{%
+  \begin{minipage}[t]{#1\linewidth}%
+    \setlength{\parskip}{0pt}\vspace{0pt}%
+    \begin{minipage}[t]{1.8em}\vspace{0pt}\raggedright #2\end{minipage}\hfill%
+    \begin{minipage}[t]{\dimexpr\linewidth-2.2em\relax}\vspace{0pt}%
+      \centering\includegraphics[width=\linewidth,height=3.5cm,keepaspectratio]{#3}%
+      \ifx\relax#4\relax\else\par\vspace{0.2em}{\footnotesize #4}\fi%
+    \end{minipage}%
+  \end{minipage}%
+}
 \usepackage{geometry}
+$if(fragment)$
+% 讲义题卡确认后走正式模板局部编译。固定行宽与对应版面的有效栏宽相同，preview
+% 只裁掉页外空白；dvisvgm 再把字体转成路径，因此网页看到的是 XeLaTeX 本身。
+\geometry{paperwidth=$fragment_width$,paperheight=500mm,left=0pt,right=0pt,
+          top=0pt,bottom=0pt,headheight=0pt,headsep=0pt,footskip=0pt}
+\usepackage[active,tightpage]{preview}
+\setlength\PreviewBorder{0pt}
+$else$
+$if(slides)$
+% 13.333 × 7.5 英寸就是标准 16:9 幻灯片画布；保留窄边距给投屏留出呼吸感。
+\geometry{paperwidth=13.333in,paperheight=7.5in,left=1.35cm,right=1.35cm,
+          top=1.15cm,bottom=1.05cm,headheight=18pt,headsep=0.25cm,footskip=0.55cm}
+$else$
+$if(practice)$
+% 双栏刷题参照教辅册：A4 窄边距扩大有效栏宽，标题仍横跨整页；页眉页脚留在版心外。
+\geometry{a4paper,left=1.35cm,right=1.35cm,top=1.55cm,bottom=1.45cm,
+          headheight=15pt,headsep=0.25cm,footskip=0.6cm}
+$else$
 \geometry{a4paper, margin=2.5cm}
+$endif$
+$endif$
+$endif$
+\usepackage{xcolor}
+% 所有导出模式共用的可选米黄纸色。是否启用由导出面板的 paper_cream 模板变量
+% 决定；不传变量就是 PDF 默认纯白。只改整页底色，不叠渐变、纹理或装饰色块。
+\definecolor{qpapercream}{HTML}{FAF8F1}
 \usepackage{enumitem}
 % 选择题选项整齐分列（QuizForge：短4列/中2列/长1列，由 exporter._choice_tasks 决定列数）
 % 保留题目自带的 A./B./C./D. 标签，故关闭 tasks 自身编号（label 置空、宽度归零）。
 \usepackage{tasks}
+% after-item-skip 从 4pt 放宽到 8pt：选项里的分数是 display 尺寸（见文件开头那段），
+% 4pt 时相邻两行的分数几乎贴在一起。放宽行距而不是缩小分数，理由同上——真卷就是
+% 这么排的。plus/minus 的伸缩量一并放大，让 tasks 在换页时还有调整余地。
 \settasks{label={}, label-width=0pt, label-offset=0pt, item-indent=0pt,
-          after-item-skip=4pt plus 2pt minus 1pt}
+          after-item-skip=8pt plus 4pt minus 2pt}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{0.4em}
+% 双栏刷题正文环境。用 multicols* 而不是 multicols：末页不做左右等高平衡，严格
+% 按「左栏从上到下 → 右栏从上到下」填充。题间 parskip 清零，栏间保留细分隔线；
+% 选项内部仍留 3pt，避免大分式上下粘连。所有改动都在 group 内，不影响其它模板。
+\newcommand{\qpracticebegin}{%
+  \begingroup
+  \setlength{\columnsep}{0.75cm}%
+  \setlength{\columnseprule}{0.35pt}%
+  \setlength{\parskip}{0pt}%
+  \setlength{\qfigmaxh}{0.22\textheight}%
+  \settasks{label={}, label-width=0pt, label-offset=0pt, item-indent=0pt,
+            after-item-skip=3pt plus 2pt minus 1pt}%
+  \begin{multicols*}{2}\raggedcolumns
+  \global\qpracticecolumnheight=\csname @colroom\endcsname
+}
+\newcommand{\qpracticeend}{\end{multicols*}\endgroup}
+% 局部题卡编译需要双栏模式的字号、题间距与图片上限，但不能真的开启 multicol；
+% 行宽已由 fragment geometry 锁成单栏宽度。两者分开才能生成可嵌回分页画布的单卡。
+\newcommand{\qfragmentpracticebegin}{%
+  \begingroup
+  \setlength{\parskip}{0pt}%
+  \setlength{\qfigmaxh}{0.22\textheight}%
+  \settasks{label={}, label-width=0pt, label-offset=0pt, item-indent=0pt,
+            after-item-skip=3pt plus 2pt minus 1pt}%
+}
+\newcommand{\qfragmentpracticeend}{\endgroup}
+% 孤行寡行惩罚：此前只在 exam_std 卷头（exporter._std_head_latex）设置，
+% 其余模式（note/lecture/list/handout/exam 简单版）没有，题干被拆成「最后一行
+% 单独留在下一页」的情况没人管。挪到模板全局生效，exam_std 那处重复设置无害
+% （赋同样的值），也不必删。
+\clubpenalty=10000
+\widowpenalty=10000
 
 % —— 题号独占一列 + 悬挂缩进（QuizForge 排版）——
-% \qopen{num.} 开一层 list，\item 标签即题号（题号列宽 \qnumindent），题目正文作为
-% 该 item 的段落内容，换行后缩进对齐正文起点而非题号；\qclose 收尾。
-% 与多用户版 quizbank-web/exam_template.tex 的同名宏保持一致（该版另有 \qsubopen
-% 小问列，本版无 _render_subquestions，故不需要）。
+% 题目：\qopen{num.} 开一层 list，\item 标签即题号（题号列宽 \qnumindent），
+% 正文换行后缩进对齐正文起点而非题号，\qclose 收尾。
+% 解答题小问：\qsubopen{marker} 开一层子 list（列宽 \qsubindent），后续小问一律
+% 用 \qsubitem{marker} 续 \item，\qsubclose 收尾。（1）与（i）共用这一列——
+% 2026-07 起不再为（i）嵌第二层，避免三级题号把正文推得过于靠右。
 \newlength{\qnumindent}\setlength{\qnumindent}{1.3em}
-\newcommand{\qopen}[1]{\begin{list}{}{%
+\newlength{\qsubindent}\setlength{\qsubindent}{1.5em}
+% 题号列表前留一小段不可断的余量：连续排版（清单/标准试卷）时，避免题干起头
+% 恰好落在页底、小问全被推到下一页，出现「孤零零一行题号」的孤行。
+% 不用 needspace 宏包（会多一个依赖），\penalty 加 \vskip 的组合足够：余量不足
+% 3 行时这里就是本页最后一个合法断点，TeX 会主动在此换页。
+\newcommand{\qopen}[1]{\par\penalty-100\vskip 0pt\penalty 10000\relax
+\begin{list}{}{%
   \leftmargin=\qnumindent\itemindent=0pt\labelsep=0.4em\labelwidth=\qnumindent%
   \itemsep=0pt\parsep=0.4em\topsep=0pt\partopsep=0pt}%
 \item[\textbf{#1}]}
 \newcommand{\qclose}{\end{list}}
+% 小问列表开头禁止断页：断在这里就等于题干独自留在上一页页底（孤行）。
+% 列表内部各小问之间仍可断——长题跨页是允许的，只是不能从第一小问前断开。
+\newcommand{\qsubopen}[1]{\par\nobreak\begin{list}{}{%
+  \leftmargin=\qsubindent\itemindent=0pt\labelsep=0.3em\labelwidth=\qsubindent%
+  \itemsep=0.3em\parsep=0.3em\topsep=0.3em\partopsep=0pt}%
+\item[#1]}
+\newcommand{\qsubitem}[1]{\item[#1]}
+\newcommand{\qsubclose}{\end{list}}
+
+% —— 自适应槽位（QuizForge 分页：1/4 页、半页、整页）——
+% 把一题排进固定高度的槽位，内容超出目标槽位时**自动升级**到更大的槽位
+% （1/4 → 半页 → 整页），超过整页则裸排、不截断内容。
+%
+% 为什么必须在 TeX 侧做：Python 侧（exporter.paginate）拿不到真实排版高度——
+% 公式尺寸、图片、选项列数都影响高度，靠字数估算必然错判。这里先把内容排进
+% lrbox 量出实际高度（\ht+\dp），再决定套多大的槽位。
+%
+% 断页判定也在这里：槽位高度超过本页余量就 \clearpage。所以「填空题结束后余量
+% 够就放一道解答题、不够就另起一页顶头」不需要 Python 预先算页——那同样是算不准的。
+\newsavebox{\qslotbox}
+\newlength{\qslotnat}
+\newlength{\qslotgoal}
+\newlength{\qslotfree}
+\newlength{\qslotunit}
+\newlength{\qslotused}
+\newcommand{\qslotfrac}{1}
+% 本页剩余高度。空页时 \pagegoal 仍是 \maxdimen（还没有 box 触发 output 例程），
+% 此时余量就是整个版心；直接相减会得到荒谬的负值，故必须分支。
+\newcommand{\qslotmeasurefree}{%
+  \ifdim\pagegoal=\maxdimen
+    \setlength{\qslotfree}{\textheight}%
+  \else
+    \setlength{\qslotfree}{\dimexpr\pagegoal-\pagetotal\relax}%
+  \fi
+}
+% 两类规则的基准高度不同，用 \ifqslotpagerel 切换（exporter 按 mode 决定）：
+%
+% ① 相对模式（讲义/讲解/笔记：「一页四题」「一页两题」）——基准取**本页真实可用
+%    高度**。不能直接用 \textheight：首页有标题块，余量小于版心，按 \textheight 切
+%    四个 1/4 槽必然溢出、只放得下三题，「一页四题」就废了。
+% ② 绝对模式（简单试卷：「每道解答题占半页纸」）——基准恒为 \textheight。这里的
+%    「半页」是半张纸的**作答空间**，不能因为本页余量小就等比压缩，否则学生写不下；
+%    余量不够就整题挪到下一页顶头（正是用户要的「另起一页顶头放下一道」）。
+\newif\ifqslotpagerel
+\qslotpagerelfalse
+\newcommand{\qslotpageunit}{%
+  \qslotmeasurefree
+  \ifqslotpagerel
+    \ifdim\pagegoal=\maxdimen
+      \setlength{\qslotunit}{\textheight}%
+      \setlength{\qslotused}{0pt}%
+    \else
+      \ifdim\qslotunit=0pt
+        \setlength{\qslotunit}{\qslotfree}%
+        \setlength{\qslotused}{0pt}%
+      \fi
+    \fi
+  \else
+    \setlength{\qslotunit}{\textheight}%
+    \setlength{\qslotused}{\dimexpr\qslotunit-\qslotfree\relax}%
+  \fi
+}
+% 目标槽位高度 = 比例 × 本页基准；量出的自然高度超了就逐级升级（1/4 → 半 → 整）。
+\newcommand{\qslotsetgoal}{%
+  \setlength{\qslotgoal}{\qslotfrac\qslotunit}%
+  \ifdim\qslotnat>\qslotgoal
+    \ifdim\qslotnat>0.5\qslotunit
+      \setlength{\qslotgoal}{\qslotunit}%
+    \else
+      \setlength{\qslotgoal}{0.5\qslotunit}%
+    \fi
+  \fi
+}
+% #1 = 目标槽位占本页可用高度的比例（0.25 / 0.5 / 1）
+\newcommand{\qslotopen}[1]{%
+  \edef\qslotfrac{#1}%
+  \begin{lrbox}{\qslotbox}%
+  \begin{minipage}[t]{\linewidth}%
+  \setlength{\parskip}{0.4em}%
+}
+% \vss 吸收槽内底部余白，内容顶对齐；\nointerlineskip 防止基线间距把两个
+% 半页槽的高度之和顶过 \textheight（那会把第二题挤到下一页）。
+\newcommand{\qslotemit}[1]{%
+  \par\nointerlineskip
+  \vbox to #1{\vskip0pt\noindent\usebox{\qslotbox}\vss}%
+  \par\nobreak
+}
+\newcommand{\qslotclose}{%
+  \end{minipage}%
+  \end{lrbox}%
+  \setlength{\qslotnat}{\dimexpr\ht\qslotbox+\dp\qslotbox\relax}%
+  \qslotpageunit
+  \qslotsetgoal
+  \ifdim\qslotnat>\qslotunit
+    % 连整页都装不下：原样放出，让 TeX 自行跨页断开（不套 \vbox，否则 overfull）。
+    % 排完强制换页——这种超长题按规则独占版面，下一题必须另起一页。
+    \ifdim\qslotused>0pt \clearpage \fi
+    \par\noindent\usebox{\qslotbox}\par
+    \clearpage
+    \setlength{\qslotunit}{\textheight}%
+    \setlength{\qslotused}{0pt}%
+  \else
+    % 本页放不下这个槽位就换页，换页后基准与累计量重置、目标高度按新基准重算
+    \ifdim\dimexpr\qslotused+\qslotgoal\relax>\qslotunit
+      \clearpage
+      \setlength{\qslotunit}{\textheight}%
+      \setlength{\qslotused}{0pt}%
+      \qslotsetgoal
+    \fi
+    \qslotemit{\qslotgoal}%
+    \addtolength{\qslotused}{\qslotgoal}%
+  \fi
+}
 
 % pandoc 紧凑列表支持
 \providecommand{\tightlist}{\setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+% Markdown 标题含数学公式时，pandoc 会自动生成 \texorpdfstring{排版文本}{书签文本}。
+% 本模板没有加载 hyperref（PDF 也不需要目录书签），因此只保留第一个参数即可；
+% 缺少这条时横版课件遇到「## 数学公式 + 标题」会在该题处报 Undefined control sequence。
+\providecommand{\texorpdfstring}[2]{#1}
 
 % pandoc longtable 兼容（旧版 pandoc 使用 \LTcaptype{none}）
 \newcounter{none}
 
 % —— 页眉页脚（DIY 6 位置）——
+% 标准试卷「注意事项」黑框（exporter._std_head_latex 用）。
+% 直角边框、细线、无底色，仿国标考卷；不用 tcolorbox 是为了不引入重依赖
+% （tcolorbox 会拉进 tikz/pgf，编译时间和依赖面都涨），framed 的 \MakeFramed
+% 也不必要——这里只要一个撑满版心宽的细边框，fbox + minipage 就够。
+% 参数：#1 = 框内内容。
+\newcommand{\qnotebox}[1]{%
+  \par\noindent\fbox{%
+    \begin{minipage}{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}%
+      \setlength{\parskip}{0.2em}#1%
+    \end{minipage}%
+  }\par
+}
+% 横版课件专用封面和页标题。宏常驻模板，但只有 exporter 传 slides 变量时会调用；
+% 保持纯文字层级，不加品牌字样、色块、边框或装饰线，让页面适合安静看题。
+\newcommand{\qslidecover}[1]{%
+  \thispagestyle{empty}%
+  \vspace*{\fill}%
+  \begin{center}%
+    \begin{minipage}{0.86\linewidth}\centering
+      {\fontsize{30pt}{38pt}\selectfont\bfseries #1\par}%
+    \end{minipage}\par
+  \end{center}%
+  \vspace*{\fill}%
+}
+\newcommand{\qslidehead}[1]{%
+  \noindent{\bfseries\Large #1}\par\vspace{0.9em}%
+}
 \usepackage{fancyhdr}
 \usepackage{lastpage}   % \pageref{LastPage} = 总页数
 \pagestyle{fancy}
@@ -105,16 +466,54 @@ $if(hf_fl)$\fancyfoot[L]{$hf_fl$}$endif$
 $if(hf_fc)$\fancyfoot[C]{$hf_fc$}$endif$
 $if(hf_fr)$\fancyfoot[R]{$hf_fr$}$endif$
 
+$if(wimath_logo)$
+% 品牌标志使用正式矢量 PDF，不重绘、不变形。A4 放左上安全区，横版课件放左下；
+% AddToShipoutPictureFG 无星号，故正文每一页与横版每一帧都会一致出现。
+\usepackage{eso-pic}
+$if(slides)$
+\AddToShipoutPictureFG{%
+  \AtPageLowerLeft{\raisebox{0.25cm}[0pt][0pt]{%
+    \hspace*{0.55cm}\includegraphics[width=2.3cm,keepaspectratio]{$wimath_logo$}}}%
+}
+$else$
+\AddToShipoutPictureFG{%
+  \AtPageUpperLeft{\raisebox{-1.25cm}[0pt][0pt]{%
+    \hspace*{0.8cm}\includegraphics[width=2.4cm,keepaspectratio]{$wimath_logo$}}}%
+}
+$endif$
+$endif$
+
 $if(title)$\title{$title$}$endif$
 $if(author)$\author{$author$}$endif$
 $if(date)$\date{$date$}$endif$
 
 \begin{document}
+$if(slides)$
+% 横版题卡与最终课件必须共用字号和段距；放在 fragment 分支之前，避免局部编译
+% 回退到文档类默认的 11pt，导致编辑画布与导出 PDF 再次出现明显高度差。
+\fontsize{15pt}{22pt}\selectfont
+\setlength{\parskip}{0.7em}
+% 横版页面更矮，旧的 0.4\textheight 会让方图/竖图先碰高度上限，题卡把宽度从
+% 35% 调到 70% 时图片本体几乎不变。提高横版专属上限后，宽度重新成为主要缩放量；
+% 极端竖图仍由 0.62\textheight 兜底，不会撑出页面。
+\setlength{\qfigmaxh}{0.62\textheight}
+$endif$
+$if(fragment)$
+\begin{preview}
+% 零高横向标尺把裁切宽度锁在 \linewidth，避免短题因字少而被 SVG 二次放大。
+\noindent\rule{\linewidth}{0pt}\par
+$body$
+\end{preview}
+$else$
+$if(paper_cream)$
+\pagecolor{qpapercream}
+$endif$
 $if(title)$
 \maketitle
 \thispagestyle{fancy}   % 覆盖 \maketitle 默认的 plain，首页也用 DIY 页眉页脚
 $endif$
 
 $body$
+$endif$
 
 \end{document}

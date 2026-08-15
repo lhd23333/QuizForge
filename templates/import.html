@@ -1,123 +1,215 @@
 {% extends "base.html" %}
 {% block title %}批量导入 · QuizForge{% endblock %}
 {% block content %}
-<h2>批量导入</h2>
-<p class="muted">两种方式：① 上传 PDF/图片自动转换（转换后直接进入题目对照校对）；② 直接粘贴规范化 md。</p>
+<section class="app-page import-page">
+<header class="app-page-head">
+  <div>
+    <h1>批量导入</h1>
+    <p>批量试卷转换、Markdown 校对与规范化文本导入，都在当前题库内完成。</p>
+  </div>
+</header>
 
 {% if preview is none %}
+<p class="muted desktop-only">所有上传框都支持<strong>拖拽文件</strong>；题干 / 解析框还支持<strong>直接 Ctrl+V 粘贴截图</strong>。</p>
+<p class="muted mobile-only">点击上传框即可<strong>拍照</strong>或<strong>从相册 / 文件选择</strong>。</p>
+
 <div class="import-tabs">
-  <!-- 方式一：上传文件转换 -->
+  {# 方式一：批量试卷转换。置顶，因为它是主路径——一次能配多组，单份也只是「只
+     加一组」的特例。原先还有一个「单份 PDF/图片」的入口，走的是同一条
+     /convert/start 链路，只是一次只能传一份、却要单独维护一套 #conv-* 与
+     #picknum-* 控件；已删掉（线上版同样只有批量这一条入口）。后端
+     /convert/start 与 /convert/status 保留不动：方式一每组仍是一个 job，
+     「重新转换」也还在用同一套 _jobs 结构。 #}
   <section class="import-box">
-    <h3>方式一：上传 PDF / 图片</h3>
-    <p class="muted">经 MinerU + DeepSeek 转换（数十秒~几分钟），完成后自动进入「原文件 ↔ 题目」对照校对。</p>
-    <div class="conv-row">
-      <span class="conv-label">题干文件</span>
-      <input type="file" id="conv-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp">
-    </div>
-    <div class="conv-row">
-      <span class="conv-label">解析文件</span>
-      <input type="file" id="conv-solution-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp">
-      <span class="muted">可选。单独的答案/解析文件，会按题号自动关联到各题。</span>
-    </div>
-    <label class="conv-sol"><input type="checkbox" id="conv-solution"> 同时识别解析（较慢；若已选解析文件则自动开启）</label>
+    <h3>方式一：批量试卷转换（PDF / Word / 图片）</h3>
+    <p class="muted">每个任务对应<strong>一份试卷</strong>：题干区放 PDF、Word 或图片（多张图按顺序合成一份），
+      解析区可选放对应答案。单批最多 <strong>{{ upload_limits.max_groups }}</strong> 组，
+      转换在后台<strong>并发</strong>进行（同时最多 {{ batch_concurrency }} 组，其余排队），
+      转好一组即可<strong>进校对页人工审核入库</strong>；
+      勾了下面的「不审核直接入库」则转完即自动落库。
+      可随时离开，从导航栏「转换任务」回来。</p>
+    <p class="muted">「从文件夹导入」会递归扫整个目录：<strong>PDF、Word（.docx）与图片都收</strong>；
+      同一子目录下的图片按页码自然序合成一份卷子，文件名带「答案 / 解析」字样的自动配到解析区。
+      旧版 .doc 请先另存为 .docx。一本 PDF 中含多套试卷时，在对应任务卡勾选“多份试卷合集”。</p>
 
-    <!-- 只导入指定题号（压轴题过滤）：点圈选中=要导入的题，不选=丢弃 -->
-    <div class="picknum">
-      <label class="conv-sol">
-        <input type="checkbox" id="picknum-on"> 只导入指定题号（其余整题丢弃，省时省额度）
-      </label>
-      <div id="picknum-panel" class="picknum-panel" style="display:none">
-        <div class="picknum-presets">
-          <span class="muted">预设：</span>
-          <button type="button" class="btn btn-ghost btn-sm" data-preset="8,11,14,18,19">压轴题 8·11·14·18·19</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-preset-drop="1-6,9,15,16">舍弃基础题 1-6·9·15-16</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="picknum-clear">全不选</button>
-          <span class="muted picknum-range">题号范围
-            <input type="number" id="picknum-max" value="25" min="1" max="99" style="width:3.2em">
-          </span>
-        </div>
-        <div id="picknum-circles" class="picknum-circles"></div>
-        <p class="muted">已选：<span id="picknum-summary">无</span></p>
-      </div>
-    </div>
+    {# 上传边界由后端 config 注入（见 app._upload_limits）：JS 提交前要按这些数
+       早报错，但数只该有一份定义——前端自己抄一份常量必然出现「改了后端忘了改
+       前端」的分叉（组数就这么从 20 落后到 500 的）。 #}
+    <div id="task-list" data-limits='{{ upload_limits | tojson }}'><!-- 任务卡由 JS 动态生成 --></div>
 
-    <label class="conv-sol">识别方式
-      <select id="conv-engine" class="input" style="width:auto;margin-left:6px">
-        <option value="whole" selected>整篇识别（默认）</option>
-        <option value="block">逐题识别（先按题号切块，再逐块判定，题目更不易漏）</option>
+    <label class="conv-sol" style="display:block;margin:8px 0">PDF 解析服务（整批统一）
+      <select id="batch-ocr-backend" class="input" style="width:auto;margin-left:6px">
+        <option value="mineru" selected>MinerU（原链路，可多账号轮转）</option>
+        <option value="doc2x">Doc2X v3（结构和公式保真更好）</option>
       </select>
+      <span class="muted">凭证在“设置”页配置。</span>
     </label>
 
-    <button type="button" class="btn" id="conv-btn">开始转换</button>
-    <span id="conv-status" class="muted"></span>
-  </section>
-
-  <!-- 方式二：批量上传 md 文件，逐个校对导入 -->
-  <form method="post" action="{{ url_for('import_batch_start') }}"
-        enctype="multipart/form-data" class="import-box">
-    <h3>方式二：批量上传 md 文件</h3>
-    <p class="muted">选择多个已规范化的 <code>.md</code> 文件，逐个进入校对页导入（每个文件名默认作整批标签）。</p>
-    <div class="conv-row">
-      <span class="conv-label">md 文件</span>
-      <input type="file" name="md_files" accept=".md,.markdown,.txt" multiple required>
-      <span class="muted">可多选。</span>
-    </div>
-    <button type="submit" class="btn btn-primary">开始逐个校对</button>
-  </form>
-
-  <!-- 方式三：直接贴 md -->
-  <form method="post" class="import-box">
-    <h3>方式三：粘贴规范化 Markdown</h3>
-    <div class="field">
-      <textarea name="md" rows="12" class="input"
-                placeholder="- 第一题...&#10;&#10;- 第二题...">{{ raw or '' }}</textarea>
-    </div>
-    <button type="submit" name="action" value="preview" class="btn btn-primary">切分预览</button>
-  </form>
-
-  <!-- 方式四：多组 PDF 批量导入 -->
-  <section class="import-box">
-    <h3>方式四：多组 PDF 批量导入</h3>
-    <p class="muted">一次配置多组任务，每组独立设题干/解析文件与选项，串行转换后<strong>逐组进校对页人工审核入库</strong>（不自动入库）。</p>
-
-    <div id="batch-groups"><!-- 任务组由 JS 动态生成 --></div>
-
-    <label class="conv-sol" style="display:block;margin:8px 0">识别方式（整批统一）
+    {# 默认项必须与 app.py 的 _DEFAULT_ENGINE 一致（现在是 block），也与线上版
+       templates/import.html 的 #engine-select 一致：只有逐块路径会跑
+       mechfix.normalize_block，那是唯一收敛连续空行的地方，默认值一分叉，同一份
+       卷子在两版里的产物就不一样（解答题小问之间空三行 vs 不空）。 #}
+    <label class="conv-sol" style="display:block;margin:8px 0">拆题方式（整批统一）
       <select id="batch-engine" class="input" style="width:auto;margin-left:6px">
-        <option value="whole" selected>整篇识别（默认）</option>
-        <option value="block">逐题识别（先按题号切块，再逐块判定，题目更不易漏）</option>
+        <option value="block" selected>逐题识别（默认，先按题号切块再逐块判定，题目更不易漏）</option>
+        <option value="whole">整篇识别（把全文一次交给 AI，题号写法特别古怪时可试）</option>
       </select>
     </label>
+    {# 初始 display 跟着上面的默认项走（默认逐题识别，所以是显示）：写死 none 的话，
+       defer 的 import-upload.js 执行前会先闪一下再弹出来。 #}
+    <div id="batch-block-mode-wrap" style="margin:8px 0">
+      <label class="conv-sol">拆题处理方式
+        <select id="batch-block-mode" class="input" style="width:auto;margin-left:6px">
+          <option value="all_ai">切块后直接送 AI</option>
+          {# 勾了下面的「不审核直接入库」时这一项会被 JS 禁掉：免审就是要求全自动，
+             停下来等人自相矛盾，后端也会把它否决成 all_ai。 #}
+          <option value="manual">切块后暂停，先人工审核拆题结果</option>
+          <option value="no_ai" selected>全部不送入 AI，机械渲染（默认，不花额度）</option>
+        </select>
+      </label>
+      <label class="conv-sol">题号模板（可选）
+        <input type="text" id="batch-num-template" class="input"
+               style="width:200px;margin-left:6px" placeholder="留空=自动判定，如 第X题">
+        <span class="muted">用 x 或 X 代表题号数字（如 <code>x.</code>、<code>第X题</code>）。</span>
+      </label>
+    </div>
+
+    {# 落点与免审开关（整批统一）。子选项按层级缩进并跟着上一级显隐，
+       后端也按同样的层级收（没勾上一级的直接按 False 算）。 #}
+    <div class="batch-opts">
+      <label class="dz-opt" title="年份文件夹会创建在这里；留空表示题库根目录">
+        目标父文件夹
+        <input type="hidden" id="batch-target-parent" value="">
+        <button type="button" class="btn btn-ghost batch-folder-pick"
+                id="batch-target-parent-open">题库根目录</button>
+      </label>
+      <label class="dz-opt" title="把这一整批的所有题目都打包进同一个文件夹">
+        <input type="checkbox" id="batch-pack-cb"> 该批全部放入同一文件夹
+        <input type="text" id="batch-folder-name" class="input"
+               placeholder="文件夹名" style="width:180px;margin-left:6px;display:none">
+      </label>
+      <label class="dz-opt" title="转换成功后不经人工审核，直接按默认值导入题库">
+        <input type="checkbox" id="batch-auto-import-cb"> 不审核直接入库
+      </label>
+      <label class="dz-opt" id="batch-per-task-folder-wrap" style="display:none;margin-left:20px">
+        <input type="checkbox" id="batch-per-task-folder-cb"> 每个任务各自放一个文件夹（以文件名命名）
+      </label>
+      {# 原卷得摊在某个文件夹里才认得出属于哪份卷子，所以挂在上一条下面：
+         只有「每任务一个文件夹」时才有合适的落点。 #}
+      <label class="dz-opt" id="batch-keep-original-wrap" style="display:none;margin-left:40px"
+             title="把上传的 PDF/图片原件一并存进该任务的文件夹，在 Obsidian 里可直接点开">
+        {# 默认勾上：与校对页那个同名选项口径一致（见 _import_preview.html 的
+           keep-original-cb）——想留原卷的人几乎总是想留，而这一层只有在上面两级
+           都勾了的时候才露出来，露出来时它就该是开的。 #}
+        <input type="checkbox" id="batch-keep-original-cb" checked> 一并保存原卷到该文件夹
+      </label>
+    </div>
 
     <div class="batch-actions">
-      <button type="button" class="btn" id="batch-add">+ 添加任务组</button>
+      <button type="button" class="btn" id="add-task">+ 添加任务组</button>
+      <button type="button" class="btn" id="import-folder">从文件夹导入并自动配对</button>
+      {# webkitdirectory 会连整棵子树一起给过来，PDF / Word / 图片都收（图片按所在
+         子目录归组，见 import-upload.js 的 folderKey）。这个 input 不写 accept：
+         目录选择模式下浏览器不按 accept 过滤，真正的筛选在 JS 里做。 #}
+      <input type="file" id="folder-input" webkitdirectory multiple hidden>
       <button type="button" class="btn btn-primary" id="batch-start">开始批量转换</button>
+      <label class="conv-sol"><input type="checkbox" id="batch-stay"> 提交后留在本页（接着排下一批）</label>
     </div>
-    <span id="batch-status" class="muted"></span>
+    <span id="batch-status" class="dz-status muted"></span>
   </section>
+
+  <dialog class="batch-folder-dialog" id="batch-target-parent-dialog">
+    <div class="batch-folder-dialog-head">
+      <strong>选择目标父文件夹</strong>
+      <button type="button" class="icon-btn" data-batch-folder-close
+              aria-label="关闭" title="关闭">×</button>
+    </div>
+    <p class="muted">目录按需展开，不会在打开批量导入时扫描整棵题库。</p>
+    <div class="batch-folder-tree" id="batch-target-parent-tree" role="tree">
+      <button type="button" class="batch-folder-row is-root is-selected"
+              data-folder-id="" data-folder-name="题库根目录">
+        <span class="batch-folder-twist" aria-hidden="true">›</span>
+        <span class="batch-folder-icon" aria-hidden="true">▰</span>
+        <span>题库根目录</span>
+      </button>
+      <div class="batch-folder-children" data-folder-children="" hidden></div>
+    </div>
+    <div class="batch-folder-dialog-actions">
+      <span class="muted" id="batch-target-parent-current">当前：题库根目录</span>
+      <button type="button" class="btn btn-primary" id="batch-target-parent-confirm">选择</button>
+    </div>
+  </dialog>
+
+  <!-- 方式二 + 方式三：md 文件与粘贴，并排一行（都不经 AI，摆在批量转换之后） -->
+  <div class="upload-grid">
+    <section class="import-box">
+      <h3>方式二：批量上传 md 文件</h3>
+      <p class="muted">多个已规范化的 <code>.md</code> 文件，逐个进校对页导入（文件名默认作整批标签）。</p>
+      <div class="dropzone" id="dz-md" tabindex="0">
+        <div class="dz-hint desktop-only">把 .md / .markdown / .txt 拖到此处，或点击选择（可多选）</div>
+        <div class="dz-hint mobile-only">点击选择 .md 文件（可多选）</div>
+        <input type="file" accept=".md,.markdown,.txt" multiple hidden>
+        <ul class="dz-files"></ul>
+      </div>
+      <button type="button" class="btn btn-primary" id="md-submit">开始逐个校对</button>
+      <span id="md-status" class="dz-status muted"></span>
+    </section>
+
+    <!-- 方式三：直接贴 md -->
+    <form method="post" class="import-box">
+      <h3>方式三：粘贴规范化 Markdown</h3>
+      <div class="field">
+        <textarea name="md" id="paste-md" rows="10" class="input"
+                  placeholder="- 第一题...&#10;&#10;- 第二题...（也可以把 .md 文件直接拖进这个框）">{{ raw or '' }}</textarea>
+      </div>
+      {# 整批标签：另外两条路都有文件名可以当默认标签，粘贴这条没有，不在这里
+         填的话校对页那个框就是空的。名字沿用服务器版的 tags_prefill。 #}
+      <div class="field">
+        <label>整批标签（逗号分隔，可选）</label>
+        <input type="text" name="tags_prefill" class="input" placeholder="应用于本批所有题">
+      </div>
+      <button type="submit" name="action" value="preview" class="btn btn-primary">切分预览</button>
+    </form>
+  </div>
 </div>
 
-<!-- 任务组模板：JS clone 后填入 #batch-groups -->
-<template id="batch-group-tpl">
-  <div class="batch-group card">
-    <div class="card-head">
-      <strong class="bg-title">任务组</strong>
-      <div class="spacer"></div>
-      <button type="button" class="link link-danger bg-remove">移除此组</button>
+<!-- 任务卡模板：JS clone 后填入 #task-list。每组一套独立的 picknum 状态。 -->
+<template id="task-card-tpl">
+  <div class="task-card">
+    <div class="task-head">
+      <b class="task-title">任务组</b>
+      <button type="button" class="btn btn-sm task-del">删除</button>
     </div>
-    <div class="conv-row">
-      <span class="conv-label">题干文件</span>
-      <input type="file" class="bg-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp" multiple>
-      <span class="muted">可多选图片：一份卷子拍成多张照片时按选择顺序合成一份转换。</span>
+    <div class="task-zones">
+      <div class="task-zone">
+        <div class="task-zone-label">题干（PDF / Word / 图片，多张图按顺序合成一份）</div>
+        <div class="dropzone dz-stem" tabindex="0">
+          <div class="dz-hint desktop-only">拖拽、点击选择，或 Ctrl+V 粘贴截图</div>
+          <div class="dz-hint mobile-only">点击选择文件（可多选）</div>
+          {# accept 仍列出 .doc：把它从选择器里藏掉的话，用户只会以为「我的文件不
+             见了」；收下来再由前端 checkFile 报「请另存为 .docx」更好懂。 #}
+          <input type="file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.bmp,.webp" multiple hidden>
+          <ul class="dz-files"></ul>
+        </div>
+      </div>
+      <div class="task-zone">
+        <div class="task-zone-label">解析（可选，含答案的 PDF / Word / 图片）</div>
+        <div class="dropzone dz-sol" tabindex="0">
+          <div class="dz-hint desktop-only">可留空；拖拽 / 粘贴对应答案</div>
+          <div class="dz-hint mobile-only">可留空；点击选择答案文件</div>
+          <input type="file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.bmp,.webp" multiple hidden>
+          <ul class="dz-files"></ul>
+        </div>
+      </div>
     </div>
-    <div class="conv-row">
-      <span class="conv-label">解析文件</span>
-      <input type="file" class="bg-sol-file" accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp" multiple>
-      <span class="muted">可选，可多选图片，按题号自动关联。</span>
-    </div>
-    <label class="conv-sol"><input type="checkbox" class="bg-include-sol"> 同时识别解析（较慢；若已选解析文件则自动开启）</label>
+    <label class="dz-opt"><input type="checkbox" class="task-include-sol"> 同时识别解析（较慢；放了解析文件时自动开启）</label>
+    <label class="dz-opt" title="题干和解析各放一份 PDF；有书签时优先按书签拆分，无书签时整本识别后按中文序号标题与从 1 开始的连续题号分组">
+      <input type="checkbox" class="task-collection-mode">
+      多份试卷合集：按书签或内容结构自动分组并配对
+      <span class="muted">（每侧限一份 PDF；无书签时整本各识别一次，再按标题+题号展开任务）</span>
+    </label>
     <div class="picknum">
-      <label class="conv-sol"><input type="checkbox" class="bg-picknum-on"> 只导入指定题号（其余整题丢弃）</label>
+      <label class="dz-opt"><input type="checkbox" class="bg-picknum-on"> 只导入指定题号（其余整题丢弃）</label>
       <div class="bg-picknum-panel picknum-panel" style="display:none">
         <div class="picknum-presets">
           <span class="muted">预设：</span>
@@ -135,301 +227,42 @@
   </div>
 </template>
 
-<!-- 自动提交用的隐藏表单：转换完成后填入并提交，直接进 preview -->
-<form method="post" id="auto-preview-form" style="display:none">
-  <input type="hidden" name="action" value="preview">
-  <input type="hidden" name="md" id="ap-md">
-  <input type="hidden" name="job_id" id="ap-job">
-  <input type="hidden" name="batch_tag" id="ap-tag">
-</form>
+{# 原先这里有个隐藏表单 #auto-preview-form（单份上传转换完成后自动填 md/job_id
+   再 submit，直接跳 preview）。单份入口删了，批量那条路是「转好一组→看板→点进
+   该组校对页」（batch_group_review 自己 render preview），不需要前端代提交，
+   所以这个表单连同 #ap-md / #ap-job / #ap-tag 一起去掉。 #}
 {% endif %}
 
 {% include "_import_preview.html" %}
+</section>
 {% endblock %}
 
 {% block scripts %}
+{# 非预览态的全部上传交互（拖放灰框、方式一~三）都在这个模块里。预览态不引入：
+   那时页面上一个上传控件都没有，脚本里每个 getElementById 都会拿到 null。 #}
+{% if preview is none %}
+<script src="{{ static_v('js/import-upload.js') }}" defer></script>
+{% else %}
+<script src="{{ static_v('js/import-preview-images.js') }}" defer></script>
+{% endif %}
 <script>
-// ── 方式一：上传 → 后台转换 → 轮询 → 自动进入 preview 对照页 ──
-const convBtn = document.getElementById('conv-btn');
-if (convBtn) {
-  convBtn.addEventListener('click', async () => {
-    const fileInput = document.getElementById('conv-file');
-    if (!fileInput.files.length) { alert('请先选择文件'); return; }
-    const statusEl = document.getElementById('conv-status');
-    const solInput = document.getElementById('conv-solution-file');
-    const hasSolFile = solInput && solInput.files.length > 0;
-    const fd = new FormData();
-    fd.append('file', fileInput.files[0]);
-    // 选了解析文件 → 走双文件路径；或勾了「同时识别解析」→ 单文件带解析
-    if (hasSolFile) {
-      fd.append('solution_file', solInput.files[0]);
-      fd.append('include_solution', '1');
-    } else if (document.getElementById('conv-solution').checked) {
-      fd.append('include_solution', '1');
-    }
-    // 只导入指定题号：开关打开且选了题才带上
-    if (document.getElementById('picknum-on').checked) {
-      const picked = window._pickedNumbers ? window._pickedNumbers() : '';
-      if (!picked) { alert('已开启「只导入指定题号」但未选任何题号'); convBtn.disabled = false; return; }
-      fd.append('only_numbers', picked);
-    }
-    // 识别方式（后端 _parse_engine 只认 'block'，其余落回整篇识别）
-    const engSel = document.getElementById('conv-engine');
-    if (engSel) fd.append('engine', engSel.value);
-    convBtn.disabled = true;
-    statusEl.textContent = hasSolFile ? '上传中…（题干+解析两份，稍慢）' : '上传中…';
-    try {
-      const res = await fetch('/convert/start', {method: 'POST', body: fd});
-      const data = await res.json();
-      if (!data.ok) { statusEl.textContent = '失败：' + (data.error || ''); convBtn.disabled = false; return; }
-      statusEl.textContent = '转换中，请稍候…（可能几分钟）';
-      poll(data.job_id, data.filename);
-    } catch (e) {
-      statusEl.textContent = '请求出错：' + e.message; convBtn.disabled = false;
-    }
-  });
-}
-
-async function poll(jobId, filename) {
-  const statusEl = document.getElementById('conv-status');
-  try {
-    const res = await fetch('/convert/status/' + jobId);
-    const data = await res.json();
-    if (data.status === 'pending') { setTimeout(() => poll(jobId, filename), 3000); return; }
-    if (data.status === 'done') {
-      // 填隐藏表单并自动提交 → 直接进入 preview 对照页
-      document.getElementById('ap-md').value = data.md || '';
-      document.getElementById('ap-job').value = jobId;
-      document.getElementById('ap-tag').value = (filename || '').replace(/\.[^.]+$/, '');
-      statusEl.textContent = '转换完成，进入校对…';
-      document.getElementById('auto-preview-form').submit();
-    } else {
-      document.getElementById('conv-btn').disabled = false;
-      statusEl.textContent = '转换失败：' + (data.error || '未知错误');
-    }
-  } catch (e) {
-    document.getElementById('conv-btn').disabled = false;
-    statusEl.textContent = '查询出错：' + e.message;
-  }
-}
-
-// ── 只导入指定题号：圆圈点选 + 预设 ──
-(function () {
-  const onCb = document.getElementById('picknum-on');
-  if (!onCb) return;
-  const panel = document.getElementById('picknum-panel');
-  const circles = document.getElementById('picknum-circles');
-  const summary = document.getElementById('picknum-summary');
-  const maxInput = document.getElementById('picknum-max');
-  const picked = new Set();
-
-  function parseSpec(spec) {
-    // '1-6,9,15,16' → [1,2,3,4,5,6,9,15,16]
-    const out = [];
-    spec.split(',').forEach(p => {
-      p = p.trim();
-      if (!p) return;
-      if (p.includes('-')) {
-        const [a, b] = p.split('-').map(Number);
-        for (let i = a; i <= b; i++) out.push(i);
-      } else out.push(Number(p));
-    });
-    return out;
-  }
-  function renderSummary() {
-    const arr = [...picked].sort((a, b) => a - b);
-    summary.textContent = arr.length ? arr.join('、') : '无';
-  }
-  function buildCircles() {
-    const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
-    circles.innerHTML = '';
-    for (let i = 1; i <= max; i++) {
-      const el = document.createElement('span');
-      el.className = 'picknum-circle' + (picked.has(i) ? ' on' : '');
-      el.textContent = i;
-      el.addEventListener('click', () => {
-        if (picked.has(i)) { picked.delete(i); el.classList.remove('on'); }
-        else { picked.add(i); el.classList.add('on'); }
-        renderSummary();
-      });
-      circles.appendChild(el);
-    }
-  }
-  function applyKeep(nums) {   // 选中=保留
-    picked.clear();
-    nums.forEach(n => picked.add(n));
-    buildCircles(); renderSummary();
-  }
-  function applyDrop(nums) {   // 舍弃这些 → 保留其余（在当前题号范围内）
-    const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
-    const drop = new Set(nums);
-    picked.clear();
-    for (let i = 1; i <= max; i++) if (!drop.has(i)) picked.add(i);
-    buildCircles(); renderSummary();
-  }
-
-  onCb.addEventListener('change', () => {
-    panel.style.display = onCb.checked ? '' : 'none';
-    if (onCb.checked && !circles.children.length) buildCircles();
-  });
-  maxInput.addEventListener('change', buildCircles);
-  document.querySelectorAll('#picknum-panel [data-preset]').forEach(b =>
-    b.addEventListener('click', () => applyKeep(parseSpec(b.dataset.preset))));
-  document.querySelectorAll('#picknum-panel [data-preset-drop]').forEach(b =>
-    b.addEventListener('click', () => applyDrop(parseSpec(b.dataset.presetDrop))));
-  document.getElementById('picknum-clear').addEventListener('click',
-    () => applyKeep([]));
-
-  // 暴露给提交逻辑：返回逗号分隔的已选题号串（空串=没选）
-  window._pickedNumbers = () => [...picked].sort((a, b) => a - b).join(',');
-})();
-
-// ── 方式四：多组 PDF 批量导入 ──
-(function () {
-  const groupsBox = document.getElementById('batch-groups');
-  if (!groupsBox) return;
-  const tpl = document.getElementById('batch-group-tpl');
-  const addBtn = document.getElementById('batch-add');
-  const startBtn = document.getElementById('batch-start');
-  const statusEl = document.getElementById('batch-status');
-
-  function parseSpec(spec) {
-    const out = [];
-    spec.split(',').forEach(p => {
-      p = p.trim(); if (!p) return;
-      if (p.includes('-')) { const [a, b] = p.split('-').map(Number); for (let i = a; i <= b; i++) out.push(i); }
-      else out.push(Number(p));
-    });
-    return out;
-  }
-
-  // 每组一套独立的 picknum 状态（picked Set 挂在 DOM 节点上，互不干扰）
-  function wirePicknum(root) {
-    const onCb = root.querySelector('.bg-picknum-on');
-    const panel = root.querySelector('.bg-picknum-panel');
-    const circles = root.querySelector('.bg-picknum-circles');
-    const summary = root.querySelector('.bg-picknum-summary');
-    const maxInput = root.querySelector('.bg-picknum-max');
-    const picked = new Set();
-    root._picked = picked;   // 供收集时读取
-
-    function renderSummary() {
-      const arr = [...picked].sort((a, b) => a - b);
-      summary.textContent = arr.length ? arr.join('、') : '无';
-    }
-    function buildCircles() {
-      const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
-      circles.innerHTML = '';
-      for (let i = 1; i <= max; i++) {
-        const el = document.createElement('span');
-        el.className = 'picknum-circle' + (picked.has(i) ? ' on' : '');
-        el.textContent = i;
-        el.addEventListener('click', () => {
-          if (picked.has(i)) { picked.delete(i); el.classList.remove('on'); }
-          else { picked.add(i); el.classList.add('on'); }
-          renderSummary();
-        });
-        circles.appendChild(el);
-      }
-    }
-    function applyKeep(nums) { picked.clear(); nums.forEach(n => picked.add(n)); buildCircles(); renderSummary(); }
-    function applyDrop(nums) {
-      const max = Math.max(1, Math.min(99, parseInt(maxInput.value, 10) || 25));
-      const drop = new Set(nums); picked.clear();
-      for (let i = 1; i <= max; i++) if (!drop.has(i)) picked.add(i);
-      buildCircles(); renderSummary();
-    }
-    onCb.addEventListener('change', () => {
-      panel.style.display = onCb.checked ? '' : 'none';
-      if (onCb.checked && !circles.children.length) buildCircles();
-    });
-    maxInput.addEventListener('change', buildCircles);
-    root.querySelector('.bg-preset').addEventListener('click', e => applyKeep(parseSpec(e.target.dataset.preset)));
-    root.querySelector('.bg-preset-drop').addEventListener('click', e => applyDrop(parseSpec(e.target.dataset.drop)));
-    root.querySelector('.bg-picknum-clear').addEventListener('click', () => applyKeep([]));
-    // 返回该组题号串（未开启开关则空串）
-    root._pickedNumbers = () => onCb.checked ? [...picked].sort((a, b) => a - b).join(',') : '';
-  }
-
-  function renumber() {
-    groupsBox.querySelectorAll('.batch-group').forEach((g, i) => {
-      g.querySelector('.bg-title').textContent = '任务组 ' + (i + 1);
-    });
-  }
-
-  function addGroup() {
-    const node = tpl.content.firstElementChild.cloneNode(true);
-    node.querySelector('.bg-remove').addEventListener('click', () => { node.remove(); renumber(); });
-    // 选了解析文件 → 自动勾「同时识别解析」
-    const solFile = node.querySelector('.bg-sol-file');
-    const incSol = node.querySelector('.bg-include-sol');
-    solFile.addEventListener('change', () => { if (solFile.files.length) incSol.checked = true; });
-    wirePicknum(node);
-    groupsBox.appendChild(node);
-    renumber();
-  }
-
-  addBtn.addEventListener('click', addGroup);
-  addGroup();   // 默认给一组
-
-  // ── 提交 → 跳转看板（转换在后台跑，看板实时刷新、转好一组即可审一组）──
-  startBtn.addEventListener('click', async () => {
-    const groups = [...groupsBox.querySelectorAll('.batch-group')];
-    if (!groups.length) { alert('请先添加至少一个任务组'); return; }
-    const fd = new FormData();
-    let ok = true;
-    groups.forEach((g, i) => {
-      const fileInput = g.querySelector('.bg-file');
-      if (!fileInput.files.length) { ok = false; return; }
-      // 题干可多文件：按选择顺序全部追加为同名字段（后端 getlist 收）
-      for (const f of fileInput.files) fd.append('groups[' + i + '][file]', f);
-      const solInput = g.querySelector('.bg-sol-file');
-      for (const f of solInput.files) fd.append('groups[' + i + '][solution_file]', f);
-      if (g.querySelector('.bg-include-sol').checked) fd.append('groups[' + i + '][include_solution]', '1');
-      const picked = g._pickedNumbers ? g._pickedNumbers() : '';
-      if (picked) fd.append('groups[' + i + '][only_numbers]', picked);
-    });
-    if (!ok) { alert('每个任务组都要选题干文件'); return; }
-    // 识别方式整批统一（后端每组也可单独给，组内优先）
-    const bEng = document.getElementById('batch-engine');
-    if (bEng) fd.append('engine', bEng.value);
-
-    startBtn.disabled = true; addBtn.disabled = true;
-    statusEl.textContent = '上传中…';
-    try {
-      const res = await fetch('/batch-convert/create', {method: 'POST', body: fd});
-      const data = await res.json();
-      if (!data.ok) { statusEl.textContent = '失败：' + (data.error || ''); startBtn.disabled = false; addBtn.disabled = false; return; }
-      statusEl.textContent = '已提交，进入看板…';
-      window.location.href = data.dashboard;
-    } catch (e) {
-      statusEl.textContent = '请求出错：' + e.message; startBtn.disabled = false; addBtn.disabled = false;
-    }
-  });
-})();
-
 // ── preview 对照页交互（题卡存在时才绑定）──
 const prevCards = document.getElementById('prev-cards');
 if (prevCards) {
-  // 每题：textarea 改动 → 重渲染上方 render div
-  // 先按纯文本安全转义，再把 ![[文件名]] 换成 <img>（与后端 qimage filter 一致的 Obsidian 嵌入语法）
-  function escapeHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  }
+  // 每题：textarea 改动 → 重渲染上方 render div。表格/图片走公共安全预览器，
+  // 避免服务端初始预览能显示表格、改一个字后又退回 HTML 源码。
   function rerender(card) {
     const src = card.querySelector('.qcard-src').value;
     const box = card.querySelector('.qcard-render');
-    const html = escapeHtml(src).replace(
-      /!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]/g,
-      (m, filename) => '<img src="/assets/' + encodeURIComponent(filename) +
-        '" alt="" style="max-width:100%;height:auto;display:block;margin:6px 0;">');
-    box.innerHTML = html;
-    if (window.MathJax && MathJax.typesetPromise) {
-      MathJax.typesetClear && MathJax.typesetClear([box]);
-      MathJax.typesetPromise([box]);
-    }
+    box.innerHTML = window.QTextPreview.render(src, {imageMode: 'obsidian'});
+    // 公式渲染统一走 QMath（见 static/js/math.js）——定界符和 macros 只该有一份
+    // 配置。这里以前调的是 MathJax，而 base.html 早已换成自托管 KaTeX，那段是死代码：
+    // 编辑题卡后预览框里的公式一直是裸 $...$ 源码。
+    if (window.QMath) window.QMath.typeset(box);
   }
-  prevCards.querySelectorAll('.qcard').forEach(card => {
+  // 每张卡的交互（编辑重渲染/移除/难度/标星）抽成函数：拆分出来的新卡要走同一套
+  // 绑定，一次性 querySelectorAll 绑不到后插入的节点。
+  function bindCard(card) {
     const ta = card.querySelector('.qcard-src');
     let timer = null;
     ta.addEventListener('input', () => {
@@ -464,7 +297,137 @@ if (prevCards) {
         star.classList.toggle('on', on);
       });
     }
+  }
+  prevCards.querySelectorAll('.qcard').forEach(bindCard);
+
+  // ── 拆分 / 合并：修 AI 误拆小问（合并到上一题）或误合多题（拆分）──
+  // 提交端只认 keep=<idx> + body_<idx>/solution_<idx>，任意 idx 都可入库，
+  // 所以「拆分」只需生成一个没被用过的新 idx 的卡片，不用告诉后端。
+  let splitSeq = 100000;   // 新卡 idx 从高位起，绝不与原始 idx 冲突
+  // 题型清单由模板写在 .prev-cards 的 data-types 上（JS 里不写 Jinja）
+  const IMPORT_TYPES = JSON.parse(prevCards.dataset.types || '[]');
+  const IMPORT_SUBJECT = prevCards.dataset.subject || 'math';
+  const bodyArea = c => c.querySelector('textarea[name^="body_"]');
+  const solArea = c => c.querySelector('textarea[name^="solution_"]');
+
+  // 拆出的新题默认解答题（误拆多为解答题小问），仍可在下拉里改成其它题型。
+  // 结构与模板里的题卡一致，好让 bindCard 原样复用。
+  function makeSplitCard() {
+    const idx = splitSeq++;
+    const card = document.createElement('article');
+    card.className = 'card qcard split-card';
+    card.dataset.idx = idx;
+    const typeOpts = IMPORT_TYPES.map(t =>
+      `<option value="${t}"${t === '解答题' ? ' selected' : ''}>${t}</option>`).join('');
+    const dots = [1, 2, 3, 4, 5].map(
+      n => `<span class="diff-dot" data-level="${n}">${n}</span>`).join('');
+    const defaultMode = IMPORT_SUBJECT === 'physics' ? 'after' : 'sub';
+    const defaultFlow = IMPORT_SUBJECT === 'physics' ? 'row' : 'column';
+    card.innerHTML = `
+      <div class="card-head">
+        <label class="sel-box">
+          <input type="checkbox" class="keep-cb" name="keep" value="${idx}" checked>
+          导入
+        </label>
+        <select name="type_${idx}" class="input type-sel"
+                style="width:auto;font-size:12px;padding:2px 6px">${typeOpts}</select>
+        <span class="muted">拆出的新题</span>
+        <div class="spacer"></div>
+        <button type="button" class="btn btn-sm card-merge-up" title="并入上一题">⬆ 合并到上一题</button>
+        <button type="button" class="btn btn-sm card-split" title="再拆一张">✂ 拆分</button>
+        <button type="button" class="link link-danger card-remove">移除</button>
+      </div>
+      <div class="qcard-render body-structured"></div>
+      <textarea class="input qcard-src" name="body_${idx}" rows="4"
+                placeholder="把多余的小问剪贴到这里"></textarea>
+      <div class="qcard-image-import" data-existing="0">
+        <div class="qcard-image-toolbar">
+          <label>图片位置
+            <select name="img_mode_${idx}" class="input qcard-img-mode" data-value="${defaultMode}"></select>
+          </label>
+          <label>多图排列
+            <select name="img_flow_${idx}" class="input qcard-img-flow">
+              <option value="column"${defaultFlow === 'column' ? ' selected' : ''}>上下排列</option>
+              <option value="row"${defaultFlow === 'row' ? ' selected' : ''}>左右排列</option>
+            </select>
+            <input type="hidden" name="img_mode_touched_${idx}"
+                   class="qcard-img-mode-touched" value="">
+            <input type="hidden" name="img_flow_touched_${idx}"
+                   class="qcard-img-flow-touched" value="">
+          </label>
+          <button type="button" class="btn btn-sm qcard-image-pick">+ 添加图片</button>
+          <input type="file" name="images_${idx}" class="qcard-image-input"
+                 accept=".png,.jpg,.jpeg,.webp,.bmp" multiple hidden>
+          <span class="muted qcard-image-count">可为本题附加图片</span>
+        </div>
+        <div class="qcard-image-preview" data-flow="column"></div>
+      </div>
+      <details class="qcard-sol-wrap">
+        <summary class="muted">解析（可编辑，留空则不导入解析）</summary>
+        <textarea class="input qcard-solution" name="solution_${idx}"
+                  rows="3" placeholder="本题解析 / 答案"></textarea>
+      </details>
+      <div class="qcard-meta">
+        <span class="qcard-diff-label muted">难度</span>
+        <span class="diff-dots qcard-diff" title="点击设置难度 1-5，再点当前值清除">${dots}</span>
+        <input type="hidden" name="diff_${idx}" class="qcard-diff-val" value="">
+        <span class="star-toggle qcard-star" title="标星：标记高质量题（点击切换）">★</span>
+        <input type="hidden" name="star_${idx}" class="qcard-star-val" value="">
+        <input type="text" name="tag_${idx}" class="input qcard-tag"
+               placeholder="本题额外标签（逗号分隔）">
+      </div>`;
+    bindCard(card);
+    window.QImportImages?.bind(card);
+    return card;
+  }
+
+  // 委托绑在容器上：拆出来的新卡不用再单独挂这两个按钮的监听
+  prevCards.addEventListener('click', e => {
+    if (e.target.closest('.card-split')) {
+      const card = e.target.closest('.qcard');
+      const nc = makeSplitCard();
+      card.after(nc);
+      nc.querySelector('.qcard-src').focus();
+      return;
+    }
+    if (e.target.closest('.card-merge-up')) {
+      const card = e.target.closest('.qcard');
+      const prev = card.previousElementSibling;
+      if (!prev || !prev.classList.contains('qcard')) {
+        alert('已经是第一题，无法向上合并');
+        return;
+      }
+      const pBody = bodyArea(prev), cBody = bodyArea(card);
+      if (pBody && cBody && cBody.value.trim()) {
+        pBody.value = pBody.value.replace(/\s+$/, '') + '\n' + cBody.value.trim();
+        rerender(prev);            // 上一题正文变了，预览框要跟着重渲染
+      }
+      const pSol = solArea(prev), cSol = solArea(card);
+      if (pSol && cSol && cSol.value.trim()) {
+        pSol.value = (pSol.value.trim() + '\n' + cSol.value.trim()).trim();
+        const wrap = pSol.closest('details');
+        if (wrap) wrap.open = true;
+      }
+      card.remove();   // 移除后本卡的 body_<idx> 不再提交
+    }
   });
+
+  // 打包为文件夹：勾上才显示文件夹名输入框和「一并保存原卷」。原卷要摊在某个
+  // 文件夹里才认得出属于哪份卷子，没有文件夹就没有落点，所以它跟着一起显隐，
+  // 而不是常显后由后端静默忽略。
+  (function () {
+    const cb = document.getElementById('exam-pack-cb');
+    const name = document.getElementById('exam-folder-name');
+    const keep = document.getElementById('keep-original-wrap');
+    if (!cb) return;
+    const sync = () => {
+      const on = cb.checked;
+      if (name) name.style.display = on ? 'inline-block' : 'none';
+      if (keep) keep.style.display = on ? 'inline-flex' : 'none';
+    };
+    cb.addEventListener('change', sync);
+    sync();
+  })();
 
   // 全选 / 反选
   document.getElementById('sel-all').addEventListener('click', () => {

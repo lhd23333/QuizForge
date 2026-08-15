@@ -2,12 +2,15 @@
 {% block title %}批量转换看板 · QuizForge{% endblock %}
 {% block content %}
 <h2>多组批量转换看板</h2>
-<p class="muted">转换在后台串行进行。<strong>哪组转好了，那组就能点「审核入库」</strong>——不必等其它组。审核关一道不少，逐题确认才入库。可随时离开本页，稍后从这个网址回来继续。</p>
+<p class="muted">转换在后台并发进行（同时最多 {{ batch_concurrency }} 组）。<strong>哪组转好了，那组就能点「审核入库」</strong>——不必等其它组。审核关一道不少，逐题确认才入库。可随时离开本页，稍后从导航栏「转换任务」回来继续。</p>
 
 <div class="batch-actions">
-  <a href="{{ url_for('import_md') }}" class="btn btn-ghost">← 回批量导入</a>
+  <a href="{{ url_for('batches_overview') }}" class="btn btn-ghost">← 全部转换任务</a>
+  <a href="{{ url_for('import_md') }}" class="btn btn-ghost">回批量导入</a>
   <a href="{{ url_for('index') }}" class="btn btn-ghost">题库</a>
-  <button type="button" class="btn link-danger" id="bd-cancel">取消整批（弃未审组）</button>
+  {% if converting %}<button type="button" class="btn link-danger" id="bd-cancel">中止整批</button>{% endif %}
+  <button type="button" class="btn link-danger" id="bd-delete" {% if busy %}hidden{% endif %}>删除记录</button>
+  <span class="muted" id="bd-cancel-note">{% if cancelled %}已发出中止，正在转换的组会跑完但结果作废。{% endif %}</span>
 </div>
 
 <div class="bd-summary muted" id="bd-summary"></div>
@@ -15,12 +18,24 @@
 <div class="bd-list" id="bd-list" data-batch="{{ batch_id }}">
   {% for g in groups %}
     <div class="bd-row card" data-gid="{{ g['gid'] }}">
-      <div class="bd-name"><strong>第 {{ loop.index }} 组</strong> · {{ g['filename'] }}</div>
+      <div class="bd-name"><strong>第 {{ loop.index }} 组</strong> · {{ g['filename'] }}
+        <span class="muted">· {{ 'Doc2X' if g['ocr_backend'] == 'doc2x' else 'MinerU' }}</span>
+      </div>
       <div class="bd-state"></div>
       <div class="bd-act"></div>
     </div>
   {% endfor %}
 </div>
+
+{% if batch_nav and batch_nav['total'] > 1 %}
+<div class="bd-pager">
+  {% if batch_nav['prev'] %}<a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_nav['prev']) }}">← 上一批</a>
+  {% else %}<span class="btn btn-sm" aria-disabled="true" style="opacity:.45">← 上一批</span>{% endif %}
+  <a class="muted" href="{{ url_for('batches_overview', all=1) }}">第 {{ batch_nav['index'] }} / {{ batch_nav['total'] }} 批</a>
+  {% if batch_nav['next'] %}<a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_nav['next']) }}">下一批 →</a>
+  {% else %}<span class="btn btn-sm" aria-disabled="true" style="opacity:.45">下一批 →</span>{% endif %}
+</div>
+{% endif %}
 {% endblock %}
 
 {% block scripts %}
@@ -31,12 +46,48 @@
   const batchId = list.dataset.batch;
   const summary = document.getElementById('bd-summary');
   const cancelBtn = document.getElementById('bd-cancel');
-  const LABEL = {pending: '等待转换', converting: '转换中…', done: '已转换', error: '转换失败'};
+  const deleteBtn = document.getElementById('bd-delete');
+  const cancelNote = document.getElementById('bd-cancel-note');
+  const LABEL = {pending: '等待转换', converting: '转换中…', done: '已转换',
+                 awaiting_block_review: '待拆题审核', error: '转换失败'};
 
   function reviewUrl(gid) { return '/batch/' + batchId + '/group/' + gid; }
+  function blocksUrl(gid) { return reviewUrl(gid) + '/blocks'; }
+  function reconvertUrl(gid) { return reviewUrl(gid) + '/reconvert'; }
+  function skipUrl(gid) { return reviewUrl(gid) + '/skip'; }
+  function cancelUrl(gid) { return reviewUrl(gid) + '/cancel'; }
+
+  function syncGroupCancel(actEl, g) {
+    let btn = actEl.querySelector('.bd-gcancel');
+    if (!g.cancellable) {
+      if (btn) btn.hidden = true;
+      return;
+    }
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm bd-gcancel';
+      btn.dataset.gid = g.gid;
+      btn.textContent = '中止该组';
+      btn.title = '尚未开始的直接跳过；已在识别中的会跑完但结果作废';
+      actEl.appendChild(btn);
+    }
+    btn.hidden = false;
+  }
 
   function render(data) {
-    let converting = 0, done = 0, reviewed = 0, failed = 0;
+    // 无书签合集在整本 OCR 完成后会由一行占位组展开成 N 行。
+    // 旧 DOM 没有新 gid，原先的 querySelector 会静默跳过，用户只能一直
+    // 看到“转换中”。组集变化时只刷新一次，让服务端模板重建完整列表。
+    const domGids = Array.from(list.querySelectorAll('.bd-row'))
+      .map(row => String(row.dataset.gid)).sort();
+    const dataGids = data.groups.map(group => String(group.gid)).sort();
+    if (domGids.length !== dataGids.length ||
+        domGids.some((gid, index) => gid !== dataGids[index])) {
+      window.location.reload();
+      return;
+    }
+    let converting = 0, done = 0, reviewed = 0, failed = 0, blocks = 0;
     data.groups.forEach(g => {
       const row = list.querySelector('.bd-row[data-gid="' + g.gid + '"]');
       if (!row) return;
@@ -54,25 +105,53 @@
         actEl.innerHTML = '<span class="muted">已跳过</span>';
       } else if (g.status === 'done') {
         done++;
-        stateEl.innerHTML = '<span class="bp-st bp-ready">待审核</span>';
+        stateEl.innerHTML = g.requires_review
+          ? '<span class="bp-st bp-err-st">质量异常，已暂停免审</span>'
+          : '<span class="bp-st bp-ready">待审核</span>';
         actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + reviewUrl(g.gid) + '">审核入库 →</a>';
+      } else if (g.status === 'awaiting_block_review') {
+        // 逐题识别 + 「先人工审拆题」：切块停在这里等人，还没送 AI
+        blocks++;
+        stateEl.innerHTML = '<span class="bp-st bp-ready">待拆题审核</span>';
+        actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + blocksUrl(g.gid) + '">审核拆题 →</a>';
       } else if (g.status === 'error') {
         failed++;
-        stateEl.innerHTML = '<span class="bp-st bp-err-st">转换失败</span>' +
-          (g.error ? '<span class="bp-err"> ' + g.error + '</span>' : '');
-        actEl.innerHTML = '<span class="muted">跳过</span>';
+        stateEl.innerHTML = '<span class="bp-st bp-err-st">转换失败</span>';
+        if (g.error) {
+          // OCR 标题属于外部文档内容，绝不能拼进 innerHTML；否则标题里的
+          // HTML 会在本机看板执行，并拿到页面写令牌。
+          const errorEl = document.createElement('span');
+          errorEl.className = 'bp-err';
+          errorEl.textContent = ' ' + g.error;
+          stateEl.appendChild(errorEl);
+        }
+        // 失败组原来只显示一句错误、没有任何按钮，等于死路：重转入口本在校对页，
+        // 而校对页正因为这组有问题打不开。所以把「重新转换」「跳过」直接放到这里，
+        // 原文件在整批审核结束前都还留在磁盘上，重转不需要用户重新上传。
+        actEl.innerHTML =
+          '<form method="post" style="display:inline" action="' + reconvertUrl(g.gid) + '">' +
+          '<button type="submit" class="btn btn-sm">重新转换</button></form> ' +
+          '<form method="post" style="display:inline" action="' + skipUrl(g.gid) + '">' +
+          '<button type="submit" class="btn btn-sm">跳过</button></form>';
       } else {
         if (g.status === 'converting') converting++;
-        stateEl.innerHTML = '<span class="bp-st">' + (LABEL[g.status] || g.status) + '</span>';
+        const statusEl = document.createElement('span');
+        statusEl.className = 'bp-st';
+        statusEl.textContent = LABEL[g.status] || String(g.status || '');
+        stateEl.replaceChildren(statusEl);
         actEl.innerHTML = '<span class="muted">请稍候</span>';
       }
+      syncGroupCancel(actEl, g);
     });
     const total = data.groups.length;
     let s = '共 ' + total + ' 组：待审核 ' + done + ' · 转换中 ' + converting +
+            (blocks ? ' · 待拆题审核 ' + blocks : '') +
             ' · 已处理 ' + reviewed + ' · 失败 ' + failed;
     if (data.status !== 'done' && data.status !== 'error') s += ' ｜ 后台转换进行中…';
     else if (data.all_done) s += ' ｜ 全部处理完毕';
     summary.textContent = s;
+    if (cancelBtn && !data.busy) cancelBtn.hidden = true;
+    if (deleteBtn) deleteBtn.hidden = Boolean(data.busy);
   }
 
   let timer = null;
@@ -92,11 +171,33 @@
   }
   poll();
 
-  cancelBtn.addEventListener('click', async () => {
-    if (!confirm('取消整批？未审核的组将被丢弃、上传文件清理。已入库的题不受影响。')) return;
-    clearTimeout(timer);
+  cancelBtn?.addEventListener('click', async () => {
+    if (!confirm('中止后：正在转换的组会跑完但结果作废，尚未开始的组不再转换。确定中止整批？')) return;
+    cancelBtn.disabled = true;
     await fetch('/batch-convert/' + batchId + '/cancel', {method: 'POST'});
-    window.location.href = '{{ url_for("import_md") }}';
+    if (cancelNote) cancelNote.textContent = '已发出中止，正在转换的组会跑完但结果作废。';
+    poll();
+  });
+
+  list.addEventListener('click', async event => {
+    const btn = event.target.closest('.bd-gcancel');
+    if (!btn) return;
+    if (!confirm('中止这一组：还没开始的直接跳过；已经在识别中的会跑完但结果作废。确定？')) return;
+    btn.disabled = true;
+    await fetch(cancelUrl(btn.dataset.gid), {method: 'POST'});
+    poll();
+  });
+
+  deleteBtn?.addEventListener('click', async () => {
+    if (!confirm('删除这条转换记录？已入库题目不受影响；未审核组及其临时原文件会被清理。')) return;
+    deleteBtn.disabled = true;
+    const res = await fetch('/batch/' + batchId + '/delete', {method: 'POST'});
+    const data = await res.json();
+    if (data.ok) window.location.href = '{{ url_for("batches_overview") }}';
+    else {
+      deleteBtn.disabled = false;
+      if (cancelNote) cancelNote.textContent = data.error || '删除失败，请重试。';
+    }
   });
 })();
 </script>

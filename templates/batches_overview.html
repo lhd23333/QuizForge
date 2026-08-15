@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block title %}转换任务 · QuizForge{% endblock %}
+{% block content %}
+<section class="app-page batches-page">
+<header class="app-page-head">
+  <div>
+    <h1>转换任务</h1>
+    <p>后台同时最多运行 {{ concurrency }} 组；转好一组即可进入看板审核入库。</p>
+  </div>
+</header>
+
+<div class="bo-toolbar">
+  {% if show_all %}
+  <a class="btn btn-ghost" href="{{ url_for('batches_overview') }}">只看进行中</a>
+  {% else %}
+  <a class="btn btn-ghost" href="{{ url_for('batches_overview', all=1) }}">连已完成一起看</a>
+  {% endif %}
+  <a class="btn" href="{{ url_for('import_md') }}">＋ 再传一批</a>
+</div>
+
+{% if batches %}
+<div class="bo-list" id="bo-list" data-show-all="{{ '1' if show_all else '' }}">
+  {% for b in batches %}
+  <div class="bo-row{% if b['finished'] %} bo-finished{% endif %}" data-bid="{{ b['batch_id'] }}">
+    <a class="bo-name" href="{{ url_for('batch_dashboard', batch_id=b['batch_id']) }}">
+      第 {{ loop.index }} 批 · {{ b['total'] }} 组</a>
+    <span class="bo-prog">
+      <span class="bo-bar"><span class="bo-bar-fill"
+        style="width:{{ (100 * b['done'] / b['total']) | round(1) if b['total'] else 0 }}%"></span></span>
+      <span class="bo-num">{{ b['done'] }}/{{ b['total'] }}</span>
+    </span>
+    <span class="bo-chips">
+      {% if b['converting'] %}<span class="bp-st">🔄 转换中 {{ b['converting'] }}</span>{% endif %}
+      {% if b['pending'] %}<span class="bp-st">⏳ 等待 {{ b['pending'] }}</span>{% endif %}
+      {% if b['ready'] %}<span class="bp-st bp-ready">✅ 待审核 {{ b['ready'] }}</span>{% endif %}
+      {% if b['awaiting_block_review'] %}<span class="bp-st bp-ready">✂ 待拆题审核 {{ b['awaiting_block_review'] }}</span>{% endif %}
+      {% if b['errors'] %}<span class="bp-st bp-err-st">❌ 错误 {{ b['errors'] }}</span>{% endif %}
+      {% if b['reviewed'] %}<span class="muted">已处理 {{ b['reviewed'] }}</span>{% endif %}
+      {% if b['cancelled'] %}<span class="muted">已中止</span>{% endif %}
+    </span>
+    <span class="bo-act">
+      <a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=b['batch_id']) }}">进入看板</a>
+      <button type="button" class="btn btn-sm bo-cancel"
+              {% if b['finished'] %}hidden{% endif %}>中止整批</button>
+      <button type="button" class="btn btn-sm btn-danger-text bo-delete"
+              {% if b['busy'] %}hidden{% endif %}>删除</button>
+    </span>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="app-empty-state app-surface"><p class="muted">
+  {% if show_all %}还没有任何转换任务。{% else %}没有进行中的转换任务。{% endif %}
+  去<a href="{{ url_for('import_md') }}">批量导入</a>的「批量试卷转换」排一批吧。
+</p></div>
+{% endif %}
+</section>
+{% endblock %}
+
+{% block scripts %}
+{% if batches %}
+<script src="{{ static_v('js/batches-overview.js') }}" defer></script>
+{% endif %}
+{% endblock %}

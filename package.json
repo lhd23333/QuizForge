@@ -1,0 +1,23 @@
+{
+  "name": "quizforge-desktop-ui",
+  "private": true,
+  "type": "module",
+  "version": "0.17.0-beta",
+  "description": "QuizForge 独立软件版前端构建工具",
+  "scripts": {
+    "build:handouts": "esbuild frontend/handout-editor.js --bundle --minify --outfile=static/js/handout-editor.bundle.js",
+    "test:handouts": "node --test frontend/tests/*.test.js"
+  },
+  "dependencies": {
+    "@tiptap/core": "3.27.4",
+    "@tiptap/extension-mathematics": "3.27.4",
+    "@tiptap/markdown": "3.27.4",
+    "@tiptap/pm": "3.27.4",
+    "@tiptap/starter-kit": "3.27.4",
+    "katex": "0.16.22"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "jsdom": "27.0.1"
+  }
+}

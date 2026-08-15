@@ -1,0 +1,8 @@
+-r requirements.txt
+
+# 独立桌面窗口；Windows 使用系统 WebView2，不捆绑 Chromium。
+pywebview==6.2.1
+
+# 发行构建工具，不是客户电脑运行依赖。
+Nuitka==4.1.3
+PyInstaller==6.22.0

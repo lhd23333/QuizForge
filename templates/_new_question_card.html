@@ -1,0 +1,10 @@
+<article class="card inline-question-draft" data-inline-draft="1" draggable="false">
+  <div class="card-head inline-question-draft-head">
+    <span class="new-question-mark" aria-hidden="true">＋</span>
+    <strong>新题目</strong>
+    <span class="muted">将添加到：{{ collection_name }}</span>
+  </div>
+  {% with editor_new=true, editor_collection=collection %}
+    {% include "_inline_question_editor.html" %}
+  {% endwith %}
+</article>

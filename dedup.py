@@ -8,6 +8,8 @@ r"""查重：归一化题目正文 → 指纹（完全重复）+ 相似度（措
 
 import re
 import hashlib
+import math
+from collections import Counter
 from difflib import SequenceMatcher
 
 # 同义 LaTeX 命令归一（写法不同但含义相同）
@@ -53,40 +55,95 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, na, nb).ratio()
 
 
-def find_duplicates(items: list[dict], threshold: float = 0.85) -> list[dict]:
+def find_duplicates(items: list[dict], threshold: float = 0.85,
+                    progress=None) -> list[dict]:
     """在题目列表里找重复。
 
-    items: [{"id":.., "body":..}, ...]
+    items: [{"id":.., "body":.., "fingerprint": 可选}, ...]
+      带 fingerprint（库里存的那一列）时直接用，省掉整库重算一遍 normalize+md5。
     返回重复组列表，每组：
       {"kind": "exact"|"similar", "members": [item, ...], "score": 相似度或1.0}
     先按指纹分组找完全重复；再对「不同指纹」的题两两算相似度 ≥ threshold 配对。
+
+    相似度那一步天然是 O(n²) 对，而 SequenceMatcher 本身又是 O(len²)，题量上千
+    时页面会卡到几十秒。下面用两道**数学上严格**的剪枝把绝大多数对挡在
+    SequenceMatcher 之前（见各自注释）——严格意味着被挡掉的对相似度必定
+    < threshold，结果与逐对硬算完全一致，不是"抽样近似"。
     """
     groups = []
 
     # 1. 完全重复：按指纹分组
     by_fp: dict[str, list[dict]] = {}
     for it in items:
-        by_fp.setdefault(fingerprint(it["body"]), []).append(it)
+        fp = it.get("fingerprint") or fingerprint(it["body"])
+        by_fp.setdefault(fp, []).append(it)
     exact_ids = set()
     for fp, members in by_fp.items():
         if len(members) > 1:
             groups.append({"kind": "exact", "members": members, "score": 1.0})
             exact_ids.update(m["id"] for m in members)
 
-    # 2. 相似（近似）：只比不同指纹、且未在完全重复组里的题，两两比较
-    #    归一化文本长度差异大的直接跳过（剪枝，避免明显不相似的比对）
+    # 2. 相似（近似）：只比不同指纹、且未在完全重复组里的题
     rest = [it for it in items if it["id"] not in exact_ids]
-    norms = {it["id"]: normalize(it["body"]) for it in rest}
+    # 按归一化长度升序排，让长度剪枝能 break 而不只是 continue（见下）
+    prepared = []
+    for it in rest:
+        n = normalize(it["body"])
+        prepared.append((len(n), n, Counter(n), it))
+    prepared.sort(key=lambda x: x[0])
+
+    # 长度上界：SequenceMatcher 的 ratio = 2M/(la+lb)，其中 M 是匹配字符数，
+    # 显然 M ≤ min(la, lb)。设 la ≤ lb，则 ratio ≤ 2·la/(la+lb)，要它 ≥ t
+    # 必须 lb ≤ la·(2-t)/t。t=0.85 时是 1.353 倍——比原来写死的 1.5 倍更紧，
+    # 且这个系数随 threshold 自动变（原来那句注释里的 0.85 是写死的假设）。
+    ratio_cap = (2.0 - threshold) / threshold if threshold > 0 else float("inf")
+
+    # 倒排表只负责生成候选，后面的长度、多重集和 SequenceMatcher 仍逐层做严格判定。
+    # 对题 a，若相似度 >= t（且 lb >= la），字符多重集交集至少为 ceil(t*la)。
+    # 因此从 a 中挑出总出现次数 > la-ceil(t*la) 的若干字符后，合格的 b 必须至少
+    # 含其中一个字符。按全库出现题数从少到多挑，通常一个生僻汉字就能把候选从
+    # 万级缩到个位数；这是无损剪枝，不会漏掉原算法会命中的重复题。
+    postings: dict[str, list[int]] = {}
+    for index, (_length, _text, counts, _item) in enumerate(prepared):
+        for char in counts:
+            postings.setdefault(char, []).append(index)
+
     paired = set()
-    for i in range(len(rest)):
-        a = rest[i]
-        na = norms[a["id"]]
-        for j in range(i + 1, len(rest)):
-            b = rest[j]
-            nb = norms[b["id"]]
-            # 剪枝：长度相差超过 1.5 倍，相似度不可能达到 0.85
-            la, lb = len(na), len(nb)
-            if la and lb and (max(la, lb) / min(la, lb) > 1.5):
+    if progress:
+        progress(0, len(prepared))
+    for i in range(len(prepared)):
+        la, na, ca, a = prepared[i]
+        if progress and (i % 64 == 0 or i + 1 == len(prepared)):
+            progress(i + 1, len(prepared))
+        if not la:
+            continue
+        required_overlap = math.ceil(threshold * la)
+        uncovered_limit = la - required_overlap
+        covered = 0
+        anchors = []
+        for char in sorted(ca, key=lambda value: (len(postings[value]), value)):
+            anchors.append(char)
+            covered += ca[char]
+            if covered > uncovered_limit:
+                break
+        candidates = set()
+        for char in anchors:
+            candidates.update(postings[char])
+        for j in sorted(candidates):
+            if j <= i:
+                continue
+            lb, nb, cb, b = prepared[j]
+            # 已按长度升序，后面的只会更长 → 一旦超界，后面全部超界，直接 break
+            if la and lb > la * ratio_cap:
+                break
+            if not la or not lb:
+                continue
+            # 字符多重集交集上界：每个匹配字符对都要各消耗两边一个相同字符，
+            # 所以 M ≤ |多重集交集|，于是 ratio ≤ 2·inter/(la+lb)。这一步是
+            # O(不同字符数)，比 SequenceMatcher 的 O(la·lb) 便宜得多，用来把
+            # "长度接近但内容无关"的对（数学题里很常见）提前挡掉。
+            inter = sum((ca & cb).values())
+            if 2.0 * inter / (la + lb) < threshold:
                 continue
             score = SequenceMatcher(None, na, nb).ratio()
             if score >= threshold:

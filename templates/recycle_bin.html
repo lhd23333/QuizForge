@@ -1,9 +1,12 @@
 {% extends "base.html" %}
 {% block title %}回收站 - QuizForge{% endblock %}
 {% block content %}
-<div class="toolbar" style="margin-bottom:var(--sp-4)">
-  <h2 style="margin:0">🗑 回收站</h2>
-  <p class="muted" style="margin:4px 0 0">删除的题目和题集会先进这里，可恢复或彻底删除。彻底删除后无法找回。</p>
+<section class="app-page recycle-page">
+<header class="app-page-head app-page-head-actions">
+  <div>
+    <h1>回收站</h1>
+    <p>删除的题目和题集会先进这里，可恢复或彻底删除。</p>
+  </div>
   <div class="spacer"></div>
   {% if questions or folders %}
   <form method="post" action="{{ url_for('recycle_empty') }}"
@@ -11,28 +14,44 @@
     <button type="submit" class="btn btn-danger">清空回收站</button>
   </form>
   {% endif %}
-</div>
+</header>
+
+<section class="app-surface recycle-section">
 
 <h3 class="coll-title" style="border-top:none;padding-top:0">已删题目（{{ questions|length }}）</h3>
 {% if questions %}
-  {% for q in questions %}
-  <article class="card">
-    <div class="card-head">
-      {% if q['type'] %}<span class="badge">{{ q['type'] }}</span>{% endif %}
-      {% if q['difficulty'] %}<span class="badge">难度 {{ q['difficulty'] }}</span>{% endif %}
-      <span class="muted" style="font-size:12px">删除于 {{ q['deleted_at'] }}</span>
-      <div class="spacer"></div>
-      <form method="post" action="{{ url_for('recycle_restore_question', qid=q['id']) }}" style="display:inline">
-        <button type="submit" class="btn btn-sm btn-primary">恢复</button>
-      </form>
-      <form method="post" action="{{ url_for('recycle_purge_question', qid=q['id']) }}" style="display:inline"
-            onsubmit="return confirm('彻底删除这道题？不可恢复。')">
-        <button type="submit" class="btn btn-sm link-danger">彻底删除</button>
-      </form>
+  {# 整段题卡包在同一个 <form> 里：批量还原提交所有勾选的 qid。逐题的「恢复 /
+     彻底删除」不能再各自套一个 <form>（HTML 不允许表单嵌套，浏览器会把内层丢掉），
+     改成同一表单里的提交按钮 + formaction 指到各自的路由。 #}
+  <form method="post" action="{{ url_for('recycle_restore_selected') }}" id="restore-form">
+    <div class="dedup-bar">
+      <button type="button" class="btn btn-sm" id="q-sel-all">全选</button>
+      <button type="button" class="btn btn-sm" id="q-sel-none">全不选</button>
+      <button type="submit" class="btn btn-sm btn-primary">还原勾选</button>
     </div>
-    <div class="body">{{ q['body'] | qimage }}</div>
-  </article>
-  {% endfor %}
+    {% for q in questions %}
+    <article class="card">
+      <div class="card-head">
+        <label class="sel-box">
+          <input type="checkbox" name="qid" value="{{ q['id'] }}">
+          选中
+        </label>
+        {% if q['type'] %}<span class="badge">{{ q['type']|qtype_label }}</span>{% endif %}
+        {% if q['difficulty'] %}<span class="badge">难度 {{ q['difficulty'] }}</span>{% endif %}
+        <span class="muted" style="font-size:12px">删除于 {{ q['deleted_at'] }}</span>
+        <div class="spacer"></div>
+        <button type="submit" class="btn btn-sm btn-primary"
+                formaction="{{ url_for('recycle_restore_question', qid=q['id']) }}"
+                formnovalidate>恢复</button>
+        <button type="submit" class="btn btn-sm link-danger"
+                formaction="{{ url_for('recycle_purge_question', qid=q['id']) }}"
+                formnovalidate
+                onclick="return confirm('彻底删除这道题？不可恢复。')">彻底删除</button>
+      </div>
+      <div class="body body-structured">{{ q | qbody }}</div>
+    </article>
+    {% endfor %}
+  </form>
 {% else %}
   <p class="muted empty">没有已删题目。</p>
 {% endif %}
@@ -59,4 +78,17 @@
 {% else %}
   <p class="muted empty">没有已删题集。</p>
 {% endif %}
+</section>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.getElementById('q-sel-all')?.addEventListener('click', () => {
+  document.querySelectorAll('#restore-form input[name="qid"]').forEach(cb => cb.checked = true);
+});
+document.getElementById('q-sel-none')?.addEventListener('click', () => {
+  document.querySelectorAll('#restore-form input[name="qid"]').forEach(cb => cb.checked = false);
+});
+</script>
 {% endblock %}

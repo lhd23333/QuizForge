@@ -1,31 +1,200 @@
 <!DOCTYPE html>
-<html lang="zh">
+{# 深浅色与主题色写在 <html> 上（不是 body）：CSS 里的选择器是
+   html[data-theme="dark"]，变量要在 :root 层被覆盖才能被全页取到。
+   ui_prefs 由 app.py 的 context_processor 注入，各视图不用逐个传参
+   —— base.html 是所有页面的外壳，漏一个视图就是那一页主题失效。 #}
+<html lang="zh" data-theme="{{ ui.theme_mode }}"{% if desktop_host %} class="desktop-host"{% endif %}
+      {% if ui.theme_color %}style="--primary: {{ ui.theme_color }};"{% endif %}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}QuizForge 题库{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-  <!-- MathJax：渲染 $...$ 行内公式 -->
+  <link rel="icon" type="image/svg+xml" href="{{ static_v('favicon.svg') }}">
+  <link rel="stylesheet" href="{{ static_v('style.css') }}">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <script>
-    window.MathJax = {
-      tex: { inlineMath: [['$', '$']], displayMath: [['$$', '$$']] },
-      svg: { fontCache: 'global' }
-    };
+  // 侧栏页签要在首帧绘制前恢复，否则桌面端会先闪出“文件”再跳到上次的“筛选”。
+  // 只保存 files / filters 两个无敏感值；浏览器与 Obsidian 不使用这项布局状态。
+  try {
+    var qfSidebarPanel = localStorage.getItem('quizforge.sidebar.activePanel');
+    if (qfSidebarPanel === 'files' || qfSidebarPanel === 'filters') {
+      document.documentElement.dataset.sidebarPanel = qfSidebarPanel;
+    }
+  } catch (_error) { /* 禁用本地存储时回落到“文件”即可。 */ }
+  // 桌面常驻外壳中的业务页是同源 iframe。必须在首帧同步加类，不能等 load 后再
+  // 隐藏，否则每次子页面导航都会先闪出一套重复标题栏和顶栏。
+  if (window.parent !== window) document.documentElement.classList.add('embedded-view');
+  // 首屏防闪：公式容器先藏起来（见 style.css 的 .math-pending），公式排完再放开，
+  // 避免用户先看见一屏 `$\dfrac{1}{2}$` 源码再突然变成公式。
+  // 3s 兜底定时器是必需的：katex.min.js / math.js 404 或解析出错时没人来摘这个类，
+  // 没有兜底就是整个题库永久空白 —— 宁可露出源码，也不能什么都看不见。
+  document.documentElement.classList.add('math-pending');
+  setTimeout(function () {
+    document.documentElement.classList.remove('math-pending');
+  }, 3000);
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js" async></script>
+  {# 自托管 KaTeX（与服务器版同一份），**刻意不走 CDN**：
+     插件把本应用嵌在 Obsidian 里，而 Obsidian 是离线优先的工具 —— 断网时
+     CDN 版会让整个题库的公式全部渲染不出来。自托管另有两个实测好处（依据写在
+     static/js/math.js 顶部）：单公式 117µs vs MathJax 1198µs（约 10 倍），
+     主脚本 277KB vs 2.0MB，列表页满屏上千个公式时差别是能直接看出来的。
+     三个文件都用 defer 且顺序固定：katex 定义 window.katex，auto-render 定义
+     renderMathInElement（依赖前者），math.js 调用它。deferred 脚本按文档顺序
+     执行，靠位置保证依赖先到。
+     字体在 static/js/katex/fonts/，katex.min.css 里是相对路径 fonts/*，
+     所以这三者的目录结构不能拆开搬。 #}
+  <link rel="stylesheet" href="{{ static_v('js/katex/katex.min.css') }}">
+  <script src="{{ static_v('js/katex/katex.min.js') }}" defer></script>
+  <script src="{{ static_v('js/katex/contrib/auto-render.min.js') }}" defer></script>
+  <script src="{{ static_v('js/math.js') }}" defer></script>
 </head>
-<body>
+<body {% if ui.wallpaper and not ui.wallpaper_is_video %}class="has-wallpaper"
+      style="background-image:url('{{ url_for('wallpaper_serve', filename=ui.wallpaper) }}')"
+      {% elif ui.wallpaper %}class="has-wallpaper"{% endif %}>
+  {# 视频壁纸：CSS background 放不了视频，改用铺满视口的 <video>（z-index:-2） #}
+  {% if ui.wallpaper and ui.wallpaper_is_video %}
+  <video class="wallpaper-video" autoplay muted loop playsinline
+         src="{{ url_for('wallpaper_serve', filename=ui.wallpaper) }}"></video>
+  {% endif %}
+  {# 只在独立桌面壳收到 pywebviewready 后显示。无边框窗口必须由页面自己提供
+     拖动区和最小化/最大化/关闭入口；浏览器与 Obsidian 不显示这一层。 #}
+  <div class="desktop-titlebar" id="desktop-titlebar"{% if not desktop_host %} hidden{% endif %}>
+    <div class="desktop-titlebar-brand pywebview-drag-region">
+      <span class="desktop-app-mark" aria-hidden="true">QF</span>
+      <span class="desktop-app-name">QuizForge</span>
+      <span class="desktop-app-caption">本地题库</span>
+      <span class="desktop-app-version" id="desktop-app-version">{% if desktop_host %}{{ desktop_version }}{% endif %}</span>
+    </div>
+    <div class="desktop-titlebar-drag pywebview-drag-region" aria-hidden="true"></div>
+    <div class="desktop-window-controls" aria-label="窗口控制">
+      <button type="button" data-window-action="minimize" title="最小化" aria-label="最小化">
+        <span aria-hidden="true">—</span>
+      </button>
+      <button type="button" data-window-action="maximize" title="最大化" aria-label="最大化">
+        <span class="window-maximize-icon" aria-hidden="true"></span>
+      </button>
+      <button type="button" class="desktop-window-close" data-window-action="close"
+              title="关闭" aria-label="关闭">
+        <span aria-hidden="true">×</span>
+      </button>
+    </div>
+  </div>
+  {# pywebview 的 Windows 无边框窗不会保留系统缩放边框，八个透明命中区把拖动
+     方向交给桌面桥；普通浏览器与 Obsidian 由 CSS 隐藏。 #}
+  {% for edge in ['n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw'] %}
+    <div class="desktop-resize-handle desktop-resize-{{ edge }}"
+         data-resize-edge="{{ edge }}" aria-hidden="true"></div>
+  {% endfor %}
   <header>
     <nav>
-      <a href="{{ url_for('index') }}" class="brand">📚 QuizForge</a>
-      <a href="{{ url_for('index') }}">题库</a>
-      <a href="{{ url_for('question_new') }}">新增题目</a>
-      <a href="{{ url_for('import_md') }}">批量导入</a>
-      <a href="{{ url_for('dedup_page') }}">查重</a>
-      <a href="{{ url_for('recycle_bin') }}">回收站</a>
-      <a href="{{ url_for('settings_page') }}">设置</a>
+      {% set endpoint = request.endpoint or '' %}
+      <a href="{{ url_for('index') }}" class="brand"><span class="brand-mark">QF</span>QuizForge</a>
+      <a href="{{ url_for('index') }}" class="nav-link{% if endpoint == 'index' %} active{% endif %}">题库</a>
+      <a href="{{ url_for('handouts_page') }}" class="nav-link{% if endpoint.startswith('handouts') %} active{% endif %}">讲义</a>
+      <a href="{{ url_for('library_page') }}" class="nav-link{% if endpoint.startswith('library') %} active{% endif %}">资料库</a>
+      <a href="{{ url_for('import_md') }}" class="nav-link{% if endpoint.startswith('import') or endpoint.startswith('block_') %} active{% endif %}">批量导入</a>
+      {# 转换任务：batch_id 只在内存里，离开看板页就找不回来了，得有个总入口 #}
+      <a href="{{ url_for('batches_overview') }}" class="nav-link{% if 'batch' in endpoint %} active{% endif %}">转换任务{% if nav_batch_count %}
+        <span class="nav-badge">{{ nav_batch_count }}</span>{% endif %}</a>
+      <span class="nav-spacer"></span>
+      <span class="nav-separator" aria-hidden="true"></span>
+      <a href="{{ url_for('dedup_page') }}" class="nav-link nav-link-utility{% if endpoint == 'dedup_page' %} active{% endif %}">查重</a>
+      <a href="{{ url_for('recycle_bin') }}" class="nav-link nav-link-utility{% if endpoint == 'recycle_bin' %} active{% endif %}">回收站</a>
+      <a href="{{ url_for('settings_page') }}" class="nav-link nav-link-utility{% if endpoint.startswith('settings') %} active{% endif %}">设置</a>
+      <a href="{{ url_for('about_page') }}" class="nav-link nav-link-utility{% if endpoint in ['about_page', 'welcome_page'] %} active{% endif %}">关于</a>
+      {# 仅独立桌面壳注入 window.pywebview 后显示；浏览器/Obsidian 中保持隐藏。 #}
+      <button type="button" id="desktop-bank-button" class="desktop-nav-button"
+              title="管理本机题库"{% if not desktop_host %} hidden{% endif %}>题库</button>
     </nav>
   </header>
+
+  <dialog class="desktop-bank-dialog" id="desktop-bank-dialog">
+    <div class="desktop-bank-dialog-head">
+      <div>
+        <strong>题库</strong>
+        <span class="muted">像 Obsidian 一样切换，或在新窗口同时打开多个题库</span>
+      </div>
+      <button type="button" class="icon-btn" data-bank-dialog-close
+              aria-label="关闭" title="关闭">×</button>
+    </div>
+    <div class="desktop-bank-dialog-body">
+      <div class="desktop-bank-list" id="desktop-bank-list" role="list"
+           aria-label="已登记题库"></div>
+      <p class="desktop-bank-empty muted" id="desktop-bank-empty" hidden>还没有登记题库。</p>
+
+      <div class="desktop-bank-toolbar">
+        <button type="button" class="btn secondary" data-bank-panel="open">打开已有题库</button>
+        <button type="button" class="btn primary" data-bank-panel="create">新建题库</button>
+      </div>
+
+      <form class="desktop-bank-assets" id="desktop-bank-assets-form">
+        <div class="desktop-bank-panel-head">
+          <strong>共享图片目录</strong>
+          <span class="muted">所有已登记题库只从这里读取和保存图片</span>
+        </div>
+        <div class="desktop-bank-path-row">
+          <input id="desktop-bank-assets-path" type="text" autocomplete="off"
+                 spellcheck="false" aria-label="共享图片目录">
+          <button type="button" class="btn secondary" id="desktop-bank-assets-browse">浏览…</button>
+          <button type="submit" class="btn primary" id="desktop-bank-assets-apply">应用</button>
+        </div>
+        <p class="muted desktop-bank-assets-note">应用前会把各题库旧 `_assets` 中的文件无损合并；同名异内容时整次拒绝，不删除旧目录。若用 Obsidian，请选择共同 vault 内的 `_assets`。</p>
+      </form>
+
+      <form class="desktop-bank-panel" id="desktop-bank-open-form" hidden>
+        <div class="desktop-bank-panel-head">
+          <strong>打开已有题库</strong>
+          <span class="muted">支持 Obsidian vault 或普通文件夹</span>
+        </div>
+        <label for="desktop-bank-path">题库绝对路径</label>
+        <div class="desktop-bank-path-row">
+          <input id="desktop-bank-path" type="text" autocomplete="off"
+                 spellcheck="false" placeholder="例如 D:\笔记\QuizForge">
+          <button type="button" class="btn secondary" id="desktop-bank-browse">浏览…</button>
+        </div>
+        <label for="desktop-bank-open-subject">题库科目</label>
+        <select id="desktop-bank-open-subject">
+          <option value="math">数学</option>
+          <option value="physics">物理</option>
+        </select>
+        <div class="desktop-bank-panel-actions">
+          <button type="button" class="btn secondary" id="desktop-bank-open-new">在新窗口打开</button>
+          <button type="submit" class="btn primary" id="desktop-bank-apply">当前窗口打开</button>
+        </div>
+      </form>
+
+      <form class="desktop-bank-panel" id="desktop-bank-create-form" hidden>
+        <div class="desktop-bank-panel-head">
+          <strong>新建题库</strong>
+          <span class="muted">在所选位置创建一个独立空文件夹</span>
+        </div>
+        <label for="desktop-bank-name">题库名称</label>
+        <input id="desktop-bank-name" type="text" maxlength="80" autocomplete="off"
+               placeholder="例如 高中数学题库">
+        <label for="desktop-bank-create-subject">题库科目</label>
+        <select id="desktop-bank-create-subject">
+          <option value="math">数学</option>
+          <option value="physics">物理</option>
+        </select>
+        <label for="desktop-bank-parent">保存位置</label>
+        <div class="desktop-bank-path-row">
+          <input id="desktop-bank-parent" type="text" autocomplete="off"
+                 spellcheck="false" placeholder="例如 D:\题库">
+          <button type="button" class="btn secondary" id="desktop-bank-parent-browse">浏览…</button>
+        </div>
+        <div class="desktop-bank-panel-actions">
+          <button type="button" class="btn secondary" id="desktop-bank-create-new">创建到新窗口</button>
+          <button type="submit" class="btn primary" id="desktop-bank-create">创建并切换</button>
+        </div>
+      </form>
+
+      <p class="desktop-bank-status muted" id="desktop-bank-status" role="status"></p>
+      <p class="desktop-bank-safety">从列表移除只会忘记路径，绝不会删除题库文件。</p>
+    </div>
+    <div class="desktop-bank-dialog-actions">
+      <button type="button" class="btn secondary" data-bank-dialog-close>完成</button>
+    </div>
+  </dialog>
 
   <main>
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -39,6 +208,586 @@
     {% block content %}{% endblock %}
   </main>
 
+  <script src="{{ static_v('js/csrf.js') }}"></script>
+  <script src="{{ static_v('js/text-preview.js') }}"></script>
   {% block scripts %}{% endblock %}
+
+  <!-- 独立桌面壳桥：联网服务初版关闭，只负责本机目录与进程操作。 -->
+  <script>
+  (function () {
+    var button = document.getElementById('desktop-bank-button');
+    var titlebar = document.getElementById('desktop-titlebar');
+    var version = document.getElementById('desktop-app-version');
+    var bankDialog = document.getElementById('desktop-bank-dialog');
+    var bankList = document.getElementById('desktop-bank-list');
+    var bankEmpty = document.getElementById('desktop-bank-empty');
+    var bankOpenForm = document.getElementById('desktop-bank-open-form');
+    var bankCreateForm = document.getElementById('desktop-bank-create-form');
+    var bankPath = document.getElementById('desktop-bank-path');
+    var bankBrowse = document.getElementById('desktop-bank-browse');
+    var bankApply = document.getElementById('desktop-bank-apply');
+    var bankOpenNew = document.getElementById('desktop-bank-open-new');
+    var bankOpenSubject = document.getElementById('desktop-bank-open-subject');
+    var bankName = document.getElementById('desktop-bank-name');
+    var bankParent = document.getElementById('desktop-bank-parent');
+    var bankParentBrowse = document.getElementById('desktop-bank-parent-browse');
+    var bankCreate = document.getElementById('desktop-bank-create');
+    var bankCreateNew = document.getElementById('desktop-bank-create-new');
+    var bankCreateSubject = document.getElementById('desktop-bank-create-subject');
+    var bankAssetsForm = document.getElementById('desktop-bank-assets-form');
+    var bankAssetsPath = document.getElementById('desktop-bank-assets-path');
+    var bankAssetsBrowse = document.getElementById('desktop-bank-assets-browse');
+    var bankStatus = document.getElementById('desktop-bank-status');
+    var currentBank = '';
+    if (!button || !titlebar) return;
+
+    window.addEventListener('pywebviewready', async function () {
+      try {
+        var info = await window.pywebview.api.runtime_info();
+        document.documentElement.classList.add('desktop-host');
+        titlebar.hidden = false;
+        button.hidden = false;
+        if (version && info.version) version.textContent = info.version;
+        applyBankInfo(info);
+      } catch (e) {
+        // 普通浏览器和 Obsidian 没有桌面 API，按钮继续隐藏即可。
+      }
+    });
+
+    async function toggleMaximize() {
+      var result = await window.pywebview.api.window_toggle_maximize();
+      if (result && result.ok) {
+        document.documentElement.classList.toggle('desktop-maximized', !!result.maximized);
+        var control = titlebar.querySelector('[data-window-action="maximize"]');
+        if (control) {
+          control.title = result.maximized ? '还原' : '最大化';
+          control.setAttribute('aria-label', result.maximized ? '还原' : '最大化');
+        }
+      }
+    }
+
+    titlebar.addEventListener('dblclick', function (event) {
+      if (!event.target.closest('.pywebview-drag-region')) return;
+      toggleMaximize().catch(function () {});
+    });
+
+    titlebar.addEventListener('click', async function (event) {
+      var control = event.target.closest('[data-window-action]');
+      if (!control) return;
+      try {
+        var action = control.dataset.windowAction;
+        if (action === 'minimize') await window.pywebview.api.window_minimize();
+        else if (action === 'maximize') await toggleMaximize();
+        else if (action === 'close') await window.pywebview.api.window_close();
+      } catch (e) {
+        // 窗口正在关闭时桥接可能先销毁；此处不再弹框打断退出。
+      }
+    });
+
+    var resizeCalls = [];
+    var resizeBusy = false;
+    async function flushResize() {
+      if (resizeBusy || !resizeCalls.length || !window.pywebview?.api?.window_resize) return;
+      resizeBusy = true;
+      var next = resizeCalls[resizeCalls.length - 1];
+      resizeCalls.length = 0;
+      try {
+        await window.pywebview.api.window_resize(next.width, next.height, next.fixedCorner);
+      } catch (e) {
+        // 拖动中窗口可能已关闭或桥接正忙；下一次 pointermove 会继续提交最新尺寸。
+      } finally {
+        resizeBusy = false;
+        if (resizeCalls.length) requestAnimationFrame(flushResize);
+      }
+    }
+
+    document.querySelectorAll('[data-resize-edge]').forEach(function (handle) {
+      handle.addEventListener('pointerdown', function (event) {
+        if (event.button !== 0 || document.documentElement.classList.contains('desktop-maximized')) return;
+        var edge = handle.dataset.resizeEdge;
+        var startX = event.screenX;
+        var startY = event.screenY;
+        var startWidth = window.outerWidth;
+        var startHeight = window.outerHeight;
+        var fixedCorner = edge.includes('w')
+          ? (edge.includes('n') ? 'se' : 'ne')
+          : (edge.includes('n') ? 'sw' : 'nw');
+        if (edge === 'n') fixedCorner = 'sw';
+        else if (edge === 's') fixedCorner = 'nw';
+        else if (edge === 'e') fixedCorner = 'nw';
+        else if (edge === 'w') fixedCorner = 'ne';
+        handle.setPointerCapture?.(event.pointerId);
+        event.preventDefault();
+
+        function move(moveEvent) {
+          var dx = moveEvent.screenX - startX;
+          var dy = moveEvent.screenY - startY;
+          var width = startWidth + (edge.includes('e') ? dx : edge.includes('w') ? -dx : 0);
+          var height = startHeight + (edge.includes('s') ? dy : edge.includes('n') ? -dy : 0);
+          resizeCalls.push({width: Math.round(width), height: Math.round(height), fixedCorner: fixedCorner});
+          if (resizeCalls.length > 1) resizeCalls.splice(0, resizeCalls.length - 1);
+          requestAnimationFrame(flushResize);
+        }
+        function finish() {
+          handle.removeEventListener('pointermove', move);
+          handle.removeEventListener('pointerup', finish);
+          handle.removeEventListener('pointercancel', finish);
+        }
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', finish);
+        handle.addEventListener('pointercancel', finish);
+      });
+    });
+
+    function bankLeaf(path) {
+      var parts = String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/);
+      return parts[parts.length - 1] || path || '题库';
+    }
+
+    function applyBankInfo(info) {
+      currentBank = (info && info.bank_dir) || '';
+      var banks = (info && Array.isArray(info.banks)) ? info.banks : [];
+      var current = banks.find(function (entry) { return entry.current; });
+      var label = (current && current.name) || bankLeaf(currentBank);
+      var subjectLabel = (current && current.subject_label) || '数学';
+      button.textContent = subjectLabel + ' · ' + label;
+      button.title = '当前题库：' + currentBank + '\n点击管理本机题库';
+      if (bankAssetsPath && info && info.assets_dir) bankAssetsPath.value = info.assets_dir;
+      renderBankList(banks);
+    }
+
+    function renderBankList(banks) {
+      if (!bankList) return;
+      bankList.replaceChildren();
+      if (bankEmpty) bankEmpty.hidden = banks.length > 0;
+      banks.forEach(function (entry) {
+        var row = document.createElement('div');
+        row.className = 'desktop-bank-item' + (entry.current ? ' is-current' : '');
+        row.setAttribute('role', 'listitem');
+
+        var icon = document.createElement('span');
+        icon.className = 'desktop-bank-item-icon';
+        icon.textContent = '▱';
+        icon.setAttribute('aria-hidden', 'true');
+
+        var details = document.createElement('div');
+        details.className = 'desktop-bank-item-details';
+        var title = document.createElement('div');
+        title.className = 'desktop-bank-item-title';
+        var name = document.createElement('strong');
+        name.textContent = entry.name || bankLeaf(entry.path);
+        title.appendChild(name);
+        var subjectBadge = document.createElement('span');
+        subjectBadge.className = 'desktop-bank-badge';
+        subjectBadge.textContent = entry.subject_label || '数学';
+        title.appendChild(subjectBadge);
+        if (entry.current) {
+          var currentBadge = document.createElement('span');
+          currentBadge.className = 'desktop-bank-badge';
+          currentBadge.textContent = '当前';
+          title.appendChild(currentBadge);
+        } else if (!entry.available) {
+          var missingBadge = document.createElement('span');
+          missingBadge.className = 'desktop-bank-badge is-missing';
+          missingBadge.textContent = '不可用';
+          title.appendChild(missingBadge);
+        }
+        var path = document.createElement('span');
+        path.className = 'desktop-bank-item-path';
+        path.textContent = entry.path || '';
+        path.title = entry.path || '';
+        details.append(title, path);
+
+        var actions = document.createElement('div');
+        actions.className = 'desktop-bank-item-actions';
+        if (!entry.current && entry.available) {
+          var switchButton = document.createElement('button');
+          switchButton.type = 'button';
+          switchButton.className = 'btn btn-sm primary';
+          switchButton.textContent = '切换';
+          switchButton.dataset.bankAction = 'switch';
+          switchButton.dataset.bankPath = entry.path;
+          switchButton.dataset.bankSubject = entry.subject || 'math';
+          actions.appendChild(switchButton);
+        }
+        if (!entry.current && entry.available) {
+          var newWindowButton = document.createElement('button');
+          newWindowButton.type = 'button';
+          newWindowButton.className = 'btn btn-sm secondary';
+          newWindowButton.textContent = '新窗口';
+          newWindowButton.title = '保留当前窗口，同时打开这个题库';
+          newWindowButton.dataset.bankAction = 'new-window';
+          newWindowButton.dataset.bankPath = entry.path;
+          newWindowButton.dataset.bankSubject = entry.subject || 'math';
+          actions.appendChild(newWindowButton);
+        }
+        if (!entry.current) {
+          var removeButton = document.createElement('button');
+          removeButton.type = 'button';
+          removeButton.className = 'btn btn-sm btn-danger-text';
+          removeButton.textContent = '移除';
+          removeButton.title = '只从列表移除，不删除文件';
+          removeButton.dataset.bankAction = 'remove';
+          removeButton.dataset.bankPath = entry.path;
+          actions.appendChild(removeButton);
+        }
+        row.append(icon, details, actions);
+        bankList.appendChild(row);
+      });
+    }
+
+    function setBankBusy(busy) {
+      if (!bankDialog) return;
+      bankDialog.querySelectorAll('button:not([data-bank-dialog-close]), input, select').forEach(function (control) {
+        control.disabled = busy;
+      });
+      bankDialog.classList.toggle('is-busy', !!busy);
+    }
+
+    function showBankStatus(message, isError) {
+      if (!bankStatus) return;
+      bankStatus.textContent = message || '';
+      bankStatus.classList.toggle('is-error', !!isError);
+    }
+
+    function showBankPanel(name) {
+      if (bankOpenForm) bankOpenForm.hidden = name !== 'open';
+      if (bankCreateForm) bankCreateForm.hidden = name !== 'create';
+      showBankStatus('', false);
+      if (name === 'open' && bankPath) {
+        bankPath.value = '';
+        bankPath.focus();
+      } else if (name === 'create' && bankName) {
+        if (bankParent && !bankParent.value) {
+          var separator = currentBank.includes('\\') ? '\\' : '/';
+          bankParent.value = currentBank.split(separator).slice(0, -1).join(separator);
+        }
+        bankName.focus();
+      }
+    }
+
+    async function refreshBankList() {
+      var info = await window.pywebview.api.list_bank_directories();
+      if (!info || !info.ok) throw new Error((info && info.error) || '无法读取题库列表');
+      applyBankInfo(info);
+    }
+
+    async function switchBank(target, subject) {
+      setBankBusy(true);
+      showBankStatus('正在验证并切换题库…', false);
+      var result = await window.pywebview.api.set_bank_directory(target, subject || 'math');
+      if (!result || !result.ok) {
+        showBankStatus((result && result.error) || '切换题库失败', true);
+        setBankBusy(false);
+        return;
+      }
+      currentBank = result.bank_dir;
+      if (!result.restart_required) {
+        await refreshBankList();
+        showBankStatus('当前已经是这个题库。', false);
+        setBankBusy(false);
+        return;
+      }
+      button.title = '即将切换到：' + result.bank_dir;
+      showBankStatus('已保存，正在重启 QuizForge…', false);
+      await window.pywebview.api.restart_app();
+    }
+
+    async function openBankInNewWindow(target, subject) {
+      setBankBusy(true);
+      showBankStatus('正在新窗口打开题库…', false);
+      var result = await window.pywebview.api.open_bank_in_new_window(target, subject || 'math');
+      if (!result || !result.ok) {
+        showBankStatus((result && result.error) || '打开新窗口失败', true);
+        setBankBusy(false);
+        return;
+      }
+      await refreshBankList();
+      showBankStatus('新窗口已启动；当前窗口保持不变。', false);
+      setBankBusy(false);
+    }
+
+    button.addEventListener('click', function () {
+      if (!bankDialog || typeof bankDialog.showModal !== 'function') {
+        alert('当前窗口不支持题库管理对话框，请重启软件后重试。');
+        return;
+      }
+      if (bankOpenForm) bankOpenForm.hidden = true;
+      if (bankCreateForm) bankCreateForm.hidden = true;
+      showBankStatus('', false);
+      bankDialog.showModal();
+      refreshBankList().catch(function (error) {
+        showBankStatus('读取题库列表失败：' + error.message, true);
+      });
+    });
+
+    document.querySelectorAll('[data-bank-dialog-close]').forEach(function (control) {
+      control.addEventListener('click', function () {
+        if (bankDialog && bankDialog.open) bankDialog.close();
+      });
+    });
+
+    document.querySelectorAll('[data-bank-panel]').forEach(function (control) {
+      control.addEventListener('click', function () { showBankPanel(control.dataset.bankPanel); });
+    });
+
+    if (bankList) bankList.addEventListener('click', async function (event) {
+      var control = event.target.closest('[data-bank-action]');
+      if (!control) return;
+      var target = control.dataset.bankPath || '';
+      var subject = control.dataset.bankSubject || 'math';
+      try {
+        if (control.dataset.bankAction === 'switch') {
+          await switchBank(target, subject);
+          return;
+        }
+        if (control.dataset.bankAction === 'new-window') {
+          await openBankInNewWindow(target, subject);
+          return;
+        }
+        if (!confirm('只从 QuizForge 的题库列表移除这条记录？\n\n磁盘中的题目和文件不会被删除。')) return;
+        setBankBusy(true);
+        var result = await window.pywebview.api.remove_bank_directory(target);
+        if (!result || !result.ok) {
+          showBankStatus((result && result.error) || '移除记录失败', true);
+          return;
+        }
+        await refreshBankList();
+        showBankStatus('已从列表移除，磁盘文件没有删除。', false);
+      } catch (error) {
+        showBankStatus('题库操作失败：' + error.message, true);
+      } finally {
+        setBankBusy(false);
+      }
+    });
+
+    if (bankBrowse) bankBrowse.addEventListener('click', async function () {
+      try {
+        setBankBusy(true);
+        showBankStatus('正在打开系统目录选择器…', false);
+        var result = await window.pywebview.api.browse_bank_directory();
+        if (!result || result.cancelled) {
+          showBankStatus('未选择目录；也可以直接粘贴绝对路径。', false);
+          return;
+        }
+        if (!result.ok) {
+          showBankStatus(result.error || '打开目录选择器失败', true);
+          return;
+        }
+        bankPath.value = result.bank_dir || '';
+        showBankStatus('已选择已有目录，点击“打开并切换”。', false);
+      } catch (error) {
+        showBankStatus('打开目录选择器失败：' + error.message, true);
+      } finally {
+        setBankBusy(false);
+      }
+    });
+
+    if (bankParentBrowse) bankParentBrowse.addEventListener('click', async function () {
+      try {
+        setBankBusy(true);
+        showBankStatus('正在选择新题库的保存位置…', false);
+        var result = await window.pywebview.api.browse_bank_parent_directory();
+        if (!result || result.cancelled) {
+          showBankStatus('未选择保存位置。', false);
+          return;
+        }
+        if (!result.ok) {
+          showBankStatus(result.error || '打开目录选择器失败', true);
+          return;
+        }
+        bankParent.value = result.parent_dir || '';
+        showBankStatus('保存位置已选择。', false);
+      } catch (error) {
+        showBankStatus('打开目录选择器失败：' + error.message, true);
+      } finally {
+        setBankBusy(false);
+      }
+    });
+
+    if (bankAssetsBrowse) bankAssetsBrowse.addEventListener('click', async function () {
+      try {
+        setBankBusy(true);
+        showBankStatus('正在选择共享图片目录…', false);
+        var result = await window.pywebview.api.browse_assets_directory();
+        if (!result || result.cancelled) {
+          showBankStatus('未修改共享图片目录。', false);
+          return;
+        }
+        if (!result.ok) throw new Error(result.error || '选择图片目录失败');
+        bankAssetsPath.value = result.assets_dir || '';
+        showBankStatus('目录已选择；点击“应用”后会先安全合并旧图片。', false);
+      } catch (error) {
+        showBankStatus('选择图片目录失败：' + error.message, true);
+      } finally {
+        setBankBusy(false);
+      }
+    });
+
+    if (bankAssetsForm) bankAssetsForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var target = bankAssetsPath ? bankAssetsPath.value.trim() : '';
+      if (!target) {
+        showBankStatus('请输入共享图片目录。', true);
+        bankAssetsPath.focus();
+        return;
+      }
+      try {
+        setBankBusy(true);
+        showBankStatus('正在核对并合并各题库图片，请勿关闭软件…', false);
+        var result = await window.pywebview.api.set_assets_directory(target);
+        if (!result || !result.ok) throw new Error((result && result.error) || '设置失败');
+        var summary = '共享图片目录已保存；复制 ' + (result.copied || 0)
+          + ' 个文件，复用 ' + (result.reused || 0) + ' 个同内容文件。';
+        if (!result.restart_required) {
+          showBankStatus(summary, false);
+          setBankBusy(false);
+          return;
+        }
+        showBankStatus(summary + ' 正在重启当前窗口；其他已打开窗口需分别重启。', false);
+        await window.pywebview.api.restart_app();
+      } catch (error) {
+        showBankStatus('设置共享图片目录失败：' + error.message, true);
+        setBankBusy(false);
+      }
+    });
+
+    if (bankOpenForm) bankOpenForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var target = bankPath ? bankPath.value.trim() : '';
+      if (!target) {
+        showBankStatus('请输入已有题库的绝对路径。', true);
+        bankPath.focus();
+        return;
+      }
+      try {
+        await switchBank(target, bankOpenSubject ? bankOpenSubject.value : 'math');
+      } catch (error) {
+        showBankStatus('切换题库失败：' + error.message, true);
+        setBankBusy(false);
+      }
+    });
+
+    if (bankOpenNew) bankOpenNew.addEventListener('click', async function () {
+      var target = bankPath ? bankPath.value.trim() : '';
+      if (!target) {
+        showBankStatus('请输入已有题库的绝对路径。', true);
+        bankPath.focus();
+        return;
+      }
+      try {
+        await openBankInNewWindow(target, bankOpenSubject ? bankOpenSubject.value : 'math');
+      } catch (error) {
+        showBankStatus('打开新窗口失败：' + error.message, true);
+        setBankBusy(false);
+      }
+    });
+
+    if (bankCreateForm) bankCreateForm.addEventListener('submit', async function (event) {
+      event.preventDefault();
+      var name = bankName ? bankName.value.trim() : '';
+      var parent = bankParent ? bankParent.value.trim() : '';
+      if (!name || !parent) {
+        showBankStatus('请填写题库名称和保存位置。', true);
+        (!name ? bankName : bankParent).focus();
+        return;
+      }
+      try {
+        setBankBusy(true);
+        showBankStatus('正在创建新题库…', false);
+        var result = await window.pywebview.api.create_bank_directory(
+          parent, name, bankCreateSubject ? bankCreateSubject.value : 'math');
+        if (!result || !result.ok) {
+          showBankStatus((result && result.error) || '创建题库失败', true);
+          setBankBusy(false);
+          return;
+        }
+        currentBank = result.bank_dir;
+        showBankStatus('题库已创建，正在重启 QuizForge…', false);
+        await window.pywebview.api.restart_app();
+      } catch (error) {
+        showBankStatus('创建题库失败：' + error.message, true);
+        setBankBusy(false);
+      }
+    });
+
+    if (bankCreateNew) bankCreateNew.addEventListener('click', async function () {
+      var name = bankName ? bankName.value.trim() : '';
+      var parent = bankParent ? bankParent.value.trim() : '';
+      if (!name || !parent) {
+        showBankStatus('请填写题库名称和保存位置。', true);
+        (!name ? bankName : bankParent).focus();
+        return;
+      }
+      try {
+        setBankBusy(true);
+        showBankStatus('正在创建并打开新窗口…', false);
+        var result = await window.pywebview.api.create_bank_in_new_window(
+          parent, name, bankCreateSubject ? bankCreateSubject.value : 'math');
+        if (!result || !result.ok) {
+          showBankStatus((result && result.error) || '创建题库失败', true);
+          return;
+        }
+        await refreshBankList();
+        bankName.value = '';
+        showBankStatus('题库已创建并在新窗口启动；当前窗口保持不变。', false);
+      } catch (error) {
+        showBankStatus('创建新窗口失败：' + error.message, true);
+      } finally {
+        setBankBusy(false);
+      }
+    });
+  })();
+  </script>
+
+  <!-- Obsidian 插件桥：仅在被 iframe 嵌入时生效，独立浏览器访问下整段是空操作。
+       点击题目卡片 → 通知宿主插件在相邻窗格打开该题的 md。见 docs/spec/obsidian-plugin.md R3 -->
+  <script>
+  (function () {
+    if (window.parent === window) return;  // 未被嵌入，什么都不做
+
+    function post(type, payload) {
+      try {
+        window.parent.postMessage(Object.assign({source: 'quizforge', type: type}, payload), '*');
+      } catch (e) { /* 宿主不在或跨域受限：静默降级 */ }
+    }
+
+    function reportLocation() {
+      post('location', {url: window.location.href});
+    }
+
+    post('ready', {});
+    reportLocation();
+    // pushState 不触发 popstate；题集局部切换正是走 pushState，所以在这里统一包一层。
+    ['pushState', 'replaceState'].forEach(function (name) {
+      var native = history[name];
+      history[name] = function () {
+        var result = native.apply(history, arguments);
+        reportLocation();
+        return result;
+      };
+    });
+    window.addEventListener('popstate', reportLocation);
+    window.addEventListener('hashchange', reportLocation);
+
+    // 点卡片空白处上报路径；点链接/按钮/输入控件时不拦截，交还原有交互
+    document.addEventListener('click', function (ev) {
+      var paper = ev.target.closest('a.paper-open-obsidian[data-path]');
+      if (paper) {
+        ev.preventDefault();
+        post('open-file', {path: paper.dataset.path});
+        return;
+      }
+      // .img-layout-bar 一并排除：那条控制条上的对齐/大小/分栏/重绘全是 <span>，
+      // 不在上面的标签名列表里，点一下会连带在相邻窗格打开这道题的 md——调个版式
+      // 却弹出一个笔记，很突然。
+      if (ev.target.closest('a, button, input, select, textarea, label, summary,' +
+                            ' .img-layout-bar, .qimg-resizable, .redraw-dialog')) return;
+      var card = ev.target.closest('.card[data-path]');
+      if (!card) return;
+      post('open-note', {path: card.dataset.path, id: card.dataset.id});
+    });
+  })();
+  </script>
 </body>
 </html>

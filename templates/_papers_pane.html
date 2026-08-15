@@ -1,0 +1,69 @@
+{# 文件夹原卷附件面板。与服务器版 _papers_pane.html 同一形状，差别只在附件身份：
+   那边是 collection_papers 的自增 id，这边是**相对题库根的路径**（服务端一律经
+   filestore.paper_abspath 反查并验祖先关系，见 app.py 那几个路由上方的注释）。
+
+   列表含后代文件夹的原卷（口径与题目列表一致），但**上传/重新转换只对当前这一
+   级**：条目上带着删除表单，对着看起来属于当前文件夹的文件点删除、删的却是别处
+   那个文件，是这个面板最容易出的错。所以后代原卷不给复选框（占位保对齐）、只标
+   出它实际在哪一级。 #}
+<details class="papers-pane" {% if folder_papers %}open{% endif %}>
+  <summary>📎 本文件夹原卷（{{ folder_papers|length }}）</summary>
+
+  {% if folder_papers %}
+    <ul class="papers-list">
+      {% for p in folder_papers %}
+        <li class="papers-item">
+          {% if p['folder'] == active_collection %}
+            <input type="checkbox" class="papers-chk" value="{{ p['id'] }}"
+                   data-kind="{{ p['kind'] }}" data-filename="{{ p['filename'] }}">
+          {% else %}
+            <span class="papers-chk-spacer"></span>
+          {% endif %}
+          <span class="papers-kind">{{ '解析' if p['kind'] == 'solution' else '题干' }}</span>
+          <a href="{{ url_for('folder_paper_view', id=p['id']) }}"
+             class="paper-open-obsidian" data-path="{{ p['id'] }}"
+             target="_blank" rel="noopener">{{ p['filename'] }}</a>
+          {% if p['folder'] != active_collection %}
+            <span class="papers-from">来自 {{ p['folder'].split('/')[-1] }}</span>
+          {% endif %}
+          <span class="papers-from">{{ (p['byte_size'] / 1048576) | round(1) }} MB</span>
+          <a href="{{ url_for('folder_paper_view', id=p['id'], download=1) }}"
+             class="btn btn-ghost btn-sm">下载</a>
+          <form method="post" action="{{ url_for('folder_paper_delete') }}"
+                style="display:inline"
+                onsubmit="return confirm('彻底删除原卷「{{ p['filename'] }}」？不进回收站。')">
+            <input type="hidden" name="id" value="{{ p['id'] }}">
+            <button type="submit" class="btn btn-sm btn-danger">删除</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+
+    {# 重新转换：勾一份题干卷（可再勾一份解析卷）→ 重跑识别，题目落回本文件夹。
+       按钮的亮灭与提示语由本模板底部那段脚本维护。 #}
+    <form method="post" class="papers-reconvert" id="papers-reconvert-form"
+          action="{{ url_for('folder_paper_reconvert', cid=active_collection) }}">
+      <input type="hidden" name="exam_paper_id" id="reconvert-exam-id" value="">
+      <input type="hidden" name="solution_paper_id" id="reconvert-sol-id" value="">
+      <select name="ocr_backend" class="input" aria-label="PDF 解析服务">
+        <option value="mineru">MinerU</option>
+        <option value="doc2x">Doc2X v3</option>
+      </select>
+      <button type="submit" class="btn" id="reconvert-btn" disabled>重新转换</button>
+      <span class="muted" id="reconvert-hint" style="margin-left:0.5em">需勾选一份「题干」原卷</span>
+    </form>
+  {% else %}
+    <p class="muted" style="margin:0.6em 0 0">本文件夹还没有原卷。转换时勾上「一并保存原卷」会自动存进来，也可以在下面手动上传。</p>
+  {% endif %}
+
+  <form method="post" class="papers-upload" enctype="multipart/form-data"
+        action="{{ url_for('folder_paper_upload', cid=active_collection) }}">
+    <input type="file" name="file" class="input" required
+           accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp,.bmp">
+    <select name="kind" class="input">
+      <option value="exam">题干卷</option>
+      <option value="solution">解析卷</option>
+    </select>
+    <button type="submit" class="btn btn-ghost">上传原卷</button>
+  </form>
+</details>

@@ -6,7 +6,7 @@
      normalizer 调用时只传两个位置参数，所以那个默认值就是实际生效值——
      换成 deepseek-v4-pro 这类**推理模型**后，reasoning_content 与 content
      共享同一份 max_tokens 预算，长草稿的思维链吃光 8192，content 返回空串，
-     于是抛「DeepSeek 返回空内容」。
+     于是抛「DeepSeek 返回空内容」（这正是本功能要修的线上故障）。
 而 project-alpha 是「不改一行」的既有约定，所以在 QuizForge 侧自己实现一份，
 接口与 DeepSeekClient 保持一致（鸭子类型），可直接喂给 `src.normalizer.normalize`：
 
@@ -19,17 +19,20 @@ normalize() 靠 finish_reason == "length" 判断被截断并续传，所以 fini
 finish_reason="stop"。此时 normalize() 认定「正常结束」直接 break，一轮续传都
 不会发生，后面的题被静默丢弃（实测 claude-haiku-4-5 在 43K 字符的题干+解析
 合并草稿上只吐 11/19 题就 stop）。见 _looks_truncated()。
-
-注：逐块识别路径（blockpipe.py）用不到续传那套——它每次只发一个块，块数在调用
-前已定死。但两条路径共用这个客户端，所以续传相关的判断仍然保留。
 """
 
 import json
+import ipaddress
 import logging
 import re
+import socket
+import unicodedata
 import urllib.parse
+from pathlib import Path
 
+import httpx
 from openai import OpenAI
+from httpcore._backends.sync import SyncBackend
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +50,164 @@ _OUT_BLOCK_RE = re.compile(r"^- ", re.MULTILINE)
 # 续传轮 user_content 里的「已完成清单」正文（normalizer 每行写成 "N. 题干摘要"）
 _DONE_LIST_RE = re.compile(r"<已完成清单>(.*?)</已完成清单>", re.S)
 _DONE_ITEM_RE = re.compile(r"^\s*\d+\.", re.MULTILINE)
+
+
+class BaseURLSecurityError(ValueError):
+    """Base URL 可能把服务器请求引向内网或泄露 API Key。"""
+
+
+def _is_public_address(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """只允许普通公网单播地址；保留段、组播与 IPv4-mapped IPv6 都从严处理。"""
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        return _is_public_address(mapped)
+    return (
+        address.is_global
+        and not address.is_multicast
+        and not address.is_unspecified
+        and not address.is_reserved
+    )
+
+
+def resolve_public_ips(host: str, port: int = 443) -> tuple[str, ...]:
+    """解析主机并返回经过 SSRF 边界检查的公网 IP。
+
+    只要 DNS 同时返回任一内网/本机/保留地址就整体拒绝，不能挑一个公网地址放行：
+    攻击者可以让记录轮转，保存时给公网、真正请求时再给 127.0.0.1。
+    """
+    try:
+        literal = ipaddress.ip_address(host.rstrip("."))
+        addresses = [literal]
+    except ValueError:
+        try:
+            rows = socket.getaddrinfo(
+                host, port, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+            )
+        except OSError as exc:
+            raise BaseURLSecurityError(f"Base URL 的主机无法解析：{host}") from exc
+        addresses = []
+        seen = set()
+        for row in rows:
+            value = row[4][0]
+            address = ipaddress.ip_address(value)
+            if address not in seen:
+                seen.add(address)
+                addresses.append(address)
+    if not addresses:
+        raise BaseURLSecurityError(f"Base URL 的主机没有可用地址：{host}")
+    blocked = [str(address) for address in addresses if not _is_public_address(address)]
+    if blocked:
+        raise BaseURLSecurityError(
+            "Base URL 只能指向公网 API，不能访问本机、局域网、云元数据或保留地址"
+        )
+    # 服务器未必有 IPv6 出口，优先 IPv4；Host 与 TLS SNI 仍使用原域名。
+    addresses.sort(key=lambda address: address.version)
+    return tuple(str(address) for address in addresses)
+
+
+def _is_loopback_url(parsed) -> bool:
+    """判断是否指向本机回环地址。
+
+    单机版特有：本地推理服务（Ollama、LM Studio、vLLM 等）就跑在 127.0.0.1 上，
+    且只有 http。服务器版禁止内网地址是为了防止**它的用户**拿服务器去探内网，
+    而单机版的「用户」就是本机主人，自己连自己的服务不构成越权，也不存在
+    API Key 出机器的问题（流量根本没离开 loopback）。
+    """
+    host = (parsed.hostname or "").lower()
+    if host in ("localhost", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_base_url(url: str) -> str:
+    """规范化并验证用户可控的 OpenAI 兼容 Base URL。
+
+    强制 HTTPS 防止 API Key 明文外泄；保存时解析一次，真正建连时还会再次解析并
+    把 socket 固定到已验证的 IP，避免 DNS rebinding 的检查/使用时间差。
+
+    单机版例外：放行 http://127.0.0.1 这类回环地址，供本地推理服务使用
+    （见 _is_loopback_url）。
+    """
+    normalized = normalize_base_url(url)
+    if not normalized or any(
+        ord(char) < 33 or char.isspace() or unicodedata.category(char) == "Cf"
+        for char in normalized
+    ):
+        raise BaseURLSecurityError("Base URL 格式无效")
+    try:
+        parsed = urllib.parse.urlsplit(normalized)
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise BaseURLSecurityError("Base URL 端口无效") from exc
+    if not parsed.hostname:
+        raise BaseURLSecurityError("Base URL 缺少主机名")
+    if parsed.username is not None or parsed.password is not None:
+        raise BaseURLSecurityError("Base URL 不能包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise BaseURLSecurityError("Base URL 不能包含查询参数或片段")
+    # 本地推理服务：跳过 HTTPS 与公网地址两项检查（流量不出本机）
+    if _is_loopback_url(parsed):
+        return normalized
+    if parsed.scheme.lower() != "https":
+        raise BaseURLSecurityError("Base URL 必须使用 HTTPS，避免 API Key 明文传输")
+    resolve_public_ips(parsed.hostname, port)
+    return normalized
+
+
+class _PublicOnlyNetworkBackend(SyncBackend):
+    """在真正 TCP 建连前复验 DNS，并连接已验证的数字 IP。
+
+    httpcore 后续仍用原始 hostname 做 Host 与 TLS SNI；这里只有 socket 目标被固定，
+    因而既保留正常证书校验，也堵住“校验后 DNS 立刻改指内网”的 rebinding 窗口。
+    """
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options=None,
+    ):
+        # 回环地址直连：与 validate_base_url 的放行口径一致，否则本地推理服务
+        # 能存进设置却连不上（保存时放行、建连时拒绝）。
+        try:
+            if ipaddress.ip_address(host).is_loopback:
+                return super().connect_tcp(
+                    host, port, timeout=timeout,
+                    local_address=local_address, socket_options=socket_options,
+                )
+        except ValueError:
+            if host.lower() in ("localhost", "::1"):
+                return super().connect_tcp(
+                    host, port, timeout=timeout,
+                    local_address=local_address, socket_options=socket_options,
+                )
+        address = resolve_public_ips(host, port)[0]
+        return super().connect_tcp(
+            address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,
+        )
+
+
+def _safe_http_client() -> httpx.Client:
+    """为 OpenAI SDK 建立不读系统代理、禁止重定向、DNS 建连受控的客户端。"""
+    transport = httpx.HTTPTransport(trust_env=False)
+    pool = getattr(transport, "_pool", None)
+    if pool is None or not hasattr(pool, "_network_backend"):
+        raise RuntimeError("当前 httpx/httpcore 版本不支持安全网络后端")
+    pool._network_backend = _PublicOnlyNetworkBackend()
+    return httpx.Client(
+        transport=transport,
+        trust_env=False,
+        follow_redirects=False,
+    )
 
 
 def count_draft_questions(user_content: str) -> int:
@@ -90,8 +251,6 @@ def _looks_truncated(content: str, user_content: str, finish: str,
 
     只规范化指定题号（normalizer 的 only_numbers）时，输出本就该远少于草稿，
     一律不判——靠 system prompt 里那条「只输出题号为 …」标记识别。
-
-    逐块识别路径不受此逻辑影响：它每块只有一道题，`want < 3` 直接返回 False。
     """
     if finish != "stop":
         return False
@@ -194,11 +353,15 @@ class LLMClient:
     def __init__(self, api_key: str, base_url: str, model: str,
                  max_tokens: int = MAX_TOKENS_DEFAULT):
         self.model = model
-        self.base_url = normalize_base_url(base_url)
+        self.base_url = validate_base_url(base_url)
         self.max_tokens = clamp_max_tokens(max_tokens)
         if self.base_url != (base_url or "").strip().rstrip("/"):
             logger.info("Base URL 已补全: %s -> %s", base_url, self.base_url)
-        self._client = OpenAI(api_key=api_key, base_url=self.base_url)
+        self._client = OpenAI(
+            api_key=api_key,
+            base_url=self.base_url,
+            http_client=_safe_http_client(),
+        )
 
     def chat(self, system_prompt: str, user_content: str,
              temperature: float = 0.1, max_tokens: int | None = None) -> tuple[str, str]:
@@ -266,6 +429,97 @@ class LLMClient:
                               choice.finish_reason, system_prompt, mt,
                               getattr(choice.message, "reasoning_content", None))
 
+    def chat_vision(self, system_prompt: str, user_content: str,
+                    image_path, temperature: float = 0.2,
+                    max_tokens: int | None = None) -> tuple[str, str]:
+        """带图对话（AI 重绘配图用）。返回 (content, finish_reason)。
+
+        为什么是新方法而不是给 `chat()` 加个 image 参数：`chat()` 的签名是与
+        project-alpha 的 `DeepSeekClient` 对齐的鸭子类型契约，会被原样喂给
+        `src.normalizer.normalize`（那边按位置传两个参数）。动它的签名等于动一条
+        跑在生产上的链路，而 project-alpha 是「不改一行」的约定。
+
+        走 OpenAI 兼容的多模态形式：user.content 是数组，图片用 base64 data URL
+        的 `image_url`。注意不是所有模型都支持——纯文本模型（如 deepseek-chat）
+        会直接报错，故错误提示里点明「需要多模态模型」，否则用户只看到一句
+        看不懂的 400。
+
+        默认 temperature 比 chat() 的 0.1 略高（0.2）：绘图要一点构图上的灵活性，
+        但仍需足够确定性来遵守输出格式约束。
+        """
+        import base64
+        import mimetypes
+
+        p = Path(image_path)
+        if not p.is_file():
+            raise LLMClientError(f"找不到要重绘的图片：{p.name}")
+        mime = mimetypes.guess_type(p.name)[0] or "image/jpeg"
+        if not mime.startswith("image/"):
+            mime = "image/jpeg"
+        try:
+            b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        except OSError as e:
+            raise LLMClientError(f"读取图片失败：{e}") from e
+
+        mt = self.max_tokens if max_tokens is None else clamp_max_tokens(max_tokens)
+        # 图片放在文字之前：多数视觉模型对「先看图再读要求」的顺序响应更好，
+        # 也与 Anthropic 官方文档给的示例顺序一致。
+        parts = [
+            {"type": "image_url",
+             "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            {"type": "text", "text": user_content},
+        ]
+        try:
+            resp = self._client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": parts},
+                ],
+                temperature=temperature,
+                max_tokens=mt,
+            )
+        except Exception as e:
+            detail = " ".join(str(e).split())
+            raise LLMClientError(
+                f"带图调用失败（{self.model} @ {self.base_url}）："
+                f"{detail[:300]}。请确认该模型支持图片输入"
+                f"（纯文本模型如 deepseek-chat 不支持，需换成多模态模型）。"
+            ) from e
+
+        if not hasattr(resp, "choices"):
+            body = resp if isinstance(resp, str) else repr(resp)
+            if body.lstrip().startswith("data:"):
+                content, finish = _parse_sse(body)
+                return self._finalize_plain(content, finish, mt)
+            snippet = " ".join(body.split())[:200]
+            raise LLMClientError(
+                f"{self.base_url} 返回的不是 OpenAI 兼容响应。响应开头：{snippet}")
+
+        choices = resp.choices or []
+        if not choices:
+            raise LLMClientError(f"模型 {self.model} 的响应里没有 choices。")
+        choice = choices[0]
+        return self._finalize_plain(
+            choice.message.content, choice.finish_reason, mt,
+            getattr(choice.message, "reasoning_content", None))
+
+    def _finalize_plain(self, content, finish: str, mt: int,
+                        reasoning: str | None = None) -> tuple[str, str]:
+        """空内容判错，但**不做**「假完成」题数校验。
+
+        `_finalize` 那套是给 md 规范化用的（数草稿题数判断模型是否偷懒），
+        配图生成只出一段 TikZ，没有「题数」概念，套上去会误判。
+        """
+        if not content:
+            if finish == "length":
+                raise LLMClientError(
+                    f"模型 {self.model} 的思维链占满了 max_tokens 预算（当前 {mt}），"
+                    f"没有输出正文。请在 LLM Provider 配置里把 max_tokens 调大"
+                    f"（建议 16000 以上）后重试。")
+            raise LLMClientError(f"模型 {self.model} 返回空内容（finish_reason={finish}）")
+        return content.strip(), finish
+
     def _finalize(self, content, user_content: str, finish: str,
                   system_prompt: str, mt: int,
                   reasoning: str | None = None) -> tuple[str, str]:
@@ -278,7 +532,7 @@ class LLMClient:
                                self.model, mt, len(reasoning or ""))
                 raise LLMClientError(
                     f"模型 {self.model} 的思维链占满了 max_tokens 预算（当前 {mt}），"
-                    f"没有输出正文。请在「识别模型」设置里把 max_tokens 调大"
+                    f"没有输出正文。请在 LLM Provider 配置里把 max_tokens 调大"
                     f"（推理模型建议 32000 以上），或改用非推理模型后重试。"
                 )
             raise LLMClientError(f"模型 {self.model} 返回空内容（finish_reason={finish}）")

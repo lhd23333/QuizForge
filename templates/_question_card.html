@@ -1,0 +1,209 @@
+<article class="card {% if q['selected'] %}selected{% endif %}" data-id="{{ q['id'] }}"
+         data-path="{{ q['path'] }}" draggable="true">
+  <div class="card-head">
+    {% if question_card_sort=='custom' %}<span class="drag-handle" title="拖拽排序">⠿</span>{% endif %}
+    <label class="sel-box">
+      <input type="checkbox" class="sel-toggle" data-id="{{ q['id'] }}"
+             {% if q['selected'] %}checked{% endif %}>
+      <span class="sel-box-label">选入</span>
+    </label>
+    <label class="fullpage-box hidden" title="讲义模式：此题独占整页">
+      <input type="checkbox" name="fullpage" value="{{ q['id'] }}" form="export-form">
+      独占整页
+    </label>
+    <span class="meta card-meta">
+      <span class="legacy-card-controls">
+        <span class="type-chips" data-id="{{ q['id'] }}" title="点击设题型，再点当前项清除">
+          {% for ty in types %}
+            <span class="type-chip {% if q['type'] == ty %}active{% endif %}"
+                  data-type="{{ ty }}">{{ ty|qtype_label }}</span>
+          {% endfor %}
+        </span>
+        <span class="diff-dots" data-id="{{ q['id'] }}" title="点击设置难度 1-5，再点当前值清除">
+          {% for n in range(1, 6) %}
+            <span class="diff-dot {% if q['difficulty'] == n|string %}active{% endif %}"
+                  data-level="{{ n }}">{{ n }}</span>
+          {% endfor %}
+        </span>
+      </span>
+
+      <span class="desktop-card-controls">
+        <span class="card-control-group">
+          <button type="button" class="card-summary-button type-summary-trigger"
+                  data-card-popover-trigger="type" aria-haspopup="menu" aria-expanded="false"
+                  title="修改题型">
+            <span class="type-summary-value">{{ q['type']|qtype_label if q['type'] else '未分类' }}</span><span aria-hidden="true">⌄</span>
+          </button>
+          <span class="type-chips question-popover type-popover" data-id="{{ q['id'] }}"
+                data-card-popover="type" role="menu" aria-label="设置题型" hidden>
+            {% for ty in types %}
+              <button type="button" role="menuitemradio"
+                      aria-checked="{{ 'true' if q['type'] == ty else 'false' }}"
+                      class="type-chip {% if q['type'] == ty %}active{% endif %}"
+                      data-type="{{ ty }}">{{ ty|qtype_label }}</button>
+            {% endfor %}
+            <button type="button" role="menuitemradio"
+                    aria-checked="{{ 'true' if not q['type'] else 'false' }}"
+                    class="type-chip type-chip-clear {% if not q['type'] %}active{% endif %}"
+                    data-type="">清除题型</button>
+          </span>
+        </span>
+        <span class="card-control-group">
+          <button type="button" class="card-summary-button difficulty-summary-trigger"
+                  data-card-popover-trigger="difficulty" aria-haspopup="menu" aria-expanded="false"
+                  title="修改难度">
+            难度 <span class="difficulty-summary-value">{{ q['difficulty'] or '—' }}</span><span aria-hidden="true">⌄</span>
+          </button>
+          <span class="diff-dots question-popover difficulty-popover" data-id="{{ q['id'] }}"
+                data-card-popover="difficulty" role="menu" aria-label="设置难度" hidden>
+            {% for n in range(1, 6) %}
+              <button type="button" role="menuitemradio"
+                      aria-checked="{{ 'true' if q['difficulty'] == n|string else 'false' }}"
+                      class="diff-dot {% if q['difficulty'] == n|string %}active{% endif %}"
+                      data-level="{{ n }}">{{ n }}</button>
+            {% endfor %}
+            <button type="button" role="menuitemradio"
+                    aria-checked="{{ 'true' if not q['difficulty'] else 'false' }}"
+                    class="difficulty-clear {% if not q['difficulty'] %}active{% endif %} diff-dot"
+                    data-level="">清除</button>
+          </span>
+        </span>
+      </span>
+      <button type="button" class="star-toggle {% if q['starred'] %}on{% endif %}"
+              data-id="{{ q['id'] }}" aria-pressed="{{ 'true' if q['starred'] else 'false' }}"
+              title="标星：标记高质量题（点击切换）" aria-label="切换标星">★</button>
+      {% if q['source'] %}<span class="src legacy-card-source">{{ q['source'] }}</span>{% endif %}
+    </span>
+    <div class="spacer"></div>
+    <button type="button" class="link card-a4-preview-trigger" aria-pressed="false"
+            title="把当前题卡固定为近似 A4 版心宽度，不生成 PDF">
+      A4 视图
+    </button>
+    <button type="button" class="link inline-edit-trigger card-edit-button" title="在当前题卡原地编辑">
+      <span aria-hidden="true">✎</span><span>编辑</span>
+    </button>
+    <div class="desktop-card-more card-control-group">
+      <button type="button" class="card-more-trigger" data-card-popover-trigger="more"
+              aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>
+      <div class="question-popover card-action-menu" data-card-popover="more" role="menu" hidden>
+        <div class="card-menu-source" role="presentation" title="{{ q['source'] or '未记录题源' }}">
+          <span>题源</span><strong>{{ q['source'] or '未记录' }}</strong>
+        </div>
+        <form method="post" action="{{ url_for('question_delete', qid=q['id']) }}"
+              class="question-delete-form">
+          <button type="submit" class="card-menu-danger" role="menuitem">删除题目</button>
+        </form>
+      </div>
+    </div>
+    <form method="post" action="{{ url_for('question_delete', qid=q['id']) }}"
+          class="question-delete-form legacy-card-delete" style="display:inline">
+      <button type="submit" class="link link-danger">删除</button>
+    </form>
+  </div>
+  <div class="card-reader">
+  {% if '![[' in q['body'] %}
+    {# data-layouts：多图逐图设置；data-groups：连续两图分组。追加题卡和首屏题卡
+       共用本模板，避免无限滚动后图片按钮与普通页面行为分叉。 #}
+    <div class="img-layout-bar" data-id="{{ q['id'] }}"
+         data-width="{{ q['img_width'] or '' }}"
+         data-align="{{ q['img_align'] or '' }}"
+         data-layouts="{{ q['img_layouts'] | tojson }}"
+         data-groups="{{ qfig_groups(q) }}"
+         data-originals="{{ q['img_originals'] | tojson }}">
+      <span class="img-layout-label">图片位置</span>
+      <span class="img-align-chips">
+        {% for a, label in [('left', '左'), ('center', '中'), ('right', '右')] %}
+          <span class="img-align-chip" data-align="{{ a }}">{{ label }}</span>
+        {% endfor %}
+      </span>
+      <span class="img-width-wrap"
+            title="保存的是图片占导出版心的百分比；窗口变化只改变屏幕预览，最终 PDF 比例不变。也可拖动图片右下角手柄微调">
+        <span class="img-width-label">导出宽度</span>
+        <span class="img-width-value">35%</span>
+        <span class="img-width-reset" title="清除自定义宽度，恢复默认">×</span>
+      </span>
+      <span class="img-width-presets" title="按导出版心设置图片宽度；最终效果可在预览中确认">
+        {% for w in (25, 35, 50, 70) %}<span class="img-width-chip" data-width="{{ w }}">{{ w }}%</span>{% endfor %}
+      </span>
+      <span class="img-pick-label" hidden></span>
+      <span class="img-stack-chip" hidden
+            title="选择多张图片上下排列或左右排列；图片本身可拖动交换顺序"></span>
+      {% set _pair = qpair_state(q) %}
+      {% if _pair %}
+        <span class="img-quad-chip {% if _pair == 'on' %}on{% endif %}"
+              title="四张图各配一个选项，按图片大小排成两列或四列（自动识别，可关）">一图一选项</span>
+      {% endif %}
+      {% set _sm = qsplit_mode(q) %}
+      {% if q['type'] in ('单选题', '多选题') %}
+        <span class="img-split-chip {% if _sm == 'opts' %}on{% endif %}"
+              data-mode="opts" title="题干占整行，仅选项与图片左右分栏">仅选项分栏</span>
+        <span class="img-split-chip {% if _sm == 'full' %}on{% endif %}"
+              data-mode="full" title="题干+选项整体与图片左右分栏">整体分栏</span>
+        <span class="img-split-chip {% if _sm == 'between' %}on{% endif %}"
+              data-mode="between" title="图片排在题干与选项之间">题干与选项间</span>
+        <span class="img-split-chip {% if _sm == 'after' %}on{% endif %}"
+              data-mode="after" title="图片排在全部选项之后">题目后</span>
+      {% elif q['type'] == '填空题' %}
+        <span class="img-split-chip {% if _sm in ('opts', 'full') %}on{% endif %}"
+              data-mode="full" title="题干与图片左右分栏">题干分栏</span>
+        <span class="img-split-chip {% if _sm == 'between' %}on{% endif %}"
+              data-mode="between" title="图片排在题干与小问之间">题干与小问间</span>
+        <span class="img-split-chip {% if _sm == 'after' %}on{% endif %}"
+              data-mode="after" title="不分栏，图片排在题目后">题目后</span>
+      {% elif q['type'] == '解答题' %}
+        <span class="img-split-chip {% if _sm == 'sub' %}on{% endif %}"
+              data-mode="sub" title="题干占整行，仅小问与图片左右分栏">仅小问分栏</span>
+        <span class="img-split-chip {% if _sm == 'full' %}on{% endif %}"
+              data-mode="full" title="题干+小问整体与图片左右分栏">整体分栏</span>
+        <span class="img-split-chip {% if _sm == 'between' %}on{% endif %}"
+              data-mode="between" title="图片排在题干与小问之间">题干与小问间</span>
+        <span class="img-split-chip {% if _sm == 'after' %}on{% endif %}"
+              data-mode="after" title="图片排在全部小问之后">题目后</span>
+      {% endif %}
+      <span class="img-redraw-btn" title="用 AI 把这张图重绘成矢量图（高考风格黑白线条图）">✎ AI 重绘</span>
+      <span class="img-restore-btn" title="退回重绘前的原图" hidden>↺ 还原原图</span>
+    </div>
+  {% endif %}
+  <div class="body body-structured">{{ q | qbody }}</div>
+  {% if q['solution'] %}
+    <details class="q-solution">
+      <summary>解析</summary>
+      {% if '![[' in q['solution'] %}
+        <div class="img-layout-bar" data-id="{{ q['id'] }}" data-field="solution"
+             data-width="" data-align=""
+             data-layouts="{{ q['sol_img_layouts'] | tojson }}"
+             data-groups="{{ qsol_fig_groups(q) }}">
+          <span class="img-layout-label">图片位置</span>
+          <span class="img-align-chips">
+            {% for a, label in [('left', '左'), ('center', '中'), ('right', '右')] %}
+              <span class="img-align-chip" data-align="{{ a }}">{{ label }}</span>
+            {% endfor %}
+          </span>
+          <span class="img-width-wrap"
+                title="保存的是图片占导出版心的百分比；窗口变化只改变屏幕预览，最终 PDF 比例不变。也可拖动图片右下角手柄微调">
+            <span class="img-width-label">导出宽度</span>
+            <span class="img-width-value">35%</span>
+            <span class="img-width-reset" title="清除自定义宽度，恢复默认">×</span>
+          </span>
+          <span class="img-width-presets" title="按导出版心设置图片宽度；最终效果可在预览中确认">
+            {% for w in (25, 35, 50, 70) %}<span class="img-width-chip" data-width="{{ w }}">{{ w }}%</span>{% endfor %}
+          </span>
+          <span class="img-pick-label" hidden></span>
+          <span class="img-stack-chip" hidden
+                title="选择多张图片上下排列或左右排列；图片本身可拖动交换顺序"></span>
+          <span class="img-split-chip {% if q['sol_img_split'] == 'full' %}on{% endif %}"
+                data-mode="full" title="文字环绕图片，超过图片高度后恢复整行；再点一次关闭">图文混排</span>
+        </div>
+      {% endif %}
+      <div class="solution-body body-structured">{{ q | qsolution }}</div>
+    </details>
+  {% endif %}
+  <div class="tags">
+    {% for tg in q['tags'] %}<span class="tag">{{ tg }}</span>{% endfor %}
+  </div>
+  </div>
+
+  {% with editor_new=false, editor_collection='' %}
+    {% include "_inline_question_editor.html" %}
+  {% endwith %}
+</article>

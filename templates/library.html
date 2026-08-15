@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+
+{% block title %}资料库 · QuizForge{% endblock %}
+
+{% block content %}
+<section class="library-shell" aria-label="资料库">
+  <aside class="library-sidebar">
+    <div class="library-sidebar-head">
+      <div>
+        <h1>资料库</h1>
+        <p>当前题库目录</p>
+      </div>
+      <span class="library-local-badge">本机</span>
+    </div>
+    <div id="library-tree" class="library-tree" role="tree" aria-label="文件列表">
+      <div class="library-loading">正在读取文件…</div>
+    </div>
+  </aside>
+
+  <div class="library-workspace">
+    <div class="library-workspace-bar">
+      <span class="library-workspace-hint">Markdown 可直接编辑；文件保持打开，切换标签不会重新加载</span>
+      <div class="library-split-actions" aria-label="分栏布局">
+        <button type="button" class="library-layout-button" data-library-layout="vertical"
+                title="左右分栏" aria-label="左右分栏">◫</button>
+        <button type="button" class="library-layout-button" data-library-layout="horizontal"
+                title="上下分栏" aria-label="上下分栏">⬒</button>
+        <button type="button" class="library-layout-button" data-library-layout="single"
+                title="关闭分栏" aria-label="关闭分栏">□</button>
+      </div>
+    </div>
+    <div id="library-panes" class="library-panes is-single"></div>
+  </div>
+</section>
+
+<template id="library-pane-template">
+  <section class="library-pane" data-library-pane>
+    <div class="library-tabs" role="tablist" aria-label="已打开文件"></div>
+    <div class="library-pane-content">
+      <div class="library-empty">
+        <div class="library-empty-mark" aria-hidden="true">MD</div>
+        <h2>在软件里阅读和编辑本地资料</h2>
+        <p>Markdown 可在源码模式直接编辑；PDF 与图片只读。文件只从当前题库目录读取，不会上传。</p>
+      </div>
+    </div>
+  </section>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_v('js/library-tabs.js') }}" defer></script>
+{% endblock %}

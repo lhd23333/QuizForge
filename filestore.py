@@ -7,8 +7,9 @@
 - 文件夹 = data/bank/ 下的真实目录；文件夹 id 即相对 BANK_DIR 的 POSIX 相对路径。
 - 回收站 = data/bank/.trash/：单题软删平铺存放（用 frontmatter 记原路径供恢复）；
   整个文件夹被删除时，其子树整体移入 .trash/ 下（附 .trash_meta.json 记原位置）。
-- 勾选（选入组卷篮）是纯内存态，不落盘，随进程重启清空。
-- 图片：data/bank/_assets/ 下扁平存放，正文用 Obsidian 双链 `![[<id>_N.ext]]` 引用。
+- 勾选（选入组卷篮）以题目 id 落在应用 data 目录，插件重启后继续保留。
+- 图片：桌面版多题库可共用一个显式图片目录，源码模式默认仍是
+  `data/bank/_assets/`；正文统一用 Obsidian 双链 `![[<id>_N.ext]]` 引用。
 
 本模块函数名尽量对齐 quizbank/db.py，方便照原样移植 app.py 的路由逻辑。
 """
@@ -16,9 +17,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import shutil
+import hashlib
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -27,11 +32,15 @@ from ruamel.yaml import YAML
 
 import config
 
+logger = logging.getLogger(__name__)
+
 _yaml = YAML()
 _yaml.preserve_quotes = True
 _yaml.width = 4096  # 别让长题干/公式被自动折行
 
-_write_lock = threading.Lock()
+# 单题元数据更新可能被 rename_tag/add_tags_to 等批量入口嵌套调用；RLock 让所有
+# “读当前文件→改一部分→写回”都能共用同一把锁，同时与整组安全刷新互斥。
+_write_lock = threading.RLock()
 
 # 正文分区标题行：形如 "## 解析"、"## 备注"
 _SECTION_RE = re.compile(r"(?m)^##[ \t]+(.*?)[ \t]*$")
@@ -40,8 +49,76 @@ _SECTION_RE = re.compile(r"(?m)^##[ \t]+(.*?)[ \t]*$")
 # 使直接在 Obsidian 里改文件也能被下次请求感知到。
 _cache: dict[str, dict] = {}
 
-# 勾选篮：纯内存，不持久化。
+# 一次页面请求会连续读取题目、标签和文件夹，用户随后点进试卷时也会立刻再读一遍。
+# Windows 上对上万份 Markdown 逐个 rglob/stat 需要数秒，因此短时间复用整次扫描；
+# 本程序的写入口会主动失效，Obsidian 外部编辑则最多等这个很短的窗口后被发现。
+_SCAN_CACHE_SECONDS = 5.0
+_SIDEBAR_CACHE_SECONDS = 30.0
+_scan_snapshot: dict[str, dict] | None = None
+_scan_snapshot_root: Path | None = None
+_scan_snapshot_at = 0.0
+_tree_snapshot: list[dict] | None = None
+_tree_snapshot_root: Path | None = None
+_tree_snapshot_at = 0.0
+_tags_snapshot: list[str] | None = None
+_tags_snapshot_root: Path | None = None
+_tags_snapshot_at = 0.0
+_scan_lock = threading.RLock()
+
+# 勾选篮：内存集合负责快速查询，修改后原子写入 data/selections.json。
 _selected: set[str] = set()
+_selected_lock = threading.RLock()
+
+# 这些目录属于 QuizForge 的配套数据，不是题集。集中维护，避免题目扫描、完整目录
+# 树和惰性目录树三处各写一套条件，新增讲义目录后只漏掉其中一处。
+_RESERVED_BANK_DIRS = frozenset({"_assets", "_handouts", "_backups"})
+
+
+def invalidate_scan_cache(*, folder_structure: bool = False) -> None:
+    """失效题目/标签快照；只有目录结构真变了才失效完整文件夹树。
+
+    题型、难度、分栏等单题写入不会增删目录。旧实现却连 642 个目录的树缓存一起
+    清掉，结果是刚点完任意题卡按钮再进“批量导入”，又要重新遍历整棵目录树。
+    文件夹创建、改名、移动、删除等调用方显式传 ``folder_structure=True``。
+    """
+    global _scan_snapshot, _scan_snapshot_root, _scan_snapshot_at
+    global _tree_snapshot, _tree_snapshot_root, _tree_snapshot_at
+    global _tags_snapshot, _tags_snapshot_root, _tags_snapshot_at
+    with _scan_lock:
+        _scan_snapshot = None
+        _scan_snapshot_root = None
+        _scan_snapshot_at = 0.0
+        if folder_structure:
+            _tree_snapshot = None
+            _tree_snapshot_root = None
+            _tree_snapshot_at = 0.0
+        _tags_snapshot = None
+        _tags_snapshot_root = None
+        _tags_snapshot_at = 0.0
+
+
+def _save_selected_unlocked() -> None:
+    path = config.SELECTIONS_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("w", encoding="utf-8", newline="\n") as f:
+        json.dump(sorted(_selected), f, ensure_ascii=False, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _load_selected() -> None:
+    path = config.SELECTIONS_PATH
+    if not path.exists():
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("选题状态无法读取，已忽略：%s", exc)
+        return
+    if isinstance(raw, list):
+        _selected.update(str(qid) for qid in raw if qid)
 
 
 def init_store():
@@ -49,6 +126,9 @@ def init_store():
     config.BANK_DIR.mkdir(parents=True, exist_ok=True)
     config.TRASH_DIR.mkdir(parents=True, exist_ok=True)
     config.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    with _selected_lock:
+        _selected.clear()
+        _load_selected()
 
 
 def _now_iso() -> str:
@@ -65,7 +145,24 @@ def _new_id() -> str:
 
 
 def _split_sections(body: str) -> tuple[str, list[tuple[str, str]]]:
-    """把正文切成 (题干, [(分区标题, 分区内容), ...])。"""
+    """把正文切成 (题干, [(分区标题, 分区内容), ...])。
+
+    **题干绝不会因为正文以 `## ` 开头而变成空**（2026-08-09 补的护栏）。原先
+    「首个 `## ` 之前的内容即题干」这条规则遇上「正文第一行就是 `## 标题`」时，
+    题干是空字符串、全部内容落进 `sections`——而题卡（app.py 的 qbody 过滤器）
+    与 PDF 导出（exporter）都只读题干，两边一起空白，用户看到的是「md 里明明
+    有内容，题卡却是空的」。真实成因是 MinerU 把原卷题号提成了 `## ` 标题、
+    而剥题号的正则当时不认 `$\\displaystyle N$` 包裹（见 importer._STRIP_NUM_RE），
+    一次导入 443 题里 321 题栽在这儿。
+
+    上游那条正则已经补好，这里仍留护栏：`## ` 开头的正文还可能来自用户在
+    Obsidian 里手写、或从别处迁入的历史数据，而「静默丢掉整道题的正文」这个
+    后果太重，不该只靠一条上游正则挡住。
+
+    护栏的口径刻意窄：只在**题干为空**时把首个分区提回题干，且首个分区是
+    `## 解析` 时不动——那是正常的「无题干纯解析」形态（回收站里的残题、
+    只录了答案的题），提上来会让解析被当成题干显示。
+    """
     matches = list(_SECTION_RE.finditer(body))
     if not matches:
         return body.strip("\n"), []
@@ -77,6 +174,13 @@ def _split_sections(body: str) -> tuple[str, list[tuple[str, str]]]:
         end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
         content = body[start:end].strip("\n")
         sections.append((heading, content))
+    if not stem and sections and sections[0][0] != "解析":
+        heading, content = sections[0]
+        # 标题连同其下的内容一起回到题干：标题行本身多半就是被误提的题号/章节名，
+        # 但也可能是用户手写的小标题，删掉就是改用户的正文。原样保留、只是不再
+        # 当分区看——渲染成 `## …` 一行，用户看得见也删得掉。
+        stem = f"## {heading}\n{content}".strip("\n") if content else f"## {heading}"
+        sections = sections[1:]
     return stem, sections
 
 
@@ -85,7 +189,25 @@ def _join_sections(stem: str, solution: str | None,
     """把 (题干, 解析, 其余分区) 拼回正文文本。"""
     parts = [stem.rstrip("\n")]
     if solution and solution.strip():
-        parts.append("## 解析\n" + solution.strip("\n"))
+        # OCR 解析偶尔自带 Markdown 标题。若直接套上题库的 `## 解析` 分区，会
+        # 形成两个相邻标题，反读时整段解析被误判为额外分区。Doc2X 还会输出
+        # `## 【答案】 BD`：这里只去掉 Markdown 标题语义，行内答案必须留下。
+        clean_solution = solution.strip("\n")
+        heading = re.match(
+            r"\A[ \t]{0,3}#{1,6}[ \t]*"
+            r"(?P<label>(?:【[ \t]*)?(?:解析|答案(?:与解析)?)(?:[ \t]*】)?)"
+            r"(?P<tail>[^\r\n]*)(?:\r?\n)?",
+            clean_solution,
+        )
+        if heading:
+            tail = heading.group("tail").strip()
+            rest = clean_solution[heading.end():]
+            clean_solution = rest
+            if tail:
+                label = heading.group("label").strip()
+                clean_solution = f"{label} {tail}" + (f"\n{rest}" if rest else "")
+        if clean_solution.strip():
+            parts.append("## 解析\n" + clean_solution)
     for heading, content in extra:
         parts.append(f"## {heading}\n{content}")
     return "\n\n".join(p for p in parts if p) + "\n"
@@ -108,30 +230,140 @@ _KNOWN_DEFAULTS = {
     "order": 0.0,
     "img_align": "",
     "img_width": None,
-    "img_split": "",
+    # 图文分栏：新题一律 None（=「用户从未设过」），好让 exporter.resolve_split /
+    # plan_figs 的默认值生效。写成 "" 会被 _to_record 读成「没设过」也行，但
+    # None 更直白，且与线上版的 SQL NULL 同义。明确关掉存 "off"，见 set_img_split。
+    "img_split": None,
     "img_layouts": [],
+    # 解析图文分栏独立于题干：None=从未设置（默认关闭），full=左文右图，
+    # off=用户明确关闭。不能复用 img_split，否则调整解析会改坏题干版式。
+    "sol_img_split": None,
+    # 解析里的图片逐图排版设置。与 img_layouts 同构，但**序号各自独立编号**
+    # ——解析的第 0 张图不是题干的第 0 张图，两张表不能合并。
+    "sol_img_layouts": [],
+    # AI 重绘的原图备份表：[{"i": 0, "orig": "q123_0.jpg"}]。
+    # 有这一项就说明第 i 张图是重绘产物、可以退回原图（前端据此点亮"还原原图"）。
+    "img_originals": [],
+    # 原卷题号（`importer.block_number` 的产物，无题号/手工新增时为 None）。
+    # 以前这个数字在 `_build_import_preview` 里算完做漏题检测就被丢掉了，正文里的
+    # 题号也被 `strip_leading_number` 剥掉——结果是入库之后再也无从得知这道题在原卷
+    # 里排第几。落进 frontmatter 才能让文件名按题号取（见 `_question_filename`），
+    # 也让 Obsidian 侧能直接看出来。
+    "number": None,
 }
 
 
-def _read_raw(path: Path) -> tuple[dict, str]:
-    text = path.read_text(encoding="utf-8")
+def _as_number(raw) -> int | None:
+    """frontmatter 的 `number` 读成 int，读不出来当「没有题号」。
+
+    宽松收而不是抛：这个字段是**用户可以在 Obsidian 里直接手改**的（题库根就是
+    vault），填了 `十七` 或者一句话时不该让整道题从列表里消失——`_scan` 里
+    `_to_record` 抛异常就是那个后果。
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_newlines(text: str) -> str:
+    """把任意行尾（CRLF / 单独 CR）统一成 LF。
+
+    **每一处「外来文本 → 落盘」的入口都必须先过这里**，理由见 `_write_raw`。
+    幂等，对已是 LF 的文本是恒等变换。
+    """
+    if not text:
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def write_markdown_text(path: Path, text: str, expected_mtime: int) -> tuple[bool, int]:
+    """原子保存资料库 Markdown，并用 mtime 拒绝覆盖外部修改。
+
+    ``path`` 必须先由路由层验证位于题库根目录；这里共享题目写锁，是为了避免
+    资料库源码编辑与题卡编辑同时替换同一文件。正文仍统一收敛为 LF。
+    """
+    normalized = normalize_newlines(text)
+    with _write_lock:
+        current = path.stat().st_mtime_ns
+        if current != expected_mtime:
+            return False, current
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(normalized)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
+        new_mtime = path.stat().st_mtime_ns
+        _cache.pop(str(path), None)
+        invalidate_scan_cache()
+        return True, new_mtime
+
+
+def create_markdown_text(path: Path, text: str) -> int:
+    """独占创建一份普通 Markdown，返回 ``st_mtime_ns``。
+
+    讲义新建/另存为也必须和题卡、资料库保存共用同一把写锁。这里使用 ``x`` 模式
+    保证撞名时绝不覆盖已有文件；新文件内容不经 frontmatter 解析，只统一 LF。
+    """
+    normalized = normalize_newlines(text)
+    with _write_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(normalized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        invalidate_scan_cache(folder_structure=True)
+        return path.stat().st_mtime_ns
+
+
+def _parse_raw_text(text: str) -> tuple[dict, str]:
+    """解析已经从磁盘取得的 Markdown 文本，供原子校验复用同一份字节。"""
+    text = normalize_newlines(text)
     m = _FM_RE.match(text)
     if not m:
-        # 没有 frontmatter 的裸 md：当成只有题干的新题，id 用文件名。
         return {}, text
     fm_text, body = m.group(1), m.group(2)
     data = _yaml.load(fm_text) or {}
     return data, body
 
 
-def _write_raw(path: Path, meta: dict, body: str):
+def _read_raw(path: Path) -> tuple[dict, str]:
+    # newline="" 关掉 universal newlines：读进来是磁盘上的原始行尾，不会把
+    # 病态的 \r\r\n 认成两个换行。归一由 normalize_newlines 显式做，好让
+    # 「行尾长什么样」这件事只有一处说法。
+    text = path.read_text(encoding="utf-8", newline="")
+    return _parse_raw_text(text)
+
+
+def _render_raw(meta: dict, body: str) -> str:
+    """把 frontmatter 与正文序列化成统一 LF 文本，不触碰磁盘。"""
     import io
 
     buf = io.StringIO()
     _yaml.dump(meta, buf)
     text = "---\n" + buf.getvalue() + "---\n\n" + body.lstrip("\n")
+    # 落盘前再归一一次：body 可能来自浏览器 textarea（HTML 规范提交 CRLF）、
+    # 也可能来自用户在 Obsidian 里手改过的文件。
+    return normalize_newlines(text)
+
+
+def _write_raw(path: Path, meta: dict, body: str):
+    text = _render_raw(meta, body)
+    parent_existed = path.parent.is_dir()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    # newline="\n" 是这里的关键，**不是可省的讲究**：默认文本模式会把每个 \n
+    # 翻成 os.linesep（Windows 上 \r\n），文本里原有的 \r 于是变成 \r\r\n；
+    # 读回来时 universal newlines 又把 \r\r\n 认成**两个**换行——一个空行每
+    # 存一轮翻一倍，解答题小问之间就这么空出三行（2026-08-08 定位）。
+    # 线上版存进 SQLite，没有这层翻译，所以同一份识别结果两版产物不同。
+    path.write_text(text, encoding="utf-8", newline="\n")
+    invalidate_scan_cache(folder_structure=not parent_existed)
 
 
 def _to_record(path: Path, meta: dict, body: str) -> dict:
@@ -161,44 +393,91 @@ def _to_record(path: Path, meta: dict, body: str) -> dict:
         "order": float(meta.get("order", 0.0) or 0.0),
         "img_align": str(meta.get("img_align", "") or ""),
         "img_width": (int(meta["img_width"]) if meta.get("img_width") not in (None, "") else None),
-        "img_split": str(meta.get("img_split", "") or ""),
+        # **空值必须留成 None，不能压成 ""**：`exporter.resolve_split` /
+        # `plan_figs` 靠 `is None` 区分「用户从未设过」（给默认值：带图选择题整题
+        # 分栏、四图选择题自动配对）与「明确关掉」（存 "off"，归 None 但不给默认）。
+        # 压成 "" 就把这两种情形合并了，默认值永不生效，同一道题在两版里排版不同。
+        "img_split": (str(meta["img_split"])
+                      if meta.get("img_split") not in (None, "") else None),
         "img_layouts": list(meta.get("img_layouts", []) or []),
+        "sol_img_split": (str(meta["sol_img_split"])
+                          if meta.get("sol_img_split") not in (None, "") else None),
+        "sol_img_layouts": list(meta.get("sol_img_layouts", []) or []),
+        "img_originals": list(meta.get("img_originals", []) or []),
+        "number": _as_number(meta.get("number")),
         "created": meta.get("created", ""),
         "updated": meta.get("updated", ""),
-        "selected": qid in _selected,
+        # selected 刻意**不在这里算**：它不是文件的属性，而是纯内存态
+        # （`_selected`），而本函数的产物会被 `_scan` 按 mtime 缓存住。勾选不改文件、
+        # mtime 不变 → 缓存永不失效 → 这个字段会永远停在扫描那一刻的值。
+        # 由 `_scan` 在每次返回前统一盖上（见那里的注释）。
     }
     return rec
 
 
+def _skip_rel(rel: Path) -> bool:
+    """该相对路径是否应被排除在题库之外。
+
+    题库根可以直接是一个 Obsidian vault，所以除了自己的 .trash/_assets，
+    还要跳过任何以点开头的目录（.obsidian 及各类插件的数据目录）。
+    """
+    for part in rel.parts[:-1] if rel.suffix else rel.parts:
+        if part.startswith(".") or part in _RESERVED_BANK_DIRS:
+            return True
+    return False
+
+
 def _scan() -> dict[str, dict]:
-    """扫描 BANK_DIR 下全部 .md（跳过 .trash/_assets），mtime 未变则用缓存。"""
-    found: dict[str, dict] = {}
-    for path in config.BANK_DIR.rglob("*.md"):
-        try:
-            rel = path.relative_to(config.BANK_DIR)
-        except ValueError:
-            continue
-        if rel.parts and rel.parts[0] in (".trash", "_assets"):
-            continue
-        key = str(path)
-        mtime = path.stat().st_mtime
-        cached = _cache.get(key)
-        if cached is not None and cached["_mtime"] == mtime:
-            found[key] = cached
-            continue
-        try:
-            meta, body = _read_raw(path)
-        except Exception:
-            continue
-        rec = _to_record(path, meta, body)
-        rec["_mtime"] = mtime
-        rec["_meta"] = meta
-        _cache[key] = rec
-        found[key] = rec
-    # 清掉已不存在的文件的缓存
-    stale = set(_cache) - set(found)
-    for k in stale:
-        _cache.pop(k, None)
+    """扫描 BANK_DIR 下全部 .md（跳过点目录/_assets），mtime 未变则用缓存。"""
+    global _scan_snapshot, _scan_snapshot_root, _scan_snapshot_at
+    root = config.BANK_DIR.resolve()
+    now = time.monotonic()
+    with _scan_lock:
+        if (_scan_snapshot is not None and _scan_snapshot_root == root
+                and now - _scan_snapshot_at < _SCAN_CACHE_SECONDS):
+            found = _scan_snapshot
+        else:
+            found: dict[str, dict] = {}
+            for path in config.BANK_DIR.rglob("*.md"):
+                try:
+                    rel = path.relative_to(config.BANK_DIR)
+                except ValueError:
+                    continue
+                if _skip_rel(rel):
+                    continue
+                key = str(path)
+                mtime = path.stat().st_mtime
+                cached = _cache.get(key)
+                if cached is not None and cached["_mtime"] == mtime:
+                    found[key] = cached
+                    continue
+                try:
+                    meta, body = _read_raw(path)
+                except Exception:
+                    continue
+                rec = _to_record(path, meta, body)
+                rec["_mtime"] = mtime
+                rec["_meta"] = meta
+                _cache[key] = rec
+                found[key] = rec
+            # 清掉已不存在的文件的缓存
+            stale = set(_cache) - set(found)
+            for k in stale:
+                _cache.pop(k, None)
+            _scan_snapshot = found
+            _scan_snapshot_root = root
+            _scan_snapshot_at = time.monotonic()
+    # 勾选态每次现算，覆盖缓存里的旧值。
+    #
+    # 必须在这里做，不能放 `_to_record`：勾选是内存态，不改文件，mtime 不变，于是
+    # 上面那条 `cached["_mtime"] == mtime` 分支会原样返回缓存记录——`selected`
+    # 就永远停在该文件**首次被扫到**的那一刻。症状是 `count_selected()`（读
+    # `_selected`）显示「已选 3 题」，而所有按记录过滤的地方都看不见这 3 题：
+    # 导出/预览（scope=selected）报「没有可导出的题目」、「删除勾选」报「没有勾选
+    # 任何题目」。缓存与内存态的生命周期不一样，就不能把后者算进被缓存的产物里。
+    for rec in found.values():
+        with _selected_lock:
+            rec["selected"] = rec["id"] in _selected
     return found
 
 
@@ -206,15 +485,175 @@ def _all_records() -> list[dict]:
     return list(_scan().values())
 
 
+def all_records_snapshot() -> list[dict]:
+    """返回一次题库扫描的只读快照，供同一个页面请求复用。
+
+    首页同时要题目、标签和文件夹计数。若三个入口各自调用 ``_scan``，题库变大后
+    同一次请求会把全部 Markdown 的路径和 mtime 重扫数遍；调用方应只读这些记录，
+    真正的写入仍走本模块现有的 CRUD 函数。
+    """
+    return _all_records()
+
+
+def collection_records_snapshot(folder_id: str) -> list[dict]:
+    """只扫描一个文件夹子树，供进入单卷/单年份时避免遍历整座题库。"""
+    root = config.BANK_DIR.resolve()
+    target = _folder_abspath(folder_id).resolve()
+    if target != root and not target.is_relative_to(root):
+        raise ValueError("文件夹路径越界")
+    if not target.is_dir():
+        return []
+    records = []
+    with _scan_lock:
+        for path in target.rglob("*.md"):
+            try:
+                rel = path.relative_to(config.BANK_DIR)
+            except ValueError:
+                continue
+            if _skip_rel(rel):
+                continue
+            key = str(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            cached = _cache.get(key)
+            if cached is None or cached["_mtime"] != mtime:
+                try:
+                    meta, body = _read_raw(path)
+                except Exception:
+                    continue
+                cached = _to_record(path, meta, body)
+                cached["_mtime"] = mtime
+                cached["_meta"] = meta
+                _cache[key] = cached
+            records.append(cached)
+    with _selected_lock:
+        selected = set(_selected)
+    for rec in records:
+        rec["selected"] = rec["id"] in selected
+    return records
+
+
+_NATURAL_PART_RE = re.compile(r"(\d+)")
+
+
+def _natural_rel_key(rel_path: str) -> tuple:
+    """文件夹与题号按人眼顺序排列，避免第10题排在第2题前面。"""
+    out = []
+    for part in PurePosixPath(rel_path).parts:
+        out.append(tuple(
+            (0, int(token)) if token.isdigit() else (1, token.casefold())
+            for token in _NATURAL_PART_RE.split(part) if token))
+    return tuple(out)
+
+
+def list_question_paths(folder_id: str = "") -> list[str]:
+    """只列题目路径、不读取 Markdown，供大题库无限滚动建立轻量快照。
+
+    冷启动解析 1.3 万个 Markdown 约需二十多秒，而只列路径不到一秒。全部题目与
+    年份汇总的默认 custom 视图优先用这条路径，真正的题目内容等滚到对应批次时
+    再读取。排序采用“文件夹/文件名自然序”；单卷普通视图仍走 frontmatter 的
+    ``order``，不会改变用户手工调整过的卷内顺序。
+    """
+    root = config.BANK_DIR.resolve()
+    target = _folder_abspath(folder_id).resolve()
+    if target != root and not target.is_relative_to(root):
+        raise ValueError("文件夹路径越界")
+    if not target.is_dir():
+        return []
+    paths = []
+    for path in target.rglob("*.md"):
+        try:
+            rel = path.relative_to(config.BANK_DIR)
+        except ValueError:
+            continue
+        if _skip_rel(rel):
+            continue
+        paths.append(rel.as_posix())
+    return sorted(paths, key=_natural_rel_key)
+
+
+def records_from_paths(paths: list[str]) -> list[dict]:
+    """读取指定的一小批相对路径，并复用现有 mtime 解析缓存。"""
+    root = config.BANK_DIR.resolve()
+    records = []
+    with _scan_lock:
+        for rel_text in paths:
+            rel = PurePosixPath(rel_text)
+            path = (config.BANK_DIR / rel).resolve()
+            if (path == root or not path.is_relative_to(root)
+                    or path.suffix.lower() != ".md"):
+                continue
+            try:
+                disk_rel = path.relative_to(config.BANK_DIR)
+            except ValueError:
+                continue
+            if _skip_rel(disk_rel):
+                continue
+            key = str(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            cached = _cache.get(key)
+            if cached is None or cached["_mtime"] != mtime:
+                try:
+                    meta, body = _read_raw(path)
+                except Exception:
+                    continue
+                cached = _to_record(path, meta, body)
+                cached["_mtime"] = mtime
+                cached["_meta"] = meta
+                _cache[key] = cached
+            records.append(cached)
+    refresh_selected(records)
+    return records
+
+
+def refresh_selected(records: list[dict]) -> None:
+    """把长列表快照里的勾选态刷新为当前内存状态。"""
+    with _selected_lock:
+        selected = set(_selected)
+    for rec in records:
+        rec["selected"] = rec["id"] in selected
+
+
 def _find_path_by_id(qid: str) -> Path | None:
+    # 页面刚渲染过的题一定已在 mtime 缓存里。单题按钮若跳过这层直接 `_all_records()`，
+    # 1.3 万题下每点一次分栏/难度/删除都会重新遍历整座 vault；写入又使全库快照
+    # 失效，路由为了回渲再读一次时还会再扫一遍。先在内存记录里找，命中后只 stat
+    # 这一份文件；缓存路径已被用户在 Obsidian 外部移动时再回落全库发现。
+    needle = str(qid)
+    with _scan_lock:
+        for key, rec in _cache.items():
+            if str(rec.get("id")) != needle:
+                continue
+            path = Path(key)
+            if path.is_file():
+                return path
     for rec in _all_records():
-        if rec["id"] == qid:
+        if str(rec["id"]) == needle:
             return config.BANK_DIR / rec["path"]
     return None
 
 
 def get_question(qid: str) -> dict | None:
-    return _scan().get(str(_find_path_by_id(qid))) if _find_path_by_id(qid) else None
+    """按 id 读取一题；已在页面出现过的题只重读这一份 Markdown。
+
+    旧写法不仅调用 `_find_path_by_id` 两次，拿到路径后还用 `_scan()` 再查字典；只要
+    前一步写盘使全库快照失效，这个“取一题”就会变成第二次全库扫描。这里沿用
+    `records_from_paths` 的越界校验、mtime 缓存与勾选态刷新，避免另写一套读取规则。
+    """
+    path = _find_path_by_id(str(qid))
+    if path is None:
+        return None
+    try:
+        rel = path.resolve().relative_to(config.BANK_DIR.resolve()).as_posix()
+    except ValueError:
+        return None
+    rows = records_from_paths([rel])
+    return next((row for row in rows if str(row["id"]) == str(qid)), None)
 
 
 # ---------------------------------------------------------------------------
@@ -229,41 +668,126 @@ def _folder_abspath(folder_id: str) -> Path:
     return config.BANK_DIR / PurePosixPath(folder_id)
 
 
-def list_collections_tree() -> list[dict]:
-    """返回文件夹树：[{id,name,parent_id,cnt,depth,children:[...]}]，按名称字母序。"""
-    counts: dict[str, int] = {}
-    for rec in _all_records():
-        counts[rec["folder"]] = counts.get(rec["folder"], 0) + 1
+def _checked_folder_path(folder_id: str, *, allow_root: bool) -> Path:
+    """把文件夹 id 收敛到题库内的非保留目录，拒绝越界和符号链接逃逸。"""
+    folder_id = str(folder_id or "").strip("/")
+    root = config.BANK_DIR.resolve()
+    if not folder_id:
+        if allow_root:
+            return root
+        raise ValueError("不能移动题库根目录")
+    parts = PurePosixPath(folder_id).parts
+    if (any(part in ("", ".", "..") or part.startswith(".")
+            or part in _RESERVED_BANK_DIRS for part in parts)):
+        raise ValueError("文件夹路径无效")
+    path = _folder_abspath(folder_id).resolve()
+    if path == root or not path.is_relative_to(root):
+        raise ValueError("文件夹路径越界")
+    return path
 
-    def build(dir_path: Path, parent_id: str, depth: int) -> list[dict]:
+
+def list_collections_tree(records: list[dict] | None = None) -> list[dict]:
+    """返回文件夹树：[{id,name,parent_id,cnt,depth,children:[...]}]，按名称字母序。"""
+    global _tree_snapshot, _tree_snapshot_root, _tree_snapshot_at
+    root = config.BANK_DIR.resolve()
+    now = time.monotonic()
+    # 只有显式传入空记录时，调用方才是在要“纯目录树”（导入目标/移动下拉框）。
+    # 这棵树可以按目录结构缓存；带题数的树取决于传入 records，不能与它共用同一份
+    # 快照，否则先开导入页会把 cnt=0 的树错误地喂给后续计数调用。
+    directory_only = records is not None and not records
+    with _scan_lock:
+        if (directory_only and _tree_snapshot is not None
+                and _tree_snapshot_root == root
+                and now - _tree_snapshot_at < _SIDEBAR_CACHE_SECONDS):
+            return _tree_snapshot
+        counts: dict[str, int] = {}
+        for rec in records if records is not None else _all_records():
+            counts[rec["folder"]] = counts.get(rec["folder"], 0) + 1
+
+        def build(dir_path: Path, parent_id: str, depth: int) -> list[dict]:
+            try:
+                subdirs = sorted(
+                    # 与 _skip_rel 保持一致：点目录（.obsidian 等）不是题库文件夹
+                    (p for p in dir_path.iterdir()
+                     if p.is_dir() and not p.name.startswith(".")
+                     and p.name not in _RESERVED_BANK_DIRS), key=lambda p: p.name)
+            except FileNotFoundError:
+                return []
+            nodes = []
+            for directory in subdirs:
+                rel = directory.relative_to(config.BANK_DIR).as_posix()
+                node = {
+                    "id": rel,
+                    "name": directory.name,
+                    "parent_id": parent_id,
+                    "cnt": counts.get(rel, 0),
+                    "depth": depth,
+                    "children": build(directory, rel, depth + 1),
+                }
+                node["cnt"] += sum(c["cnt"] for c in node["children"])
+                nodes.append(node)
+            return nodes
+
+        tree = build(config.BANK_DIR, "", 0)
+        if directory_only:
+            _tree_snapshot = tree
+            _tree_snapshot_root = root
+            _tree_snapshot_at = time.monotonic()
+        return tree
+
+
+def list_navigation_tree(active_id: str = "") -> list[dict]:
+    """返回侧栏所需的浅树，只预载当前路径。
+
+    完整树主要用于导入页和“移动到”选项；首页每次切换试卷都递归扫描 642 个
+    目录没有必要。这里始终显示顶层；首次进入题库时子级全部折叠并按需读取，
+    只有深链接或刷新某个题集时才预载当前路径，保证选中项仍然可见。
+    其余节点保留 ``has_children``，交给 ``/collections/children`` 点击后加载。
+    """
+    root = config.BANK_DIR.resolve()
+
+    def subdirs(path: Path) -> list[Path]:
         try:
-            subdirs = sorted(
-                (p for p in dir_path.iterdir()
-                 if p.is_dir() and p.name not in (".trash", "_assets")),
-                key=lambda p: p.name,
-            )
-        except FileNotFoundError:
+            return sorted(
+                (item for item in path.iterdir()
+                 if item.is_dir() and not item.name.startswith(".")
+                 and item.name not in _RESERVED_BANK_DIRS),
+                key=lambda item: item.name)
+        except OSError:
             return []
+
+    def has_subdir(path: Path) -> bool:
+        try:
+            return any(
+                item.is_dir() and not item.name.startswith(".")
+                and item.name not in _RESERVED_BANK_DIRS for item in path.iterdir())
+        except OSError:
+            return False
+
+    def build(path: Path, parent_id: str, depth: int) -> list[dict]:
         nodes = []
-        for d in subdirs:
-            rel = d.relative_to(config.BANK_DIR).as_posix()
-            node = {
+        for directory in subdirs(path):
+            rel = directory.relative_to(root).as_posix()
+            on_active_path = active_id == rel or active_id.startswith(rel + "/")
+            expanded = on_active_path
+            children = build(directory, rel, depth + 1) if expanded else []
+            nodes.append({
                 "id": rel,
-                "name": d.name,
+                "name": directory.name,
                 "parent_id": parent_id,
-                "cnt": counts.get(rel, 0),
+                "cnt": 0,
                 "depth": depth,
-                "children": build(d, rel, depth + 1),
-            }
-            node["cnt"] += sum(c["cnt"] for c in node["children"])
-            nodes.append(node)
+                "children": children,
+                "children_loaded": expanded,
+                "has_children": bool(children) if expanded else has_subdir(directory),
+            })
         return nodes
 
-    return build(config.BANK_DIR, "", 0)
+    return build(root, "", 0)
 
 
-def all_collections() -> list[dict]:
-    """扁平化文件夹列表（供下拉框用）。"""
+def all_collections(tree: list[dict] | None = None) -> list[dict]:
+    """扁平化文件夹列表（供下拉框用），可复用已经建立的树。"""
     flat = []
 
     def walk(nodes):
@@ -271,12 +795,63 @@ def all_collections() -> list[dict]:
             flat.append(n)
             walk(n["children"])
 
-    walk(list_collections_tree())
+    walk(tree if tree is not None else list_collections_tree())
     return flat
 
 
-def get_collection(folder_id: str) -> dict | None:
-    for f in all_collections():
+def list_collection_children(parent_id: str = "") -> list[dict]:
+    """只列一个目录的直接子文件夹，供前端展开树时按需读取。
+
+    这里不统计题数、不扫描 Markdown，因此即使题库已有上万道题也只做一次很小的
+    ``iterdir``。路径仍必须约束在 BANK_DIR 内，不能让只读接口变成目录探测器。
+    """
+    root = config.BANK_DIR.resolve()
+    parent = _folder_abspath(parent_id).resolve()
+    if parent != root and not parent.is_relative_to(root):
+        raise ValueError("文件夹路径越界")
+    if not parent.is_dir():
+        return []
+    out = []
+    for child in sorted(
+            (path for path in parent.iterdir()
+             if path.is_dir() and not path.name.startswith(".")
+             and path.name not in _RESERVED_BANK_DIRS), key=lambda path: path.name):
+        folder_id = child.relative_to(root).as_posix()
+        try:
+            has_children = any(
+                item.is_dir() and not item.name.startswith(".")
+                and item.name not in _RESERVED_BANK_DIRS for item in child.iterdir())
+        except OSError:
+            has_children = False
+        out.append({"id": folder_id, "name": child.name,
+                    "has_children": has_children})
+    return out
+
+
+def get_collection(folder_id: str,
+                   collections: list[dict] | None = None) -> dict | None:
+    if collections is None:
+        # 这里只被用来验证目标目录存在并读取名字。旧实现为这件事先建立带题数的完整
+        # 目录树，等价于解析全库 Markdown；批量移动第一步因此就要等几十秒。
+        # 真实目录本身就是软件版题集的真相，直接验路径即可。
+        folder_id = str(folder_id or "").strip("/")
+        if not folder_id:
+            return None
+        root = config.BANK_DIR.resolve()
+        path = _folder_abspath(folder_id).resolve()
+        if (path == root or not path.is_relative_to(root) or not path.is_dir()
+                or any(part.startswith(".") or part in _RESERVED_BANK_DIRS
+                       for part in PurePosixPath(folder_id).parts)):
+            return None
+        parent_id = PurePosixPath(folder_id).parent.as_posix()
+        if parent_id == ".":
+            parent_id = ""
+        return {
+            "id": folder_id, "name": path.name, "parent_id": parent_id,
+            "depth": len(PurePosixPath(folder_id).parts) - 1,
+            "cnt": 0, "children": [],
+        }
+    for f in collections:
         if f["id"] == folder_id:
             return f
     return None
@@ -296,7 +871,41 @@ def create_collection(name: str, parent_id: str = "") -> str:
     if target.exists():
         raise ValueError("同名文件夹已存在")
     target.mkdir(parents=True)
+    invalidate_scan_cache(folder_structure=True)
     return str((PurePosixPath(parent_id) / safe_name)) if parent_id else safe_name
+
+
+def safe_folder_name(name: str) -> str:
+    """把任意字符串收成一个能当目录名的单段名字，收不出来返回空串。
+
+    文件夹名这里会来自**上传文件名**（自动入库按文件名建组文件夹），路径分隔符和
+    `..` 必须先掉——folder_id 是拼进 BANK_DIR 的相对路径，带一个 `../` 就能把题目
+    写到题库外面去。Windows 保留字符一并换掉，否则 mkdir 直接抛。
+    """
+    name = (name or "").strip()
+    for ch in '/\\:*?"<>|':
+        name = name.replace(ch, "_")
+    # 先换掉分隔符再消 `..`：顺序反了的话 `../..` 会剩下 `..`（strip(".") 只削
+    # 首尾），拼进 folder_id 就能跳出题库目录。
+    while ".." in name:
+        name = name.replace("..", "_")
+    return name.strip().strip(".").strip()
+
+
+def get_or_create_collection(name: str, parent_id: str = "") -> str:
+    """建文件夹，同名已存在就复用那一个，返回 folder_id。
+
+    「打包为文件夹」和「不审核直接入库」都要这个语义：撞同名时报错中断整批导入
+    是最差的结果——题已经切好摆在那了，为一个目录名把校对成果丢掉不值得。自动
+    入库那条路更是没人在场回答「换个名字还是并进去」。
+    """
+    name = safe_folder_name(name)
+    if not name:
+        return ""
+    target = _folder_abspath(parent_id) / name
+    if target.is_dir():
+        return str(PurePosixPath(parent_id) / name) if parent_id else name
+    return create_collection(name, parent_id)
 
 
 def rename_collection(folder_id: str, new_name: str) -> str:
@@ -308,13 +917,18 @@ def rename_collection(folder_id: str, new_name: str) -> str:
     if new_path.exists():
         raise ValueError("同名文件夹已存在")
     old.rename(new_path)
+    invalidate_scan_cache(folder_structure=True)
     new_id = str(new_path.relative_to(config.BANK_DIR).as_posix())
     return new_id
 
 
 def move_folder(folder_id: str, new_parent_id: str) -> str:
-    src = _folder_abspath(folder_id)
-    dst_parent = _folder_abspath(new_parent_id)
+    src = _checked_folder_path(folder_id, allow_root=False)
+    dst_parent = _checked_folder_path(new_parent_id, allow_root=True)
+    if not src.is_dir():
+        raise ValueError("源文件夹不存在")
+    if not dst_parent.is_dir():
+        raise ValueError("目标父文件夹不存在")
     # 防止把文件夹移进自己或自己的子文件夹
     if dst_parent == src or dst_parent.is_relative_to(src):
         raise ValueError("不能移动到自己的子文件夹中")
@@ -322,7 +936,8 @@ def move_folder(folder_id: str, new_parent_id: str) -> str:
     if dst.exists():
         raise ValueError("目标位置已存在同名文件夹")
     shutil.move(str(src), str(dst))
-    return str(dst.relative_to(config.BANK_DIR).as_posix())
+    invalidate_scan_cache(folder_structure=True)
+    return str(dst.relative_to(config.BANK_DIR.resolve()).as_posix())
 
 
 def delete_collection(folder_id: str):
@@ -339,6 +954,7 @@ def delete_collection(folder_id: str):
                    ensure_ascii=False),
         encoding="utf-8",
     )
+    invalidate_scan_cache(folder_structure=True)
 
 
 def list_deleted_collections() -> list[dict]:
@@ -375,12 +991,16 @@ def restore_collection(trash_id: str):
     meta_path.unlink()
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
+    invalidate_scan_cache(folder_structure=True)
 
 
 def purge_collection(trash_id: str):
     target = config.TRASH_DIR / trash_id
     if target.exists():
+        refs = _refs_under(target)
         shutil.rmtree(target)
+        purge_orphan_images(refs)
+        invalidate_scan_cache(folder_structure=True)
 
 
 # ---------------------------------------------------------------------------
@@ -388,12 +1008,28 @@ def purge_collection(trash_id: str):
 # ---------------------------------------------------------------------------
 
 
-def all_tags() -> list[str]:
+def all_tags(records: list[dict] | None = None) -> list[str]:
+    global _tags_snapshot, _tags_snapshot_root, _tags_snapshot_at
+    root = config.BANK_DIR.resolve()
+    now = time.monotonic()
+    with _scan_lock:
+        if (records is None and _tags_snapshot is not None
+                and _tags_snapshot_root == root
+                and now - _tags_snapshot_at < _SIDEBAR_CACHE_SECONDS):
+            return _tags_snapshot
+        source = records if records is not None else _all_records()
     seen: dict[str, int] = {}
-    for rec in _all_records():
+    for rec in source:
         for t in rec["tags"]:
             seen[t] = seen.get(t, 0) + 1
-    return sorted(seen, key=lambda t: (-seen[t], t))
+    tags = sorted(seen, key=lambda t: (-seen[t], t))
+    if records is not None:
+        return tags
+    with _scan_lock:
+        _tags_snapshot = tags
+        _tags_snapshot_root = root
+        _tags_snapshot_at = time.monotonic()
+    return tags
 
 
 def tags_of(qid: str) -> list[str]:
@@ -435,31 +1071,315 @@ def add_tags_to(ids: list[str], tags: list[str]):
 
 
 def _top_order(folder: str) -> float:
+    """文件夹里的下一个 `order`。**必须在 `_write_lock` 里调用**，见 create_question。"""
     orders = [r["order"] for r in _all_records() if r["folder"] == folder]
     return (max(orders) + 1.0) if orders else 1.0
 
 
+def _question_filename(target_dir: Path, qid: str, number: int | None) -> Path:
+    """题目 .md 的落盘路径：有原卷题号就用题号命名，没有才退回 uuid。
+
+    「第3题.md」在文件夹里一眼就能找到，uuid 名字（`2933dfa52b8a.md`）在 Obsidian
+    的文件列表里等于没有名字。前缀「第…题」而不是裸数字：Obsidian 的文件列表按名
+    排序，裸 `10.md` 会排到 `2.md` 前面，加了汉字前缀至少能看出是题号；真正的顺序
+    仍由 frontmatter 的 `order` 决定（见 `list_questions`）。
+
+    **文件名不参与身份认定**：`_to_record` 取 `meta["id"]`，`path.stem` 只是没有
+    frontmatter 时的兜底。所以撞名加后缀是安全的，改名也不会让引用断——`_assets`
+    里的图片名嵌的是 qid，不跟着文件名走。
+
+    撞名（同一文件夹里两份卷子都有第 3 题，或者重复导入同一份）时缀上 qid 而不是
+    覆盖：覆盖会让先入库的那道题无声消失。
+    """
+    if number is None:
+        return target_dir / f"{qid}.md"
+    stem = safe_folder_name(f"第{number}题") or qid
+    path = target_dir / f"{stem}.md"
+    if path.exists():
+        path = target_dir / f"{stem}_{qid}.md"
+    return path
+
+
 def create_question(body: str, solution: str = "", qtype: str = "",
                      source: str = "", difficulty: str = "",
-                     tags: list[str] | None = None, folder: str = "") -> str:
-    qid = _new_id()
-    meta = dict(_KNOWN_DEFAULTS)
-    meta.update({
-        "id": qid,
-        "type": qtype,
-        "source": source,
-        "difficulty": difficulty,
-        "tags": list(tags or []),
-        "order": _top_order(folder),
-        "created": _now_iso(),
-        "updated": _now_iso(),
-    })
-    full_body = _join_sections(body, solution, [])
+                     tags: list[str] | None = None, folder: str = "",
+                     number: int | None = None) -> str:
+    return create_questions_batch([{
+        "body": body, "solution": solution, "type": qtype,
+        "source": source, "difficulty": difficulty, "tags": tags or [],
+        "number": number,
+    }], folder)[0]
+
+
+def create_questions_batch(items: list[dict], folder: str = "", *,
+                           idempotency_scope: str = "") -> list[str]:
+    """同一文件夹批量建题，只扫描一次现有 order。
+
+    ``idempotency_scope`` 只供后台自动入库使用。作用域会和题目在本批中的下标一起
+    生成稳定 qid，并写进 frontmatter；进程若在“题目已写入、任务状态尚未落盘”之间
+    退出，重转会认回同一批题并补齐尚未写入的部分，而不是再造一套副本。普通手动
+    导入不传该参数，仍保持每次提交都新建题目的既有语义。
+    """
+    if not items:
+        return []
     target_dir = _folder_abspath(folder)
-    path = target_dir / f"{qid}.md"
+    created: list[str] = []
+    scope = str(idempotency_scope or "").strip()
+    written_paths: list[tuple[Path, str, int]] = []
     with _write_lock:
-        _write_raw(path, meta, full_body)
-    return qid
+        # 取名、算序号、落盘必须在同一把锁里。批量导入若逐题调用
+        # create_question，每道题的 _top_order 都会递归扫描整个 Obsidian 题库；
+        # 历年卷达到数千题后，一卷 20 题就会重复扫描 20 次。这里一次取最大 order，
+        # 后续在锁内递增，既保持并发安全，也把每卷全库扫描从 N 次降到 1 次。
+        #
+        # ① 取名：`_question_filename` 靠 `exists()` 判撞名，放到锁外的话两个并发
+        #    导入（批量转换是多线程的）会同时看到「不存在」，后写的把先写的覆盖掉。
+        # ② 序号：`_top_order` 读的是「已落盘的最大 order」，同样是读-改-写。
+        #    2026-08-08 修的「导入丢顺序」就是这条——它原先写在上面 `meta.update`
+        #    的字面量里、在锁外求值，`_convert_batch_worker` 用线程池并发跑各组、
+        #    `_auto_import_after_convert` 又刻意在 `_batch_jobs_lock` 之外，于是
+        #    落进同一文件夹的几组题会读到同一个 max，一批题拿到**相同的 order**。
+        #    `_SORT_KEYS["custom"]` 只按 order 排，并列项的先后就交给 `rglob` 的
+        #    返回顺序（文件系统决定，与题号无关）——表现正是「题目顺序乱掉」。
+        next_order = _top_order(folder)
+        # _top_order 已经取过一次全库快照；这里复用其缓存建索引。只在自动入库时
+        # 需要，手动导入不为幂等性多做任何扫描。
+        existing_by_id = ({str(rec["id"]): rec for rec in _all_records()}
+                          if scope else {})
+        try:
+            for item_index, item in enumerate(items):
+                qid = (_stable_import_qid(scope, item_index)
+                       if scope else _new_id())
+                now = _now_iso()
+                meta = dict(_KNOWN_DEFAULTS)
+                meta.update({
+                    "id": qid,
+                    "type": str(item.get("type") or ""),
+                    "source": str(item.get("source") or ""),
+                    "difficulty": str(item.get("difficulty") or ""),
+                    "tags": list(item.get("tags") or []),
+                    "number": _as_number(item.get("number")),
+                    "created": now,
+                    "updated": now,
+                    "order": next_order,
+                })
+                if scope:
+                    # 两个字段必须随题持久化，不能只靠 qid 的哈希碰运气；若极小概率
+                    # 撞到用户既有 qid，下面会因作用域不符而拒绝，绝不覆盖。
+                    meta["_quizforge_import_scope"] = scope
+                    meta["_quizforge_import_index"] = item_index
+                # 导入链可直接给新题写入图片布局默认值。普通新增题不传这些键，仍沿用
+                # _KNOWN_DEFAULTS；旧题也无需迁移。
+                if item.get("img_split") in (
+                        "opts", "full", "sub", "between", "after", "pair", "off"):
+                    meta["img_split"] = item["img_split"]
+                if isinstance(item.get("img_layouts"), list):
+                    meta["img_layouts"] = list(item["img_layouts"])
+                if item.get("sol_img_split") in ("full", "off"):
+                    meta["sol_img_split"] = item["sol_img_split"]
+                if isinstance(item.get("sol_img_layouts"), list):
+                    meta["sol_img_layouts"] = list(item["sol_img_layouts"])
+                full_body = _join_sections(
+                    str(item.get("body") or ""),
+                    str(item.get("solution") or ""), [],)
+
+                existing = existing_by_id.get(qid)
+                if existing is not None:
+                    actual_meta = existing.get("_meta") or {}
+                    expected_path = config.BANK_DIR / existing["path"]
+                    expected = _to_record(expected_path, meta, full_body)
+                    same_origin = (
+                        actual_meta.get("_quizforge_import_scope") == scope
+                        and _as_number(actual_meta.get(
+                            "_quizforge_import_index")) == item_index)
+                    same_content = all(
+                        existing.get(key) == expected.get(key)
+                        for key in ("body", "solution", "type", "source", "number",
+                                    "img_split", "img_layouts", "sol_img_split",
+                                    "sol_img_layouts"))
+                    if not (same_origin and same_content):
+                        raise ValueError(
+                            "自动入库幂等标识与既有题目冲突，已停止以避免重复或覆盖")
+                    created.append(qid)
+                    continue
+
+                path = _question_filename(target_dir, qid, meta["number"])
+                if path.exists():
+                    # 正常随机 qid 几乎不会走到这里；稳定 qid 若对应文件损坏到无法
+                    # 解析，也不能把它当成空位覆盖，交给用户保留现场处理。
+                    raise FileExistsError(f"题目目标文件已存在：{path.name}")
+                _write_raw(path, meta, full_body)
+                written_paths.append((path, qid, item_index))
+                created.append(qid)
+                existing_by_id[qid] = _to_record(path, meta, full_body)
+                existing_by_id[qid]["_meta"] = meta
+                next_order += 1.0
+        except Exception:
+            # 批量接口对调用方保持“全有或全无”：只回滚本次调用刚写成、且仍带同一
+            # 作用域/下标/qid 的文件。既有题、前次崩溃留下并已被认回的题都不碰。
+            for path, qid, item_index in reversed(written_paths):
+                try:
+                    actual_meta, _body = _read_raw(path)
+                    exact = (
+                        str(actual_meta.get("id") or "") == qid
+                        and actual_meta.get("_quizforge_import_scope") == scope
+                        and _as_number(actual_meta.get(
+                            "_quizforge_import_index")) == item_index)
+                    if exact:
+                        path.unlink()
+                except (OSError, UnicodeError, ValueError):
+                    pass
+            if written_paths:
+                invalidate_scan_cache()
+            raise
+    return created
+
+
+def _stable_import_qid(scope: str, item_index: int) -> str:
+    """后台幂等入库的稳定题目 id。创建与安全刷新必须共用同一口径。"""
+    return hashlib.sha256(
+        f"{scope}\0{item_index}".encode("utf-8")).hexdigest()[:12]
+
+
+_IMPORT_OWNED_FIELDS = (
+    "body", "solution", "type", "source", "number",
+    "img_split", "img_layouts", "sol_img_split", "sol_img_layouts",
+)
+
+
+def _import_item_record(item: dict) -> dict:
+    """把自动入库 payload 归一成可与现有题目逐项比较的字段。"""
+    img_split = item.get("img_split")
+    if img_split not in ("opts", "full", "sub", "between", "after",
+                         "pair", "off"):
+        img_split = None
+    sol_img_split = item.get("sol_img_split")
+    if sol_img_split not in ("full", "off"):
+        sol_img_split = None
+    return {
+        "body": str(item.get("body") or ""),
+        "solution": str(item.get("solution") or ""),
+        "type": str(item.get("type") or ""),
+        "source": str(item.get("source") or ""),
+        "number": _as_number(item.get("number")),
+        "img_split": img_split,
+        "img_layouts": (list(item.get("img_layouts") or [])
+                        if isinstance(item.get("img_layouts"), list) else []),
+        "sol_img_split": sol_img_split,
+        "sol_img_layouts": (list(item.get("sol_img_layouts") or [])
+                            if isinstance(item.get("sol_img_layouts"), list)
+                            else []),
+    }
+
+
+def refresh_questions_batch(items: list[dict], previous_items: list[dict],
+                            folder: str = "", *,
+                            idempotency_scope: str) -> list[str]:
+    """安全刷新一组已自动入库的题，保留 qid、路径及用户元数据。
+
+    只有库内每道题仍逐项等于 ``previous_items`` 时才允许写入；这证明用户没有在
+    入库后修改识别链拥有的内容。数量、题号、作用域、下标、正文、解析、题型或
+    布局任一变化都会在整组落盘前拒绝，绝不靠删题重建覆盖用户编辑。
+    """
+    scope = str(idempotency_scope or "").strip()
+    if not scope:
+        raise ValueError("安全刷新必须提供自动入库作用域")
+    if not items or len(items) != len(previous_items):
+        raise ValueError("安全刷新前后题目数量不一致")
+    new_rows = [_import_item_record(item) for item in items]
+    old_rows = [_import_item_record(item) for item in previous_items]
+    if any(new["number"] != old["number"]
+           for new, old in zip(new_rows, old_rows)):
+        raise ValueError("安全刷新前后题号顺序不一致")
+
+    target_dir = _folder_abspath(folder).resolve()
+    expected_ids = [_stable_import_qid(scope, index)
+                    for index in range(len(items))]
+    staged: list[tuple[Path, Path, bytes]] = []
+    replaced: list[tuple[Path, bytes]] = []
+    with _write_lock:
+        records = _all_records()
+        by_id = {str(record["id"]): record for record in records}
+        scoped_ids = {
+            str(record["id"]) for record in records
+            if (record.get("_meta") or {}).get(
+                "_quizforge_import_scope") == scope
+        }
+        if scoped_ids != set(expected_ids):
+            raise ValueError("已入库题目数量或身份发生变化，拒绝自动覆盖")
+
+        prepared: list[tuple[Path, dict, str, bytes]] = []
+        for index, (qid, old, new) in enumerate(
+                zip(expected_ids, old_rows, new_rows)):
+            record = by_id.get(qid)
+            if record is None:
+                raise ValueError("已入库题目缺失，拒绝自动覆盖")
+            path = (config.BANK_DIR / record["path"]).resolve()
+            if path.parent != target_dir or not path.is_file() or path.is_symlink():
+                raise ValueError("已入库题目位置发生变化，拒绝自动覆盖")
+            # 校验与后续回滚必须绑定同一份原始字节。若这里先 _read_raw、稍后再
+            # read_bytes，Obsidian 恰好夹在两次读取之间保存，刷新会把新编辑误当
+            # 成“旧基线”后覆盖。一次取字节、在内存解析可关闭这条窗口。
+            original = path.read_bytes()
+            try:
+                meta, raw_body = _parse_raw_text(original.decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                raise ValueError("已入库题目不是有效 UTF-8，拒绝自动覆盖") from exc
+            actual = _to_record(path, meta, raw_body)
+            same_origin = (
+                str(meta.get("id") or "") == qid
+                and meta.get("_quizforge_import_scope") == scope
+                and _as_number(meta.get("_quizforge_import_index")) == index)
+            same_content = all(actual.get(key) == old.get(key)
+                               for key in _IMPORT_OWNED_FIELDS)
+            if (not same_origin or not same_content
+                    or actual.get("extra_sections")):
+                raise ValueError(
+                    "题目已在入库后被编辑，已停止刷新以避免覆盖用户修改")
+            next_meta = dict(meta)
+            next_meta.update({
+                "type": new["type"], "source": new["source"],
+                "number": new["number"], "img_split": new["img_split"],
+                "img_layouts": new["img_layouts"],
+                "sol_img_split": new["sol_img_split"],
+                "sol_img_layouts": new["sol_img_layouts"],
+                "updated": _now_iso(),
+            })
+            next_body = _join_sections(
+                new["body"], new["solution"], [])
+            prepared.append((path, next_meta, next_body, original))
+
+        try:
+            # 先把所有新内容完整序列化并写到同目录临时文件；只有全组均成功后才
+            # 开始替换正式题卡。替换阶段若有磁盘错误，再用原始字节逐项回滚。
+            for path, meta, body, original in prepared:
+                if path.read_bytes() != original:
+                    raise ValueError(
+                        "题目在安全刷新期间被外部编辑，旧题已保留且未覆盖")
+                temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+                temp.write_text(_render_raw(meta, body), encoding="utf-8",
+                                newline="\n")
+                staged.append((path, temp, original))
+            for path, temp, original in staged:
+                if path.read_bytes() != original:
+                    raise ValueError(
+                        "题目在安全刷新期间被外部编辑，旧题已保留且未覆盖")
+                os.replace(temp, path)
+                replaced.append((path, original))
+        except Exception:
+            for path, original in reversed(replaced):
+                try:
+                    path.write_bytes(original)
+                except OSError:
+                    logger.exception("安全刷新回滚失败：%s", path)
+            raise
+        finally:
+            for _path, temp, _original in staged:
+                temp.unlink(missing_ok=True)
+            for path, _meta, _body, _original in prepared:
+                _cache.pop(str(path), None)
+            invalidate_scan_cache()
+    return expected_ids
 
 
 def update_question(qid: str, body: str, solution: str = "", qtype: str = "",
@@ -484,20 +1404,21 @@ def update_question(qid: str, body: str, solution: str = "", qtype: str = "",
 
 def _update_meta_fields(qid: str, fields: dict):
     """就地更新某题 frontmatter 里的若干字段，正文不变。"""
-    rec = get_question(qid)
-    if not rec:
-        return
-    path = config.BANK_DIR / rec["path"]
-    meta, body = _read_raw(path)
-    meta.update(fields)
-    meta["updated"] = _now_iso()
-    _write_raw(path, meta, body)
+    with _write_lock:
+        rec = get_question(qid)
+        if not rec:
+            return
+        path = config.BANK_DIR / rec["path"]
+        meta, body = _read_raw(path)
+        meta.update(fields)
+        meta["updated"] = _now_iso()
+        _write_raw(path, meta, body)
 
 
-def delete_question(qid: str):
+def delete_question(qid: str) -> dict | None:
     rec = get_question(qid)
     if not rec:
-        return
+        return None
     src = config.BANK_DIR / rec["path"]
     trash_name = f"{src.stem}__{_new_id()}{src.suffix}"
     dst = config.TRASH_DIR / trash_name
@@ -507,7 +1428,12 @@ def delete_question(qid: str):
     with _write_lock:
         _write_raw(src, meta, body)  # 先落盘记录原路径
         shutil.move(str(src), str(dst))
-    _selected.discard(qid)
+        invalidate_scan_cache()
+    with _selected_lock:
+        if qid in _selected:
+            _selected.discard(qid)
+            _save_selected_unlocked()
+    return rec
 
 
 def list_deleted_questions() -> list[dict]:
@@ -542,28 +1468,34 @@ def restore_question(qid: str):
         with _write_lock:
             _write_raw(path, meta, body)
             shutil.move(str(path), str(dst))
+            invalidate_scan_cache()
         return
     raise KeyError(qid)
 
 
 def purge_question(qid: str):
     for path in config.TRASH_DIR.glob("*.md"):
-        meta, _ = _read_raw(path)
+        meta, body = _read_raw(path)
         if str(meta.get("id")) == str(qid):
+            refs = _refs_in(meta, body)
             path.unlink()
+            purge_orphan_images(refs)
             return
 
 
 def empty_recycle_bin():
     if not config.TRASH_DIR.exists():
         return
+    refs: set[str] = set()
     for entry in config.TRASH_DIR.iterdir():
         if entry.name == "_assets":
             continue
+        refs |= _refs_under(entry)
         if entry.is_dir():
             shutil.rmtree(entry)
         else:
             entry.unlink()
+    purge_orphan_images(refs)
 
 
 # ---------------------------------------------------------------------------
@@ -589,27 +1521,46 @@ def set_img_width(qid: str, width):
     _update_meta_fields(qid, {"img_width": int(width) if width not in (None, "") else None})
 
 
-def set_img_split(qid: str, mode: str | None):
-    """图文分栏模式：''/opts/full/sub。"""
-    if mode in ("opts", "full", "sub"):
+def set_img_split(qid: str, mode: str | None, field: str = "body"):
+    """图片位置模式；旧真值（True/1）仍视为 "opts"。
+
+    **关掉写 "off"，不写空**：空值（frontmatter 里缺这一项）表示「用户从未设过」，
+    `exporter.resolve_split` 会给带图选择题默认 "full"、`plan_figs` 会给四图选择题
+    默认配对。关掉也写空的话默认值立刻把它变回开，表现就是「点了没反应」。
+    "off" 在 `_norm_split` 里同样归 None（关），只是保留了「这是用户明确选的」。
+    与线上版 db.set_img_split 逐条同义。
+    """
+    if field == "solution":
+        _update_meta_fields(qid, {"sol_img_split": "full" if mode == "full" else "off"})
+        return
+    if mode in ("opts", "full", "sub", "between", "after", "pair"):
         val = mode
-    elif mode:
+    elif mode:                 # 兼容旧布尔真值
         val = "opts"
     else:
-        val = ""
+        val = "off"            # 明确关闭，区别于「没设过」的空
     _update_meta_fields(qid, {"img_split": val})
 
 
-def set_img_layout(qid: str, index: int, align=None, width=None):
-    """设置第 index 张图（0 起）的宽度/对齐，落进 img_layouts JSON 列表。
+def set_img_layout(qid: str, index: int, align=None, width=None, stack=None,
+                   field="body"):
+    """设置第 index 张图（0 起）的宽度/对齐/堆叠，落进 img_layouts JSON 列表。
 
     align/width 传 None 表示"本次不动这一项"，传 "" 表示"清除该项"。
+    stack 是布尔（True=这一组图上下堆叠，False=清除标记回到默认并排），只对
+    「连续两图」组的**首图**有意义（见 exporter.plan_figs 的分组）。存进同一个
+    条目而不另开字段：并排/堆叠是逐图设置，与 w/align 同源。
     index==0 时一并回写标量 img_align/img_width（供无 img_layouts 的旧路径读取）。
+
+    field="solution" 时改的是 sol_img_layouts（解析里的图），**序号与题干各自
+    独立编号**。解析侧不回写标量：img_align/img_width 是题干的兜底，被解析的
+    设置覆盖会让题干配图跟着变。
     """
     rec = get_question(qid)
     if not rec:
         return
-    items = [dict(it) for it in rec["img_layouts"] if isinstance(it, dict)]
+    key = "sol_img_layouts" if field == "solution" else "img_layouts"
+    items = [dict(it) for it in rec[key] if isinstance(it, dict)]
     cur = None
     for it in items:
         if it.get("i") == index:
@@ -629,17 +1580,127 @@ def set_img_layout(qid: str, index: int, align=None, width=None):
             cur.pop("align", None)
         else:
             cur["align"] = align
+    if stack is not None:
+        if stack:
+            cur["stack"] = True
+        else:
+            cur.pop("stack", None)      # 回到默认并排，不留 false 占位
 
-    items = [it for it in items if it.get("w") is not None or it.get("align")]
+    items = [it for it in items
+             if it.get("w") is not None or it.get("align") or it.get("stack")]
     items.sort(key=lambda it: it.get("i", 0))
 
-    fields = {"img_layouts": items}
-    if index == 0:
+    fields = {key: items}
+    if index == 0 and key == "img_layouts":
         if width is not None:
             fields["img_width"] = int(width) if width != "" else None
         if align is not None:
             fields["img_align"] = align or ""
     _update_meta_fields(qid, fields)
+
+
+def _swap_layout_items(items, i: int, j: int) -> list[dict]:
+    """把逐图设置表里 i 与 j 两个条目的 `i` 字段互换。
+
+    表结构是 `[{"i": 序号, ...}, ...]`，序号即图片在正文里的出现顺序。交换正文里
+    两个图引用时这张表必须跟着换，否则宽度/对齐/原图记录会张冠李戴。
+    """
+    out = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        it = dict(it)
+        if it.get("i") == i:
+            it["i"] = j
+        elif it.get("i") == j:
+            it["i"] = i
+        out.append(it)
+    out.sort(key=lambda it: it.get("i", 0))
+    return out
+
+
+def swap_images(qid: str, i: int, j: int, text: str, field: str = "body"):
+    """交换第 i、j 张图：写入新正文，并同步换 img_layouts / img_originals 的序号。
+
+    新正文由调用方给（图引用的交换是纯文本操作，见 qrender.swap_image_refs），
+    这里只保证**几处一起改**：序号 i 是多处共享的不变量（`.body img` 遍历序、
+    导出侧图片文件名列表下标、img_layouts[].i、img_originals[].i、
+    image-redraw.js 的 pickedIndex），任一处不同步就会让宽度/对齐/重绘原图错位
+    到别的图上。所以一次读写落盘，不拆成两次 _update_meta_fields。
+
+    field="solution" 时改的是解析：新正文写进解析段，序号换的是 sol_img_layouts
+    ——题干与解析的图片各自独立编号，互不影响；img_originals 只记题干侧的重绘
+    原图，故解析路径不动它。
+    """
+    rec = get_question(qid)
+    if not rec:
+        return
+    path = config.BANK_DIR / rec["path"]
+    meta, _ = _read_raw(path)
+    key = "sol_img_layouts" if field == "solution" else "img_layouts"
+    meta[key] = _swap_layout_items(list(meta.get(key) or []), i, j)
+    if field != "solution":
+        meta["img_originals"] = _swap_layout_items(
+            list(meta.get("img_originals") or []), i, j)
+    if field == "solution":
+        full_body = _join_sections(rec["body"], text, rec["extra_sections"])
+    else:
+        full_body = _join_sections(text, rec["solution"], rec["extra_sections"])
+    meta["updated"] = _now_iso()
+    with _write_lock:
+        _write_raw(path, meta, full_body)
+
+
+# ---------------------------------------------------------------------------
+# AI 重绘的原图备份（img_originals）
+#
+# 存的是文件名而不是路径，与正文里 ![[文件名]] 的写法一致。原图文件本身**一律不删**
+# ——重绘换掉正文引用后，那张 jpg 仍然躺在 _assets 里，所以"还原"只是把引用换回去，
+# 随时可退，不存在"退不回来"的状态。
+# ---------------------------------------------------------------------------
+
+def remember_img_original(qid: str, index: int, filename: str):
+    """记下第 index 张图的原始文件名。**只在首次写入时锁定**。
+
+    重绘可以连点多次（用户对第一版不满意再生成），第二次重绘时正文里已经是
+    tikz_*.svg 了；如果每次都覆盖这条记录，原图就永久丢了引用，"还原"会把用户
+    退回到上一版 TikZ 而不是最初的照片。故首次写入即锁定，之后不再更新。
+    """
+    rec = get_question(qid)
+    if not rec:
+        return
+    items = [dict(it) for it in rec["img_originals"] if isinstance(it, dict)]
+    for it in items:
+        if it.get("i") == index:
+            return          # 已锁定，保持最初那张
+    items.append({"i": index, "orig": filename})
+    items.sort(key=lambda it: it.get("i", 0))
+    _update_meta_fields(qid, {"img_originals": items})
+
+
+def get_img_original(qid: str, index: int) -> str:
+    """取第 index 张图的原始文件名；没有记录返回空串。"""
+    rec = get_question(qid)
+    if not rec:
+        return ""
+    for it in rec["img_originals"]:
+        if isinstance(it, dict) and it.get("i") == index:
+            return str(it.get("orig") or "")
+    return ""
+
+
+def forget_img_original(qid: str, index: int):
+    """删掉第 index 张图的备份记录。
+
+    还原之后必须删：否则"还原原图"按钮一直亮着，用户点了却没有任何变化
+    （正文已经是原图了），像坏了一样。
+    """
+    rec = get_question(qid)
+    if not rec:
+        return
+    items = [dict(it) for it in rec["img_originals"]
+             if isinstance(it, dict) and it.get("i") != index]
+    _update_meta_fields(qid, {"img_originals": items})
 
 
 def toggle_starred(qid: str):
@@ -654,27 +1715,43 @@ def set_starred_many(ids: list[str], starred: bool):
 
 
 def toggle_selected(qid: str) -> bool:
-    if qid in _selected:
-        _selected.discard(qid)
-        return False
-    _selected.add(qid)
-    return True
+    with _selected_lock:
+        if qid in _selected:
+            _selected.discard(qid)
+            _save_selected_unlocked()
+            return False
+        _selected.add(qid)
+        _save_selected_unlocked()
+        return True
 
 
 def clear_selected():
-    _selected.clear()
+    with _selected_lock:
+        _selected.clear()
+        _save_selected_unlocked()
 
 
 def select_ids(ids: list[str]):
-    _selected.update(ids)
+    with _selected_lock:
+        _selected.update(ids)
+        _save_selected_unlocked()
 
 
 def select_all(ids: list[str]):
-    _selected.update(ids)
+    with _selected_lock:
+        _selected.update(ids)
+        _save_selected_unlocked()
 
 
 def count_selected() -> int:
-    return len(_selected)
+    with _selected_lock:
+        return len(_selected)
+
+
+def selected_ids() -> list[str]:
+    """直接返回勾选篮里的 id，不为几十个 id 扫描全部题目 Markdown。"""
+    with _selected_lock:
+        return list(_selected)
 
 
 def reorder(ids: list[str]):
@@ -693,20 +1770,32 @@ def collections_of(qid: str) -> list[str]:
 
 
 def add_to_collection(qid: str, folder_id: str):
-    """把题目移动到指定文件夹（一题只能在一个目录下，与目录语义一致）。"""
+    """把题目移动到指定文件夹（一题只能在一个目录下，与目录语义一致）。
+
+    知道题号的题在落地时按题号重新取名（`第3题.md`），不知道的沿用原文件名。
+    重新取名而不是死守旧名：uuid 命名的老题被拖进文件夹时，正是「同一个文件夹里
+    摊着一排题」的场景——那时文件名才开始起作用。文件名不参与身份认定
+    （`_to_record` 取 `meta["id"]`），改名不会断任何引用。
+    """
     rec = get_question(qid)
     if not rec:
         return
     src = config.BANK_DIR / rec["path"]
     dst_dir = _folder_abspath(folder_id)
-    dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / src.name
-    if src == dst:
+    # 已经在目标目录里：什么都不做。这一条必须在取名之前——`_question_filename`
+    # 靠 `exists()` 判撞名，而「本题自己」就摊在那儿，会被当成撞名，把
+    # `第3题.md` 改成 `第3题_<qid>.md`，每点一次「加入本文件夹」就多一截后缀。
+    if src.parent.resolve() == dst_dir.resolve():
         return
-    if dst.exists():
-        dst = dst_dir / f"{src.stem}_{_new_id()}{src.suffix}"
+    dst_dir.mkdir(parents=True, exist_ok=True)
     with _write_lock:
+        # 同一把锁内取名 + 移动，理由同 create_question。
+        dst = (_question_filename(dst_dir, qid, rec["number"])
+               if rec["number"] is not None else dst_dir / src.name)
+        if dst.exists():
+            dst = dst_dir / f"{dst.stem}_{_new_id()}{dst.suffix}"
         shutil.move(str(src), str(dst))
+        invalidate_scan_cache()
 
 
 def remove_from_collection(qid: str, folder_id: str = ""):
@@ -715,6 +1804,170 @@ def remove_from_collection(qid: str, folder_id: str = ""):
     if not rec or rec["folder"] != folder_id:
         return
     add_to_collection(qid, "")
+
+
+# ---------------------------------------------------------------------------
+# 原卷附件（「一并保存原卷」）
+#
+# 服务器版为此建了一张 collection_papers 表 + papers.store 的独立目录 + 孤儿
+# 文件清理，因为它的「文件夹」只是一行数据库记录，附件无处可放。本地的文件夹
+# **就是 vault 里的真目录**，原卷直接 copy 进去即可：文件浏览器就是入口、
+# Obsidian 自带 PDF 阅读器能点开、删文件夹时原卷跟着进 .trash、导出/备份整个
+# 目录时它自然在内。那张表和那套清理逻辑在这个模型下没有对应物。
+# ---------------------------------------------------------------------------
+
+# 原卷不是 .md，不会被 _scan 当成题目；也不放 _assets（那儿是正文引用的图片，
+# 且被 _skip_rel 排除）。就摊在题所在的那个目录里，跟题目并列。
+_PAPER_MAX_STEM = 60
+
+
+def paper_filename(display_name: str, kind: str = "exam") -> str:
+    """原卷落盘用的文件名：清掉路径与保留字符，过长的截断，保留扩展名。
+
+    名字来自**上传文件名**，与 safe_folder_name 同样的理由必须收：它会被拼进
+    题库目录。这里额外保留扩展名——Obsidian 靠扩展名决定能不能点开预览，
+    丢了扩展名的 PDF 在 vault 里就是个打不开的死文件。
+    """
+    # 兜底名按 kind 分：两份都退化成「原卷」时，同一个文件夹里的题干和答案会撞名，
+    # 后存那份被加上随机后缀，谁是答案就再也看不出来了。
+    fallback = "答案" if kind == "solution" else "原卷"
+    name = (display_name or "").strip()
+    suffix = PurePosixPath(name).suffix
+    stem = name[: len(name) - len(suffix)] if suffix else name
+    stem = safe_folder_name(stem) or fallback
+    suffix = safe_folder_name(suffix.lstrip("."))
+    return f"{stem[:_PAPER_MAX_STEM]}.{suffix}" if suffix else stem[:_PAPER_MAX_STEM]
+
+
+def store_paper(src_path, folder_id: str, display_name: str,
+                kind: str = "exam") -> str:
+    """把一份原卷**复制**（不是移动）进 folder_id 目录，返回落盘文件名。
+
+    复制而非移动：批量审核期间那份临时文件还要供「重新转换」和原文对照
+    （`/convert/file/<job_id>`）用，移走了那两个功能当场坏掉。整批结束时
+    `_maybe_finish_batch` 会统一删临时文件，这里留下的副本不受影响。
+
+    同名同内容时直接复用，保证重复提交幂等；同名但内容不同则明确报冲突，既不
+    覆盖也不悄悄加随机后缀。历史行为会生成随机后缀，批量重跑后很难判断哪一份
+    才是基线原卷，也无法自动核对「源文件数 = 已保存原卷数」。
+    """
+    src = Path(src_path)
+    if not src.is_file():
+        raise FileNotFoundError(str(src))
+    dst_dir = _folder_abspath(folder_id)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    name = paper_filename(display_name, kind)
+    dst = dst_dir / name
+    if dst.exists():
+        def _digest(path: Path) -> str:
+            h = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        if _digest(src) == _digest(dst):
+            return dst.name
+        raise FileExistsError(f"原卷同名但内容不同：{name}")
+    with _write_lock:
+        shutil.copy2(str(src), str(dst))
+    return dst.name
+
+
+def _paper_kind(name: str) -> str:
+    """从文件名猜是题干卷还是解析卷。
+
+    服务器版把 kind 存在 `collection_papers.kind` 列里，本地没有那张表、也刻意不
+    另建索引文件（vault 里多一个元数据文件，用户在 Obsidian 里看见只会困惑，而且
+    手动拖进来的原卷不会有对应的行，那种「一半有记录一半没有」的状态最难维护）。
+    所以按 `paper_filename` / `_solution_display_name` 写出来的名字反推——那两处
+    是本地唯一的命名出口，一致的。手动拖进来的文件默认算题干卷，用户在面板上看得
+    见 kind、要改名一眼就知道怎么改。
+    """
+    stem = Path(name).stem
+    return "solution" if ("答案" in stem or "解析" in stem) else "exam"
+
+
+def list_papers(folder_id: str) -> list[dict]:
+    """列出文件夹（含后代）里的原卷附件。
+
+    **口径与题目列表一致**（`list_questions` 的 `collection` 也含后代子树）：
+    父文件夹上看到的题来自子文件夹时，对应的原卷也该在同一个面板里看得见，否则
+    用户得逐级点进去找。返回项里的 `folder` 标出它实际在哪一级。
+
+    原卷 = 目录里的**非 .md 普通文件**。判据是排除法而不是白名单扩展名：用户可能
+    往里放 .zip 讲义、.png 扫描页，列不出来只会让人以为文件丢了。跳过点开头的
+    文件/目录与 `_assets`（口径同 `_skip_rel`），跳过 `.md`（那是题目）。
+    """
+    root = _folder_abspath(folder_id)
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() == ".md":
+            continue
+        try:
+            rel = path.relative_to(config.BANK_DIR)
+        except ValueError:
+            continue
+        if _skip_rel(rel) or path.name.startswith("."):
+            continue
+        folder = (str(PurePosixPath(rel.parent.as_posix()))
+                  if rel.parent != Path(".") else "")
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        out.append({
+            # id = 相对题库根的 posix 路径。**只在服务端用它反查**，见 paper_abspath。
+            "id": str(rel.as_posix()),
+            "filename": path.name,
+            "folder": folder,
+            "kind": _paper_kind(path.name),
+            "byte_size": size,
+        })
+    out.sort(key=lambda p: (p["folder"], p["filename"]))
+    return out
+
+
+def paper_abspath(paper_id: str) -> Path | None:
+    """原卷 id（相对路径）→ 绝对路径。越界/不存在/是 .md 一律返回 None。
+
+    **这是原卷的唯一取路入口，不许别处自己拼**：id 来自请求参数，`../` 拼进去就是
+    一个任意文件读取/删除接口，而软件版无鉴权，这条尤其不能松（与 `/outfile/<token>`
+    同一条规矩）。判据用 `resolve()` 后的祖先关系，不是字符串前缀比较——后者被
+    符号链接和 `..` 绕得过去。
+    """
+    if not paper_id:
+        return None
+    try:
+        target = (config.BANK_DIR / PurePosixPath(paper_id)).resolve()
+        root = config.BANK_DIR.resolve()
+    except OSError:
+        return None
+    if root != target and root not in target.parents:
+        return None
+    if not target.is_file() or target.suffix.lower() == ".md":
+        return None
+    rel = target.relative_to(root)
+    if _skip_rel(rel) or target.name.startswith("."):
+        return None
+    return target
+
+
+def remove_paper(paper_id: str) -> bool:
+    """彻底删除一份原卷（**不进回收站**）。删掉了返回 True。
+
+    不进回收站是刻意的：回收站的语义是「题目/文件夹可恢复」，为附件在那儿再造一套
+    恢复逻辑不值得，而原卷本来就是用户自己电脑上还有一份的原始文件。面板上的删除
+    按钮会明确写「彻底删除、不进回收站」。
+    """
+    target = paper_abspath(paper_id)
+    if target is None:
+        return False
+    with _write_lock:
+        target.unlink()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -736,16 +1989,425 @@ def asset_path(filename: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# 孤儿图片清理
+#
+# `_assets/` 是**全库共用的一个扁平目录**，删题时不顺手清图，图片就只增不减
+# （用户报的「图片堆积」）。清理只在**彻底删除**时做（回收站里的三个入口），
+# 软删不动图——那时正文还在 `.trash` 里，恢复回来得能看见图。
+#
+# **按正文里的 `![[...]]` 引用清，不能按文件名前缀猜**：`_assets` 里有两套命名，
+# `save_image` 写的是 `<qid>_<N>.<ext>`（能按 qid 前缀找），而 OCR 导入的图由
+# `converter._intercept_images` 写成 `<原卷名>_<MinerU 哈希>.<ext>`，跟 qid 毫无
+# 关系——实测线上 vault 里 56 张图**全是**后一种。按 qid 前缀扫等于一张都清不掉。
+# ---------------------------------------------------------------------------
+
+# 与 qrender._QIMG_RE 同一口径（Obsidian 嵌入，可带 `|宽度` 后缀）。刻意各写一份：
+# 那边是渲染用的、要拿宽度，这里只要文件名，共用会让任一侧改捕获组时另一侧静默错。
+_EMBED_RE = re.compile(r"!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]")
+_ASSET_FILE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".avif", ".svg", ".pdf",
+})
+# OCR／重绘确认时会先落图片再写题目。跨进程写入没有共用 Python 锁，因此全库清理
+# 保守跳过最近五分钟的未引用文件，避免正好撞上另一个题库窗口的入库瞬间。
+_ASSET_GC_GRACE_NS = 5 * 60 * 1_000_000_000
+
+
+class AssetAuditError(RuntimeError):
+    """图片审计无法完整覆盖全部已登记题库；此时必须拒绝删除。"""
+
+
+def _refs_in(meta: dict, body: str) -> set[str]:
+    """一份题目文件引用到的图片文件名集合。
+
+    除了正文里的 `![[...]]`，还要算上 `img_originals` 里记的重绘原图——那些文件名
+    已经不在正文里了（正文换成了 tikz_*.svg），但「还原」要靠它们，不能当孤儿删掉。
+    重绘产出的 svg 还带一个同名 pdf（见 tikz_render），一并算进来。
+    """
+    out = {Path(m.group(1)).name for m in _EMBED_RE.finditer(body or "")}
+    for it in (meta.get("img_originals") or []):
+        if isinstance(it, dict) and it.get("orig"):
+            out.add(Path(str(it["orig"])).name)
+    for name in list(out):
+        if name.lower().endswith(".svg"):
+            out.add(name[:-4] + ".pdf")
+    return out
+
+
+def _refs_under(entry: Path) -> set[str]:
+    """一个 .md 文件、或一个目录（子树里所有 .md）引用到的图片文件名。"""
+    out: set[str] = set()
+    paths = [entry] if entry.is_file() else list(entry.rglob("*.md"))
+    for p in paths:
+        if p.suffix.lower() != ".md":
+            continue
+        try:
+            meta, body = _read_raw(p)
+        except Exception:
+            continue
+        out |= _refs_in(meta, body)
+    return out
+
+
+def _live_refs() -> set[str]:
+    """当前**所有还活着的**引用：题库里的题 + 回收站里等待恢复的一切。
+
+    回收站必须算进来（题目 md、软删文件夹的整棵子树）。漏了它，删掉一道题会把
+    「另一道软删的题还在用」的图一起清掉，用户点恢复得到一道图全裂的题——而且
+    不可逆。宁可留下几张暂时清不掉的图，也不能删错。
+    """
+    out: set[str] = set()
+    for rec in _all_records():
+        path = config.BANK_DIR / rec["path"]
+        try:
+            meta, body = _read_raw(path)
+        except Exception:
+            continue
+        out |= _refs_in(meta, body)
+    if config.TRASH_DIR.exists():
+        for entry in config.TRASH_DIR.iterdir():
+            if entry.name == "_assets":
+                continue
+            out |= _refs_under(entry)
+    return out
+
+
+def _registered_bank_roots() -> list[Path]:
+    """返回当前题库及 desktop.json 中全部已登记题库；任一不可用即失败。
+
+    图片现在可以跨题库共享。删除判定若悄悄跳过断开的盘符或损坏配置，就可能把那一
+    库仍在使用的图片当孤儿永久删除，所以这里采用 fail-closed 语义。
+    """
+    roots: list[Path] = [config.BANK_DIR.resolve()]
+    desktop_config = config.DATA_DIR / "desktop.json"
+    if desktop_config.is_file():
+        try:
+            value = json.loads(desktop_config.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise AssetAuditError(f"桌面题库配置无法读取：{exc}") from exc
+        if not isinstance(value, dict):
+            raise AssetAuditError("桌面题库配置格式无效")
+        entries = value.get("banks") or []
+        if not isinstance(entries, list):
+            raise AssetAuditError("桌面题库列表格式无效")
+        for entry in entries:
+            raw = entry.get("path") if isinstance(entry, dict) else entry
+            candidate = Path(str(raw or "").strip()).expanduser()
+            if not candidate.is_absolute():
+                raise AssetAuditError(f"题库列表含无效路径：{raw}")
+            try:
+                roots.append(candidate.resolve())
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise AssetAuditError(f"题库路径无法解析：{raw}") from exc
+
+    result: list[Path] = []
+    seen: set[str] = set()
+    unavailable: list[str] = []
+    for root in roots:
+        key = os.path.normcase(str(root))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            available = root.is_dir() and not _is_link_or_junction(root)
+        except OSError:
+            available = False
+        if not available:
+            unavailable.append(str(root))
+        else:
+            result.append(root)
+    if unavailable:
+        preview = "；".join(unavailable[:3])
+        suffix = " 等" if len(unavailable) > 3 else ""
+        raise AssetAuditError(f"有 {len(unavailable)} 个已登记题库不可访问：{preview}{suffix}")
+    return result
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        check = getattr(path, "is_junction", None)
+        return bool(check and check())
+    except OSError:
+        return True
+
+
+def _registered_markdown_paths(roots: list[Path]):
+    """遍历全部题库 Markdown，父子题库重叠时按真实路径去重。
+
+    `.trash`、`_backups` 和 `_handouts` 仍计入引用：回收站要能恢复，安全刷新备份与
+    讲义也不能因清理图片而损坏。只跳过各级 `_assets`、其他点目录和链接目录。
+    """
+    seen: set[str] = set()
+    errors: list[OSError] = []
+
+    def onerror(exc: OSError):
+        errors.append(exc)
+
+    # 实际配置常同时登记公共 vault 与其“数学／物理”子目录。先保留最外层根即可
+    # 完整覆盖它们；否则虽然后面按真实文件去重，仍会把一万多个目录项白走一遍。
+    scan_roots: list[Path] = []
+    for root in sorted(roots, key=lambda path: (len(path.parts), str(path).casefold())):
+        if any(parent == root or parent in root.parents for parent in scan_roots):
+            continue
+        scan_roots.append(root)
+
+    for root in scan_roots:
+        for current, dirs, files in os.walk(root, topdown=True, onerror=onerror,
+                                            followlinks=False):
+            current_path = Path(current)
+            kept_dirs = []
+            for name in dirs:
+                candidate = current_path / name
+                if name == "_assets" or (name.startswith(".") and name != ".trash"):
+                    continue
+                if _is_link_or_junction(candidate):
+                    continue
+                kept_dirs.append(name)
+            dirs[:] = kept_dirs
+            for name in files:
+                if not name.lower().endswith(".md"):
+                    continue
+                path = current_path / name
+                if _is_link_or_junction(path) or not path.is_file():
+                    continue
+                try:
+                    resolved = path.resolve()
+                except (OSError, RuntimeError) as exc:
+                    raise AssetAuditError(f"Markdown 路径无法解析：{path}") from exc
+                key = os.path.normcase(str(resolved))
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield resolved
+    if errors:
+        raise AssetAuditError(f"题库目录扫描不完整：{errors[0]}")
+
+
+def _registered_live_refs(candidates: set[str] | None = None) -> tuple[set[str], dict]:
+    """收集所有已登记题库的图片引用；读取/解析任一 Markdown 失败便拒绝审计。"""
+    roots = _registered_bank_roots()
+    # 桌面版运行在 Windows，文件名大小写不敏感；引用的大小写与磁盘不同也仍是
+    # 同一张图。审计若按 Python 字符串精确比较，会把仍在使用的图误判成孤儿。
+    wanted = ({Path(name).name.casefold() for name in candidates}
+              if candidates is not None else None)
+    live: set[str] = set()
+    markdown_files = 0
+    for path in _registered_markdown_paths(roots):
+        try:
+            # 绝大多数题都有 ``img_originals: []``。若为它们逐份启动 ruamel 解析，
+            # 一万多题的图片体检会耗时九十秒；Wiki 引用本来就是纯文本语法，直接扫
+            # 原文即可。只有确实存在非空重绘原图元数据时才解析 frontmatter。
+            text = path.read_text(encoding="utf-8", newline="")
+            refs = {Path(match.group(1)).name.casefold()
+                    for match in _EMBED_RE.finditer(text)}
+            frontmatter = _FM_RE.match(normalize_newlines(text))
+            fm_text = frontmatter.group(1) if frontmatter else ""
+            if re.search(r"(?m)^img_originals\s*:\s*(?!\[\s*\]\s*$)", fm_text):
+                meta, _body = _parse_raw_text(text)
+                refs |= {name.casefold() for name in _refs_in(meta, "")}
+            for name in list(refs):
+                if name.lower().endswith(".svg"):
+                    refs.add(name[:-4] + ".pdf")
+        except Exception as exc:
+            raise AssetAuditError(f"Markdown 无法读取或解析：{path}：{exc}") from exc
+        markdown_files += 1
+        live |= refs if wanted is None else refs & wanted
+        if wanted is not None and wanted <= live:
+            break
+    return live, {"bank_dirs": [str(root) for root in roots],
+                  "markdown_files": markdown_files}
+
+
+def _asset_files() -> tuple[Path, list[Path], int]:
+    assets_dir = config.ASSETS_DIR.resolve()
+    if not assets_dir.exists():
+        return assets_dir, [], 0
+    if not assets_dir.is_dir() or _is_link_or_junction(assets_dir):
+        raise AssetAuditError(f"共享图片目录不是普通目录：{assets_dir}")
+    files: list[Path] = []
+    ignored = 0
+    try:
+        entries = list(assets_dir.iterdir())
+    except OSError as exc:
+        raise AssetAuditError(f"共享图片目录无法读取：{exc}") from exc
+    for path in entries:
+        if (_is_link_or_junction(path) or not path.is_file()
+                or path.suffix.lower() not in _ASSET_FILE_EXTS):
+            ignored += 1
+            continue
+        files.append(path)
+    return assets_dir, files, ignored
+
+
+def scan_orphan_assets() -> dict:
+    """审计共享图片目录；返回可供二次确认删除的稳定文件快照。"""
+    live, stats = _registered_live_refs()
+    assets_dir, files, ignored = _asset_files()
+    now_ns = time.time_ns()
+    orphans: list[dict] = []
+    recent_count = 0
+    recent_bytes = 0
+    asset_names: set[str] = set()
+    referenced_files = 0
+    for path in files:
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            raise AssetAuditError(f"图片状态无法读取：{path}：{exc}") from exc
+        asset_names.add(path.name.casefold())
+        if path.name.casefold() in live:
+            referenced_files += 1
+            continue
+        if now_ns - stat.st_mtime_ns < _ASSET_GC_GRACE_NS:
+            recent_count += 1
+            recent_bytes += stat.st_size
+            continue
+        orphans.append({"name": path.name, "size": stat.st_size,
+                        "mtime_ns": stat.st_mtime_ns})
+    orphans.sort(key=lambda item: item["name"].lower())
+    return {
+        "asset_dir": str(assets_dir),
+        "bank_dirs": stats["bank_dirs"],
+        "bank_count": len(stats["bank_dirs"]),
+        "markdown_files": stats["markdown_files"],
+        "asset_files": len(files),
+        "referenced_files": referenced_files,
+        "missing_references": len(live - asset_names),
+        "ignored_files": ignored,
+        "recent_unreferenced": recent_count,
+        "recent_unreferenced_bytes": recent_bytes,
+        "orphans": orphans,
+        "orphan_count": len(orphans),
+        "orphan_bytes": sum(item["size"] for item in orphans),
+    }
+
+
+def delete_scanned_orphan_assets(previous: dict) -> dict:
+    """重新全量审计后删除仍为孤儿且自上次扫描后未变化的文件。"""
+    if not isinstance(previous, dict):
+        raise AssetAuditError("图片扫描快照无效")
+    if Path(str(previous.get("asset_dir") or "")).resolve() != config.ASSETS_DIR.resolve():
+        raise AssetAuditError("共享图片目录已经变化，请重新扫描")
+    old = {item.get("name"): item for item in previous.get("orphans") or []
+           if isinstance(item, dict) and item.get("name")}
+    current = scan_orphan_assets()
+    current_items = {item["name"]: item for item in current["orphans"]}
+    removed = 0
+    removed_bytes = 0
+    changed = 0
+    with _write_lock:
+        for name, before in old.items():
+            item = current_items.get(name)
+            if (item is None or item.get("size") != before.get("size")
+                    or item.get("mtime_ns") != before.get("mtime_ns")):
+                changed += 1
+                continue
+            target = config.ASSETS_DIR / Path(name).name
+            try:
+                resolved = target.resolve()
+                stat = resolved.stat()
+            except OSError:
+                changed += 1
+                continue
+            if (resolved.parent != config.ASSETS_DIR.resolve()
+                    or _is_link_or_junction(resolved)
+                    or stat.st_size != item["size"]
+                    or stat.st_mtime_ns != item["mtime_ns"]):
+                changed += 1
+                continue
+            try:
+                resolved.unlink()
+                removed += 1
+                removed_bytes += stat.st_size
+            except OSError as exc:
+                logger.warning("孤儿图片删除失败 %s: %s", name, exc)
+                changed += 1
+    if removed:
+        logger.info("跨题库清理孤儿图片 %d 个，共 %d 字节", removed, removed_bytes)
+    return {"removed": removed, "removed_bytes": removed_bytes,
+            "changed_or_skipped": changed}
+
+
+def purge_orphan_images(candidates: set[str] | None = None) -> int:
+    """删掉共享图片目录里没人引用的图，返回删除数。
+
+    candidates 给定时只考察这几个文件名（刚被彻底删除的那道题引用过的图），不遍历
+    整个 `_assets`——一次删题不该顺带清掉别处早就存在的孤儿（AI 重绘换掉引用后
+    留下的原图就是这类，见 `remember_img_original` 上方的注释，那是刻意留的）。
+    candidates 为 None 时才做全量清理，留给将来的「清理未引用图片」入口用。
+
+    判据一律覆盖 desktop.json 中全部已登记题库，并把回收站、讲义和安全备份都算
+    活引用；任一题库不可访问或 Markdown 无法解析时只保留图片，不猜测删除。
+    """
+    if candidates is None:
+        try:
+            snapshot = scan_orphan_assets()
+            return delete_scanned_orphan_assets(snapshot)["removed"]
+        except AssetAuditError as exc:
+            logger.warning("全量孤儿图片清理已拒绝：%s", exc)
+            return 0
+    if not candidates or not config.ASSETS_DIR.exists():
+        return 0
+    names_by_key = {Path(n).name.casefold(): Path(n).name for n in candidates}
+    names = list(names_by_key.values())
+    try:
+        live, _stats = _registered_live_refs(set(names))
+    except AssetAuditError as exc:
+        # 彻底删题仍然成功，但图片宁可暂时保留；扫描不完整时绝不猜删。
+        logger.warning("候选图片清理已拒绝：%s", exc)
+        return 0
+    removed = 0
+    for name in names:
+        if name.casefold() in live:
+            continue
+        # 名字来自文件内容（用户可在 Obsidian 里手改），当路径片段用之前必须验一次，
+        # 否则 `![[../../x]]` 就是个任意文件删除。只删 ASSETS_DIR 直下的普通文件。
+        target = config.ASSETS_DIR / name
+        try:
+            resolved = target.resolve()
+        except OSError:
+            continue
+        if resolved.parent != config.ASSETS_DIR.resolve() or not resolved.is_file():
+            continue
+        try:
+            resolved.unlink()
+            removed += 1
+        except OSError as e:
+            logger.warning("孤儿图片删除失败 %s: %s", name, e)
+    if removed:
+        logger.info("清理孤儿图片 %d 张", removed)
+    return removed
+
+
+# ---------------------------------------------------------------------------
 # 列表查询：过滤 / 排序（Python 侧内存过滤，取代 db.py 的 SQL）
 # ---------------------------------------------------------------------------
 
+def _tiebreak(r: dict) -> tuple:
+    """并列时的次序：原卷题号 → 入库时间 → 路径。
+
+    **每个排序键都必须缀上它**（2026-08-08 补）。`sorted` 稳定，但它稳的是**输入
+    顺序**，而输入来自 `_scan()` 的 `rglob`——由文件系统决定，与题号无关，重扫一次
+    还可能变。所以并列项（同一批导入的 order 相同、或同难度/同题型）在页面上的先后
+    是随机的，用户看到的就是「顺序丢了」。题号排第一位：一份卷子导进来，用户预期
+    的就是按原卷题号排。没有题号的排在有题号的后面（`number` 为 None 时给 +inf）。
+    """
+    num = r.get("number")
+    return (num if isinstance(num, int) else float("inf"),
+            r.get("created") or "", r.get("path") or "")
+
+
 _SORT_KEYS = {
-    "custom": lambda r: r["order"],
+    "custom": lambda r: (r["order"],) + _tiebreak(r),
+    # created_desc 是**倒序**排的，缀 `_tiebreak` 会把并列项的题号也一起倒过来
+    # （第 10 题排在第 1 题前）。所以这里只用创建时间本身，让同一秒入库的题保持
+    # `rglob` 的顺序——总比明确排成倒的强。
     "created_desc": lambda r: r["created"],
-    "created_asc": lambda r: r["created"],
-    "difficulty": lambda r: (r["difficulty"] or "0"),
-    "type": lambda r: r["type"],
-    "starred": lambda r: (0 if r["starred"] else 1, r["order"]),
+    "created_asc": lambda r: (r["created"],) + _tiebreak(r),
+    "difficulty": lambda r: ((r["difficulty"] or "0"),) + _tiebreak(r),
+    "type": lambda r: (r["type"],) + _tiebreak(r),
+    "starred": lambda r: (0 if r["starred"] else 1, r["order"]) + _tiebreak(r),
 }
 _SORT_REVERSE = {"created_desc": True}
 
@@ -762,12 +2424,14 @@ def list_questions(tags: list[str] | None = None, match: str = "and",
                     qtype: str = "", difficulty: str = "",
                     starred: bool = False, sort: str = "custom",
                     collection: str = "", search: str = "",
-                    selected_only: bool = False) -> list[dict]:
-    recs = _all_records()
+                    selected_only: bool = False,
+                    records: list[dict] | None = None) -> list[dict]:
+    recs = list(records) if records is not None else _all_records()
 
     if collection:
-        subtree = _folder_subtree_ids(collection)
-        recs = [r for r in recs if r["folder"] in subtree]
+        prefix = collection + "/"
+        recs = [r for r in recs
+                if r["folder"] == collection or r["folder"].startswith(prefix)]
     if selected_only:
         recs = [r for r in recs if r["selected"]]
     tags = [t for t in (tags or []) if t]

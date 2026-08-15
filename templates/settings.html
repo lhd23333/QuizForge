@@ -1,111 +1,399 @@
 {% extends "base.html" %}
 {% block title %}设置 · QuizForge{% endblock %}
 {% block content %}
-<h2>设置</h2>
+<section class="app-page settings-page">
+<header class="app-page-head">
+  <div>
+    <h1>设置</h1>
+    <p>管理 OCR、识别模型、软件授权与外观。密钥加密保存在本机，页面不回显。</p>
+  </div>
+</header>
 
-<section class="import-box">
-  <h3>识别模型（LLM）</h3>
-  <p class="muted">
-    MinerU 识别出的内容要交给大模型整理成题目。不配这里也能用——会走
-    内置默认 DeepSeek（读 <code>vendor/project_alpha/.env</code>，老行为），但那条路的
-    max_tokens 写死 8192，换推理模型会因思维链占满预算而「返回空内容」。
-    支持任意 OpenAI 兼容接口（DeepSeek / 阿里云百炼 / 硅基流动 / 中转站 / 自建等）。
-    可以存多套，在列表里点「启用」随时切换，同时只有一套生效。
-  </p>
-  <p class="muted">
-    <strong>Base URL</strong>：填 API 根地址即可，会自动补全 <code>/v1</code>，
-    也不用管 <code>/chat/completions</code> 后缀——中转站直接填域名（如
-    <code>https://yapi.click</code>）就行，和 CC Switch 里的写法一致。
-  </p>
-  <p class="muted">
-    <strong>max_tokens</strong>：推理模型（如 deepseek-v4-pro）的思维链和正文共用这份预算，
-    填小了会思维链占满、正文一个字都不吐，建议 32000 以上；非推理模型（如 deepseek-chat）8192 够用。
-  </p>
-  <p class="muted">
-    API Key 以密文存库（密钥在 <code>data/.enc_key</code>），页面不回显。
-    <strong>删掉那个密钥文件已存的 Key 就解不开了</strong>，需要重新填。
-  </p>
+<div class="panel-grid">
 
-  <p style="margin-top:12px">
-    当前识别用的是：
-    {% set active = providers | selectattr('is_active') | first %}
-    {% if active %}
-      <strong>{{ active['name'] }}</strong>（{{ active['model'] }} · max_tokens {{ active['max_tokens'] }}）
+  <!-- 离线软件授权 -->
+  <div class="panel col-full" id="software-license">
+    <div class="license-panel-head">
+      <div>
+        <h3>软件授权</h3>
+        <p class="muted">许可证在本机使用内置公钥验签并绑定设备，不连接授权服务器，也不上传硬件或题库信息。</p>
+      </div>
+      <span class="license-badge {{ 'is-valid' if license_state.valid else 'is-invalid' }}">
+        {{ license_state.summary }}
+      </span>
+    </div>
+    {% if license_state.valid %}
+      <dl class="license-details">
+        <dt>授权给</dt><dd>{{ license_state.licensee }}</dd>
+        <dt>版本</dt><dd>{{ license_state.edition }}</dd>
+        <dt>许可证编号</dt><dd>{{ license_state.license_id }}</dd>
+        <dt>绑定设备</dt><dd><code>{{ license_state.device_id }}</code></dd>
+        <dt>有效期</dt><dd>{{ license_state.expires_at or '永久' }}</dd>
+        <dt>更新期</dt><dd>{{ license_state.updates_until or '未限制' }}</dd>
+      </dl>
     {% else %}
-      <strong>内置默认 DeepSeek</strong>
+      <p class="license-message">{{ license_state.detail }}</p>
     {% endif %}
-  </p>
+    {% if not license_enforced %}
+      <p class="muted">当前是源码或 Obsidian 托管模式，授权限制未强制；独立桌面内测包会在预览和导出时校验许可证。</p>
+    {% elif device_state and device_state.valid %}
+      <div class="device-request-box">
+        <label for="license-device-id">本机设备请求码</label>
+        <div class="device-request-row">
+          <input id="license-device-id" class="input" type="text"
+                 value="{{ device_state.device_id }}" readonly spellcheck="false">
+          <button type="button" class="btn" data-copy-license-device>复制</button>
+        </div>
+        <p class="muted">把请求码发给发布者即可签发许可证。它由本机随机身份摘要生成，不包含主板、硬盘或题库信息。</p>
+      </div>
+    {% elif device_state %}
+      <p class="license-message license-device-error">{{ device_state.summary }}：{{ device_state.detail }}</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('settings_license') }}"
+          enctype="multipart/form-data" class="license-import-form">
+      <input type="file" name="license_file" class="input" accept=".qflicense" required>
+      <button type="submit" class="btn btn-primary">{{ '更换' if license_state.valid else '导入' }}许可证</button>
+    </form>
+  </div>
 
-  {% if providers %}
-  <table class="data-table" style="margin-top:12px;width:100%;border-collapse:collapse">
-    <thead>
-      <tr><th>状态</th><th>名称</th><th>Base URL</th><th>模型</th><th>max_tokens</th><th>操作</th></tr>
-    </thead>
-    <tbody>
-      {% for p in providers %}
-      <tr>
-        <td>{% if p['is_active'] %}<strong>✅ 生效中</strong>{% else %}<span class="muted">未启用</span>{% endif %}</td>
-        <td>{{ p['name'] }}</td>
-        <td class="muted">{{ p['base_url'] }}</td>
-        <td class="muted">{{ p['model'] }}</td>
-        <td class="muted">{{ p['max_tokens'] }}</td>
-        <td>
-          <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline">
-            <input type="hidden" name="llm_id" value="{{ p['id'] }}">
-            {% if p['is_active'] %}
-              <input type="hidden" name="llm_action" value="deactivate">
-              <button type="submit" class="btn btn-sm">停用（改用默认 DeepSeek）</button>
-            {% else %}
-              <input type="hidden" name="llm_action" value="activate">
-              <button type="submit" class="btn btn-sm">启用</button>
-            {% endif %}
-          </form>
-          <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline"
-                onsubmit="return confirm('删除「{{ p['name'] }}」？删掉后会回落到默认 DeepSeek。')">
-            <input type="hidden" name="llm_action" value="remove">
-            <input type="hidden" name="llm_id" value="{{ p['id'] }}">
-            <button type="submit" class="btn btn-sm link-danger">删除</button>
-          </form>
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-    <p class="muted" style="margin-top:12px">还没配过模型，当前用内置默认 DeepSeek。</p>
-  {% endif %}
+  <!-- MinerU Token（OCR） -->
+  <div class="panel">
+    <h3>MinerU API Token</h3>
+    <p class="muted">用于 PDF/图片 OCR 识别，在 <a href="https://mineru.net" target="_blank"
+      rel="noopener">mineru.net</a> 的「API 管理」页创建（付费服务）。</p>
+    <p class="muted">这里填了就优先用这份；一份都没填则回落到
+      <code>vendor/project_alpha/.env</code> 里的 <code>MINERU_API_TOKEN</code>。
+      两处都没有时，AI 识别会报错，其余功能（手动导入、题库管理、组卷导出）不受影响。</p>
+    <p class="muted"><strong>可以添加多份</strong>：每次真实 OCR 请求会按当前忙闲挑
+      最空闲的一份；题干和解析也能分别取凭证。多 Token 主要用于独立账号负载、失效
+      切换和可用性，同一账号的 Token 通常共享官方频控与优先级额度。</p>
 
-  <form method="post" action="{{ url_for('settings_llm') }}" style="margin-top:16px">
-    <input type="hidden" name="llm_action" value="add">
-    <div class="conv-row">
-      <span class="conv-label">名称</span>
-      <input type="text" name="llm_name" class="input" placeholder="比如 我的 DeepSeek" required>
+    {% if mineru_tokens %}
+      <ul class="token-list">
+        {% for t in mineru_tokens %}
+          <li>
+            <span class="token-label">{{ t['label'] or '未命名' }}</span>
+            <span class="muted">（已设置{% if t['added'] %}，{{ t['added'][:10] }}{% endif %}）</span>
+            <form method="post" action="{{ url_for('settings_mineru_delete') }}"
+                  style="display:inline" onsubmit="return confirm('删除这份 Token？')">
+              <input type="hidden" name="token_id" value="{{ t['id'] }}">
+              <button type="submit" class="btn btn-sm btn-danger-text">删除</button>
+            </form>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('settings_mineru') }}">
+      <div class="field">
+        <label>添加 MinerU Token</label>
+        <input type="password" name="mineru_token" class="input" autocomplete="new-password"
+               placeholder="输入你的 MinerU API Token">
+      </div>
+      <div class="field">
+        <label>备注（可选，用于区分是哪个账号）</label>
+        <input type="text" name="mineru_label" class="input" maxlength="40"
+               placeholder="如 主号 / 备用号">
+      </div>
+      <button type="submit" class="btn btn-primary">添加</button>
+    </form>
+  </div>
+
+  <!-- Doc2X Key（第二条 OCR 链路） -->
+  <div class="panel">
+    <h3>Doc2X API Key</h3>
+    <p class="muted">用于高保真 PDF → Markdown 识别。转换页可在 MinerU 与
+      Doc2X 间逐批选择；当前接入 <code>v3-2026</code>，保留公式、图片、表格结构和
+      页级质量分。结果只在云端临时保留，QuizForge 会在任务内立即导出到本机。</p>
+    <p class="muted"><strong>可以添加多份</strong>，转换时与 MinerU 一样按当前忙闲
+      选择。多 Key 用于独立账号负载、失效切换和可用性；同一账号的 Key 通常共享
+      官方并发与额度，不能靠重复创建 Key 线性提速。</p>
+    {% if doc2x_keys %}
+      <ul class="token-list">
+        {% for key in doc2x_keys %}
+          <li>
+            <span class="token-label">{{ key['label'] or '未命名' }}</span>
+            <span class="muted">（已设置{% if key['added'] %}，{{ key['added'][:10] }}{% endif %}）</span>
+            <form method="post" action="{{ url_for('settings_doc2x_delete') }}"
+                  style="display:inline" onsubmit="return confirm('删除这份 Doc2X API Key？')">
+              <input type="hidden" name="key_id" value="{{ key['id'] }}">
+              <button type="submit" class="btn btn-sm btn-danger-text">删除</button>
+            </form>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    <form method="post" action="{{ url_for('settings_doc2x') }}">
+      <div class="field">
+        <label>添加 Doc2X API Key</label>
+        <input type="password" name="doc2x_key" class="input" autocomplete="new-password"
+               placeholder="输入 sk- 开头的 Doc2X API Key">
+      </div>
+      <div class="field">
+        <label>备注（可选，用于区分账号）</label>
+        <input type="text" name="doc2x_label" class="input" maxlength="40"
+               placeholder="如 主号 / 备用号">
+      </div>
+      <button type="submit" class="btn btn-primary">添加</button>
+    </form>
+  </div>
+
+  <!-- 加密说明 -->
+  <div class="panel">
+    <h3>密钥存储</h3>
+    <p class="muted">MinerU、Doc2X 与 LLM 的 API Key 都用 Fernet 对称加密后存在
+      <code>data/</code> 下（<code>data/mineru.json</code> /
+      <code>data/doc2x.json</code> / <code>data/providers.json</code>），加密密钥是
+      <code>data/.enc_key</code>。</p>
+    <p class="muted"><strong>删掉或换掉 <code>data/.enc_key</code>，已存的所有密钥都会
+      永久解不开</strong>，只能回这一页重新填。这个文件已在 <code>.gitignore</code> 里，
+      不要提交到 git，也不要加进任何备份/同步工具。</p>
+    <p class="muted">本应用只监听 <code>127.0.0.1</code>、没有任何用户认证，
+      请勿改成对局域网或公网监听。</p>
+  </div>
+
+  <!-- 识别模型（LLM） -->
+  <div class="panel col-full">
+    <h3>识别模型（LLM）</h3>
+    <p class="muted">
+      OCR 识别出的内容可交给大模型整理成题目。不配这里也能用——会走
+      内置默认 DeepSeek（读 <code>vendor/project_alpha/.env</code>，老行为），但那条路的
+      max_tokens 写死 8192，换推理模型会因思维链占满预算而「返回空内容」。
+      支持任意 OpenAI 兼容接口（DeepSeek / 阿里云百炼 / 硅基流动 / 中转站 / 自建等）。
+      可以存多套，在列表里点「启用」随时切换。
+    </p>
+    <p class="muted">模型分两条路径用，各自独立启用：</p>
+    <ul class="muted" style="margin:4px 0 0 1.2em">
+      <li><strong>导入识别</strong>：把 OCR 结果整理成题目，要的是长上下文的
+        <strong>文本</strong>模型。</li>
+      <li><strong>配图重绘</strong>：把题目里的照片重画成矢量图（TikZ），
+        <strong>必须支持图片输入</strong>——纯文本模型（如 <code>deepseek-chat</code>、
+        <code>deepseek-v4-pro</code>）会直接报错。没单独配时会回落到「导入识别」那套，
+        方便先试一下。</li>
+    </ul>
+    <p class="muted">一套凭据可以同时服务两条路径（两个开关都点亮），也可以各配一套。</p>
+    <p class="muted">
+      <strong>Base URL</strong>：填 API 根地址即可，会自动补全 <code>/v1</code>，
+      也不用管 <code>/chat/completions</code> 后缀——中转站直接填域名（如
+      <code>https://yapi.click</code>）就行，和 CC Switch 里的写法一致。
+      也可以填本机推理服务的回环地址（如 <code>http://127.0.0.1:11434/v1</code>）。
+    </p>
+    <p class="muted">
+      <strong>max_tokens</strong>：推理模型（如 deepseek-v4-pro）的思维链和正文共用这份预算，
+      填小了会思维链占满、正文一个字都不吐，建议 32000 以上；非推理模型（如 deepseek-chat）8192 够用。
+    </p>
+
+    {% set act_md = providers | selectattr('active_md') | first %}
+    {% set act_rd = providers | selectattr('active_redraw') | first %}
+    <p style="margin-top:12px">
+      当前<strong>导入识别</strong>用的是：
+      {% if act_md %}
+        <strong>{{ act_md['name'] }}</strong>（{{ act_md['model'] }} · max_tokens {{ act_md['max_tokens'] }}）
+      {% else %}
+        <strong>内置默认 DeepSeek</strong>
+      {% endif %}
+      <br>
+      当前<strong>配图重绘</strong>用的是：
+      {% if act_rd %}
+        <strong>{{ act_rd['name'] }}</strong>（{{ act_rd['model'] }} · max_tokens {{ act_rd['max_tokens'] }}）
+      {% elif act_md %}
+        <strong>{{ act_md['name'] }}</strong>（{{ act_md['model'] }}）
+        <span class="cell-muted">— 没单独配，回落到「导入识别」那套；它不支持图片输入的话重绘会报错</span>
+      {% else %}
+        <span class="cell-muted">没有可用配置，重绘会直接报错（内置默认 DeepSeek 不支持图片输入）</span>
+      {% endif %}
+    </p>
+
+    {% set vision_providers = providers | selectattr('supports_vision') | list %}
+    {% if vision_providers %}
+    <div class="llm-quick-switch" aria-label="配图重绘模型快速切换">
+      <div>
+        <strong>配图重绘快速切换</strong>
+        <span class="muted">点击模型即刻生效，不影响导入识别模型。</span>
+      </div>
+      <div class="llm-quick-switch-buttons">
+        {% for p in vision_providers %}
+        <form method="post" action="{{ url_for('settings_llm') }}">
+          <input type="hidden" name="llm_id" value="{{ p['id'] }}">
+          <input type="hidden" name="llm_purpose" value="redraw">
+          <input type="hidden" name="llm_action" value="activate">
+          <button type="submit"
+                  class="btn {{ 'btn-primary' if p['active_redraw'] else '' }}"
+                  aria-pressed="{{ 'true' if p['active_redraw'] else 'false' }}"
+                  {% if p['active_redraw'] %}disabled{% endif %}>
+            {% if p['active_redraw'] %}✓ {% endif %}{{ p['model'] }}
+          </button>
+        </form>
+        {% endfor %}
+      </div>
     </div>
-    <div class="conv-row">
-      <span class="conv-label">Base URL</span>
-      <input type="text" name="llm_base_url" class="input" style="min-width:22em"
-             placeholder="https://api.deepseek.com" required>
-    </div>
-    <div class="conv-row">
-      <span class="conv-label">API Key</span>
-      <input type="password" name="llm_api_key" class="input" style="min-width:22em"
-             placeholder="sk-..." required autocomplete="new-password">
-    </div>
-    <div class="conv-row">
-      <span class="conv-label">模型名</span>
-      <input type="text" name="llm_model" class="input" placeholder="deepseek-chat" required>
-    </div>
-    <div class="conv-row">
-      <span class="conv-label">max_tokens</span>
-      <input type="number" name="llm_max_tokens" class="input" min="256" max="200000"
-             value="{{ default_max_tokens }}" style="width:7em">
-    </div>
+    {% endif %}
+
     {% if providers %}
-    <label class="conv-sol">
-      <input type="checkbox" name="llm_activate_now" value="1" checked> 添加后立即启用
-    </label>
+    <table class="data-table" style="margin-top:12px">
+      <thead>
+        <tr><th>名称</th><th>Base URL</th><th>模型</th><th>max_tokens</th>
+            <th>导入识别</th><th>配图重绘</th><th>操作</th></tr>
+      </thead>
+      <tbody>
+        {% for p in providers %}
+        <tr>
+          <td>{{ p['name'] }}</td>
+          <td class="cell-muted">{{ p['base_url'] }}</td>
+          <td class="cell-muted">{{ p['model'] }}</td>
+          <td class="cell-muted">{{ p['max_tokens'] }}</td>
+          {# 两列开关同一套模板：生效中的那个按钮本身就是「取消」——文字里写明白，
+             别让人以为只是个状态标签。 #}
+          {% for purpose in ['md', 'redraw'] %}
+          {% set on = p['active_redraw'] if purpose == 'redraw' else p['active_md'] %}
+          <td>
+            <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline">
+              <input type="hidden" name="llm_id" value="{{ p['id'] }}">
+              <input type="hidden" name="llm_purpose" value="{{ purpose }}">
+              <input type="hidden" name="llm_action" value="{{ 'deactivate' if on else 'activate' }}">
+              <button type="submit" class="btn btn-sm">
+                {{ '✅ 生效中（点此停用）' if on else '启用' }}
+              </button>
+            </form>
+          </td>
+          {% endfor %}
+          <td>
+            <details style="display:inline-block">
+              <summary class="btn btn-sm" style="list-style:none">编辑</summary>
+              <form method="post" action="{{ url_for('settings_llm') }}" class="panel" style="margin-top:8px;min-width:280px">
+                <input type="hidden" name="llm_action" value="edit">
+                <input type="hidden" name="llm_id" value="{{ p['id'] }}">
+                <label>名称 <input class="input" name="llm_name" value="{{ p['name'] }}" required></label>
+                <label>Base URL <input class="input" name="llm_base_url" value="{{ p['base_url'] }}" required></label>
+                <label>API Key <input class="input" type="password" name="llm_api_key" placeholder="留空则保持原值" autocomplete="new-password"></label>
+                <label>模型名 <input class="input" name="llm_model" value="{{ p['model'] }}" required></label>
+                <label>max_tokens <input class="input" type="number" name="llm_max_tokens" min="256" max="200000" value="{{ p['max_tokens'] }}" required></label>
+                <label class="conv-sol">
+                  <input type="checkbox" name="llm_supports_vision" value="1"
+                         {% if p['supports_vision'] %}checked{% endif %}>
+                  支持图片输入（显示在配图重绘快速切换区）
+                </label>
+                <button type="submit" class="btn btn-sm btn-primary" style="margin-top:6px">保存</button>
+              </form>
+            </details>
+            <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline"
+                  onsubmit="return confirm('删除「{{ p['name'] }}」？删掉后会回落到默认 DeepSeek。')">
+              <input type="hidden" name="llm_action" value="remove">
+              <input type="hidden" name="llm_id" value="{{ p['id'] }}">
+              <button type="submit" class="btn btn-sm btn-danger-text">删除</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+      <p class="muted" style="margin-top:12px">还没配过模型，当前用内置默认 DeepSeek。</p>
     {% endif %}
-    <button type="submit" class="btn btn-primary">添加</button>
-  </form>
+
+    <form method="post" action="{{ url_for('settings_llm') }}" style="margin-top:16px">
+      <input type="hidden" name="llm_action" value="add">
+      <div class="inline-form">
+        <div class="field">
+          <label>名称</label>
+          <input type="text" name="llm_name" class="input" placeholder="比如 我的 DeepSeek" required>
+        </div>
+        <div class="field grow">
+          <label>Base URL</label>
+          <input type="text" name="llm_base_url" class="input"
+                 placeholder="https://api.deepseek.com" required>
+        </div>
+        <div class="field grow">
+          <label>API Key</label>
+          <input type="password" name="llm_api_key" class="input"
+                 placeholder="sk-..." required autocomplete="new-password">
+        </div>
+        <div class="field">
+          <label>模型名</label>
+          <input type="text" name="llm_model" class="input" placeholder="deepseek-chat" required>
+        </div>
+        <div class="field">
+          <label>max_tokens</label>
+          <input type="number" name="llm_max_tokens" class="input" min="256" max="200000"
+                 value="{{ default_max_tokens }}" style="width:7em">
+        </div>
+        <div class="field">
+          <button type="submit" class="btn btn-primary">添加</button>
+        </div>
+      </div>
+      <div style="margin-top:8px">
+        <span class="muted">添加后用于：</span>
+        <label class="conv-sol">
+          <input type="checkbox" name="llm_for_md" value="1" checked> 导入识别
+        </label>
+        <label class="conv-sol">
+          <input type="checkbox" name="llm_for_redraw" value="1"> 配图重绘（需支持图片输入）
+        </label>
+      </div>
+      {% if providers %}
+      <label class="conv-sol">
+        <input type="checkbox" name="llm_activate_now" value="1" checked>
+        添加后立即在上面勾选的路径上启用（会顶掉那条路径原来生效的配置）
+      </label>
+      {% endif %}
+    </form>
+  </div>
+
+  <!-- 外观主题 -->
+  <div class="panel col-full">
+    <h3>🎨 外观主题</h3>
+    <p class="muted">插件是把本页嵌在 Obsidian 的窗格里，iframe 里是独立文档、
+      <strong>不会跟着 Obsidian 自己的主题变</strong>，所以深浅色要在这里单独设。</p>
+    <form method="post" action="{{ url_for('settings_theme') }}" enctype="multipart/form-data" id="theme-form">
+      <div class="field">
+        <label>模式</label>
+        <div class="theme-mode-pick">
+          <label><input type="radio" name="theme_mode" value="light" {% if theme_mode != 'dark' %}checked{% endif %}> ☀️ 浅色</label>
+          <label><input type="radio" name="theme_mode" value="dark" {% if theme_mode == 'dark' %}checked{% endif %}> 🌙 深色</label>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>主题色</label>
+        <div class="color-swatches" id="color-swatches">
+          {% for c in swatches %}
+            <button type="button" class="swatch {% if theme_color|lower == c %}active{% endif %}"
+                    data-color="{{ c }}" style="background:{{ c }}" title="{{ c }}"></button>
+          {% endfor %}
+          <input type="color" name="theme_color" id="theme-color-input" value="{{ theme_color }}"
+                 title="自定义取色">
+        </div>
+      </div>
+
+      <div class="field">
+        <label>壁纸（铺满背景，卡片半透明毛玻璃）</label>
+        {% if wallpaper %}
+        <div style="margin-bottom:8px">
+          {% if wallpaper_is_video %}
+          <video src="{{ url_for('wallpaper_serve', filename=wallpaper) }}" autoplay muted loop playsinline
+                 style="max-width:200px;border-radius:var(--radius-sm);border:1px solid var(--border)"></video>
+          {% else %}
+          <img src="{{ url_for('wallpaper_serve', filename=wallpaper) }}" alt="当前壁纸"
+               style="max-width:200px;border-radius:var(--radius-sm);border:1px solid var(--border)">
+          {% endif %}
+          <label style="display:block;margin-top:6px;font-size:13px">
+            <input type="checkbox" name="remove_wallpaper" value="1"> 移除当前壁纸
+          </label>
+        </div>
+        {% endif %}
+        <input type="file" name="wallpaper" accept="image/*,video/*" class="input">
+        <p class="muted" style="font-size:12px">支持 jpg/png/webp/gif 等图片和动图（≤25MB），以及 mp4/webm/mov 等视频（≤100MB）。</p>
+      </div>
+
+      <button type="submit" class="btn btn-primary">保存外观</button>
+    </form>
+  </div>
+
+</div>
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_v('js/settings-theme.js') }}" defer></script>
+<script src="{{ static_v('js/settings-license.js') }}" defer></script>
 {% endblock %}

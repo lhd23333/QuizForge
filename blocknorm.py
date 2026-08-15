@@ -33,11 +33,11 @@ logger = logging.getLogger(__name__)
 # 免得撞上服务商的速率限制反而更慢。8 是实测比较稳的折中。
 _MAX_WORKERS = 8
 
-# 单块重试次数。实测（36 块并发 8）同一份原文两次跑，一次有 5 块降级、一次 0 块
-# 降级，降级的块单独重跑全部一次通过——即失败是并发下的偶发调用错误（限流/瞬时
-# 断连），不是内容或协议问题。llm_client.chat 本身不重试，所以一次抖动就把那块
-# 永久钉成机械兜底结果。重试放在这里而不是 llm_client：那是老路径也会共用的模块，
-# 不能因为新路径的需要改它的行为。
+# 单块重试次数。实测（e93a1fe3，36 块并发 8）同一份原文两次跑，一次有 5 块降级、
+# 一次 0 块降级，降级的块单独重跑全部一次通过——即失败是并发下的偶发调用错误
+# （限流/瞬时断连），不是内容或协议问题。llm_client.chat 本身不重试，所以一次
+# 抖动就把那块永久钉成机械兜底结果。重试放在这里而不是 llm_client：那是老路径
+# 共用的模块，不能因为新路径的需要改它的行为。
 _RETRIES = 2
 _BACKOFF = 1.5
 
@@ -81,14 +81,16 @@ _SYSTEM_PROMPT = """你是数学题目排版规范化专家。你会收到**一�
 A/B/C/D**）一律写成 `$\\displaystyle A$` 形式，哪怕只有一个字母. 注意「A 组」\
 这类分组名不是数学对象，不要包裹.
 5. **选项排版**：选项字母写 `$\\displaystyle A.$` 等；四个选项都短则同一行、\
-用多个空格分隔；较长则每个选项独占一行.
+用多个空格分隔；较长则每个选项独占一行. **禁止**在选项字母外面再套一层括号，\
+只能是 `$\\displaystyle A.$`，不能写成 `($\\displaystyle A.$)` 或 `$\\displaystyle (A).$`.
 6. **序号层级**：一级小问统一 `（1）（2）`，二级统一 `（i）（ii）`，各自独立成段、\
 段间空一行. 公式内的括号保持半角不变.
 7. **填空题**末尾必须有 `___` 填空位，原文有横线/留白的统一换成 `___`.
 8. **表格必须保留并改写成 Markdown 管道表格**，表头下接 `| --- | --- |` 分隔行，\
 不许残留任何 HTML 标签（`<table>``<tr>``<td>``<br>` 等），表内不许有空行.
 9. **图片引用**：形如 `![](images/xxx.jpg)` 的引用**原样保留在原位置**，不得删除\
-或改写路径.
+或改写路径；若 alt 是“题干图”或“选项A/B/C/D”，这是程序根据 PDF 坐标恢复出的\
+图片归属，必须与对应题干或选项绑定，禁止换位.
 10. 题干**不要**保留原文的大题标题、分区标题、分组小标题、题号前缀之外的装饰文字\
 （如「公众号：xxx」「题号位置： 17 18」这类 OCR 噪声要删掉）.
 """
@@ -171,24 +173,60 @@ def _fallback_split(text: str) -> tuple[str, str]:
     return text.strip(), ""
 
 
-def _guess_type(text: str, section: str | None) -> str:
+def _mixed_choice_type(section: str, number: int | None) -> str | None:
+    """混合选择题说明按题号落实为单选/多选。
+
+    例如物理卷常把 1—7 单选、8—10 多选写在同一个「选择题」大标题里。只搜索
+    section 里的关键词会同时看到“只有一项”和“有多项”，无论先判哪一个都会把
+    整段十题判成同一题型。这里仅在题号已知且标题明确给出范围时采用范围事实。
+    """
+    if not isinstance(number, int) or not section:
+        return None
+    plain = re.sub(r"\\(?:displaystyle|mathrm|text)\b", "", section)
+    plain = plain.replace("$", "").replace("{", "").replace("}", "")
+    plain = re.sub(r"\\sim\b", "~", plain)
+    range_re = re.compile(
+        r"第\s*(\d{1,3})\s*(?:~|～|至|[-—–])\s*(\d{1,3})\s*题"
+        r"[^。；;]{0,30}?(只有一项|只有一个|单项|有多项|多项符合|不止一项)"
+    )
+    for start, end, rule in range_re.findall(plain):
+        if int(start) <= number <= int(end):
+            return "多选" if re.search(r"多项|不止", rule) else "单选"
+    return None
+
+
+def _guess_type(text: str, section: str | None,
+                number: int | None = None) -> str:
     """机械兜底判题型，规则与 prompt 里给模型的判据一致。"""
     sec = section or ""
-    if re.search(r"多选|不定项|有多项符合|部分选对", sec):
+    ranged = _mixed_choice_type(sec, number)
+    if ranged:
+        return ranged
+    # 扫描教辅常把多选混排在普通选择题中，题面括号标注比选项版式更可靠。
+    if re.search(r"[（(]\s*(?:多选|多项选择)\s*[）)]", text):
         return "多选"
-    if re.search(r"单选|只有一项|单项选择", sec):
+    if re.search(r"多选|多项选择|不定项|有多项符合|部分选对", sec):
+        return "多选"
+    if re.search(r"单选|只有一项|只有(?:一个|一)选项|单项选择", sec):
         return "单选"
-    if "填空" in sec:
+    # 物理题库把同一套内部“填空题”逻辑显示为“实验题”；原卷标题也常直接
+    # 写“实验题”。这里只改题型映射，不另造一套识别和存储类型。
+    if "填空" in sec or "实验题" in sec:
         return "填空"
     if re.search(r"解答题|计算题|证明题|应用题", sec):
         return "解答"
+    # 强制 OCR 常把 A. 识成 (A) 或 `$\\displaystyle A$`。完整 A—D 四元组比
+    # 分小问信号更可靠，须在 `（1）` 前判，否则选择题公式里的括号会抢走题型。
+    if mechfix.looks_like_choice_options(text):
+        return "单选"
     if "___" in text:
         return "填空"
+    # 纯图片选项常只剩题干末尾的答题括号，A-D 标签和选项正文都在图片层。这里仅
+    # 恢复题型；图片是否齐全仍由坐标恢复与质量审计单独把关。
+    if mechfix.has_choice_answer_blank(text):
+        return "单选"
     if re.search(r"（\s*[1１]\s*）|\(\s*1\s*\)", text):
         return "解答"
-    labels = {m.group(1) for m in re.finditer(r"(?:^|\s)([A-D])\s*[.．]", text)}
-    if len(labels) >= 3:
-        return "单选"
     return "解答"
 
 
@@ -213,7 +251,7 @@ def normalize_one(block, client, keep_images: bool = True) -> NormBlock:
     """规范化单个块。任何失败都降级为机械结果，绝不让一块的失败搞掉整次转换。"""
     system = _SYSTEM_PROMPT + ("" if keep_images else _NO_IMG_RULE)
     fb_body, fb_sol = _fallback_split(block.text)
-    fb_type = _guess_type(block.text, block.section)
+    fb_type = _guess_type(block.text, block.section, block.number)
 
     def _degraded(reason: str) -> NormBlock:
         logger.warning("块 %d（原文第 %d 行）降级为机械结果：%s",
@@ -260,9 +298,12 @@ def normalize_one(block, client, keep_images: bool = True) -> NormBlock:
         body = body or fb_body
         sol = sol or fb_sol
 
+    # 题号范围写在卷面标题里时属于确定事实，优先于模型输出。模型单块看见标题里
+    # 同时出现“只有一项/有多项”时也可能把整段统一判成多选。
+    ranged_type = _mixed_choice_type(block.section or "", block.number)
     return NormBlock(
         index=block.index, number=block.number, group=block.group,
-        zone=block.zone, kind=kind, qtype=qtype or fb_type,
+        zone=block.zone, kind=kind, qtype=ranged_type or qtype or fb_type,
         body=body, solution=sol, line_no=block.line_no)
 
 
@@ -272,18 +313,73 @@ def normalize_blocks(blocks, client, keep_images: bool = True,
 
     并行是这条路径省墙钟时间的关键：块之间完全独立，且每次调用都是纯 I/O 等待.
     顺序靠 index 复原，不依赖 future 完成顺序.
+
+    `kind == "solution"` 的块（blocksplit._classify 的廉价预分类，判据是块首就是
+    `【答案】` 这类标记）跳过 LLM，见 _skip_llm。blockpipe 的模块文档一直写着
+    这一步「省一次 LLM 调用」，但实现上从来没有跳过——本次补上。
     """
     if not blocks:
         return []
-    workers = max(1, min(max_workers, len(blocks)))
     results: list[NormBlock | None] = [None] * len(blocks)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(normalize_one, b, client, keep_images): i
-                for i, b in enumerate(blocks)}
-        for fut in concurrent.futures.as_completed(futs):
-            i = futs[fut]
-            results[i] = fut.result()   # normalize_one 内部已兜底，不会抛
+    todo: list[tuple[int, object]] = []
+    for i, b in enumerate(blocks):
+        if _skip_llm(b):
+            results[i] = _from_pre_solution(b)
+        else:
+            todo.append((i, b))
+    if todo:
+        workers = max(1, min(max_workers, len(todo)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = {pool.submit(normalize_one, b, client, keep_images): i
+                    for i, b in todo}
+            for fut in concurrent.futures.as_completed(futs):
+                i = futs[fut]
+                results[i] = fut.result()   # normalize_one 内部已兜底，不会抛
     out = [r for r in results if r is not None]
     degraded = sum(1 for r in out if r.degraded)
-    logger.info("逐块规范化完成：%d 块，其中降级 %d 块", len(out), degraded)
+    logger.info("逐块规范化完成：%d 块（跳过 LLM %d 块），其中降级 %d 块",
+                len(out), len(blocks) - len(todo), degraded)
     return out
+
+
+def _skip_llm(block) -> bool:
+    """这个块能不能不问 LLM。
+
+    条件刻意收得很紧，两个都要满足：
+      ① `kind == "solution"`——blocksplit._classify 判的，判据是**块首**就是
+         `【答案】`/`【解析】` 标记（实测 1.1.5 的解析区 9/9 命中）。它不认块内
+         出现，所以题干后紧跟解析的混合块不会落进这里。
+      ② `zone == "solution"`——机械判的区。两个信号独立且都指向「纯解析」时才跳，
+         单靠 ①（比如题解同页的卷子，题干区里也有 `【答案】` 开头的块）不够。
+
+    跳过省下的不只是钱，还有出错的机会：纯解析块交给 LLM 时，它要做的判断
+    （kind=solution、@@SOL 原样搬）恰好是最没有增量的一次调用，而每一次调用都
+    带着 `_RETRIES` 之后仍失败、整块降级的概率。
+
+    代价说清楚：跳过的块不会被 LLM 规范化排版（公式包裹、选项分行）。解析块的
+    排版本来就最不敏感（它整段进 `【解析】` 栏，不参与选项对齐），这笔交换划算。
+    与之相对，`_reconcile` 用 LLM 判定校正机械判区的能力对这些块失效——但它们
+    机械判出来的 zone 已经是 solution，`_reconcile` 只往「题干区→解析区」一个方向
+    掰，对已经在解析区的块本来就不做事，没有损失。
+    """
+    return getattr(block, "kind", "") == "solution" and block.zone == "solution"
+
+
+def _from_pre_solution(block) -> NormBlock:
+    """跳过 LLM 的纯解析块 → NormBlock（机械结果，不算降级）。
+
+    `degraded` 保持 False：那个字段的语义是「LLM 本该处理却失败了」，用于诊断
+    调用质量（`_blocks.json` 里按它统计）。这里是**有意**不调用，混进降级计数会
+    让"降级率"这个指标失去意义。
+
+    题号在这里剥（`mechfix.strip_lead_number`）：走 LLM 时是模型顺手剥的（prompt
+    第 10 条），`_degraded` 那条路留着题号是因为它本就是异常兜底、出现频率低。
+    这条路会吃掉**每份卷子的整个解析区**，不剥的话每道题的解析都顶着个 `3．`。
+    """
+    return NormBlock(
+        index=block.index, number=block.number, group=block.group,
+        zone=block.zone, kind="solution",
+        qtype=_guess_type(block.text, block.section, block.number),
+        body="",
+        solution=mechfix.strip_lead_number(block.text, block.number).strip(),
+        line_no=block.line_no)

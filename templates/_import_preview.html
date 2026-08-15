@@ -11,8 +11,46 @@
     </div>
   {% endif %}
   <h3>切分预览：共 {{ preview|length }} 题</h3>
+  {% if missing_numbers %}
+  <div class="flash flash-err">
+    ⚠ 你指定「只取题号」里的这些题没识别出来：<b>{{ missing_numbers|join('、') }}</b>。
+    可能是识别漏题或题号格式特殊，建议核对原文件后手动补录。
+  </div>
+  {% endif %}
+  {# 转换阶段对用户说的话，两类：切块的「指定题号模板没切开、已回退自动」，
+     和识别的「某几题选项只剩标签没有内容」（optcheck）。这句话必须显示出来：
+     前者不说用户会以为模板生效了、对着切歪的结果找不到原因；后者不说就是一道
+     选项空白的题静默进题库，而 OCR 丢的内容后面任何一层都补不回来。 #}
+  {% if split_note %}
+  <div class="flash flash-err">⚠ {{ split_note }}</div>
+  {% endif %}
+  {% if batch_id %}
+  {# 🔁 重新转换：识别结果不对时用原文件重跑一次，不必删掉重传。独立于 confirm-form，
+     所以摆在它外面（HTML 不允许嵌套 form）。 #}
+  <div class="prev-toolbar">
+    <form method="post" style="display:inline"
+          action="{{ url_for('batch_group_reconvert', batch_id=batch_id, gid=batch_gid) }}"
+          onsubmit="return confirm('识别结果不对，重新送去转换？转换期间可先离开此页，转好后回看板继续审核。');">
+      <input type="text" name="only_numbers" class="input" placeholder="只重转题号，如 3,7；留空=整份重转"
+             style="width:170px;font-size:12px;padding:3px 6px">
+      {# 题号模板：切歪了在这里指定后重跑。value 回填当前值，留空＝沿用上次
+         （后端不会因为留空而清掉，见 batch_group_reconvert）。 #}
+      <input type="text" name="num_template" class="input" value="{{ num_template or '' }}"
+             placeholder="题号写法，如 第x题；留空=沿用"
+             title="x＝阿拉伯数字、X＝中文数字，其余字符原样匹配。例：x.  x、  (x)  第x题  第X题  【第x题】"
+             style="width:160px;font-size:12px;padding:3px 6px">
+      {% if num_template %}
+      <label class="muted" style="font-size:12px">
+        <input type="checkbox" name="num_template_clear" value="1"> 改回自动
+      </label>
+      {% endif %}
+      <button type="submit" class="btn" title="用原文件重新跑一次识别转换">🔁 重新转换</button>
+    </form>
+  </div>
+  {% endif %}
   {% if preview %}
-    <form method="post" id="confirm-form" action="{{ url_for('import_md') }}">
+    <form method="post" enctype="multipart/form-data" id="confirm-form"
+          action="{{ url_for('import_md') }}">
       <input type="hidden" name="job_id" value="{{ job_id or '' }}">
       {% if queue_id %}<input type="hidden" name="queue_id" value="{{ queue_id }}">{% endif %}
       {% if batch_id %}
@@ -22,6 +60,10 @@
 
       <!-- 顶部工具栏 -->
       <div class="prev-toolbar">
+        <label title="来源文件名，作为题目的「题源」记录，不会当成标签">题源
+          <input type="text" name="batch_source" class="input" style="width:200px"
+                 value="{{ batch_source or '' }}" placeholder="该批题目的来源（如试卷/文件名）">
+        </label>
         <label>整批标签
           <input type="text" name="tags" id="batch-tags" value="{{ batch_tag or '' }}"
                  class="input" style="width:200px" placeholder="全部题共有的标签">
@@ -40,6 +82,27 @@
             {% endfor %}
           </select>
         </label>
+        <label class="exam-pack" title="试卷模式：把本批题打包进一个以试卷命名的新文件夹">
+          <input type="checkbox" name="create_exam_folder" value="1" id="exam-pack-cb"
+                 {% if pack_folder_name %}checked{% endif %}>
+          打包为文件夹
+        </label>
+        {# pack_folder_name：批量创建时勾了「该批全部放入同一文件夹」并填了名字，
+           这里预填并自动勾上，所有组落进同一个文件夹，不用每组再手填一遍。 #}
+        <input type="text" name="exam_folder_name" id="exam-folder-name" class="input"
+               value="{{ pack_folder_name or batch_tag or '' }}" placeholder="试卷/文件夹名"
+               style="width:180px;display:none">
+        {# 只有走转换链路（有 job_id / batch_id）才存在原卷文件；直接粘贴 md 进来的
+           没有原文件可留，那时连这个勾选框都不显示，免得勾了没反应。
+           默认勾上：想留原卷的人几乎总是想留，而没打包文件夹时它自动失效。 #}
+        {% if job_id or batch_id %}
+        <label class="exam-pack" id="keep-original-wrap"
+               title="把这次上传的原卷（PDF/图片）一并存进该文件夹，在 Obsidian 里可直接点开"
+               style="display:none">
+          <input type="checkbox" name="keep_original" value="1" id="keep-original-cb" checked>
+          一并保存原卷
+        </label>
+        {% endif %}
         <button type="submit" name="action" value="confirm" class="btn btn-primary">
           {% if queue_id %}导入本文件并进入下一个{% elif batch_id %}导入本组并返回看板{% else %}导入勾选的题{% endif %}
         </button>
@@ -56,7 +119,7 @@
                placeholder="给选中题加标签">
         <button type="button" class="btn" id="batch-tag-btn">打标签到选中</button>
         <button type="button" class="btn link-danger" id="batch-del-btn">删除选中</button>
-        <span class="muted">重复题已标红、默认不勾。每题可直接编辑、实时预览。</span>
+        <span class="muted">本次内容内的重复题已标红、默认不勾；历史题库请按需使用「查重」。每题可直接编辑、实时预览。</span>
       </div>
 
       <!-- 左 PDF 对照（仅上传路径有 job_id）+ 右题卡 -->
@@ -68,7 +131,9 @@
         </div>
         {% endif %}
 
-        <div class="prev-cards" id="prev-cards">
+        {# data-types：拆分出的新卡要渲染题型下拉，JS 从这里读（不往脚本里内联 tojson） #}
+        <div class="prev-cards" id="prev-cards" data-types="{{ types | tojson | forceescape }}"
+             data-subject="{{ bank_subject }}">
           {% for p in preview %}
             <article class="card qcard {% if p['dup'] %}dup-card{% endif %}" data-idx="{{ p['idx'] }}">
               <div class="card-head">
@@ -82,16 +147,54 @@
                 <select name="type_{{ p['idx'] }}" class="input type-sel"
                         style="width:auto;font-size:12px;padding:2px 6px">
                   {% for t in types %}
-                    <option value="{{ t }}" {% if t == p['type'] %}selected{% endif %}>{{ t }}</option>
+                    <option value="{{ t }}" {% if t == p['type'] %}selected{% endif %}>{{ t|qtype_label }}</option>
                   {% endfor %}
                 </select>
-                <span class="muted">第 {{ loop.index }} 题</span>
+                {# 原卷题号：入库后当文件名用（filestore._question_filename），
+                   并落进 frontmatter 的 number。必须由这个隐藏域带过来——切分是在
+                   GET 那次请求里做的，POST 时后端手上只有表单，没有原文。
+                   JS「✂ 拆分」出来的新卡没有这个域，那种题落回 uuid 名：它不对应
+                   原卷里的任何一个题号，硬安一个只会指错。 #}
+                {% if p['number'] is not none %}
+                  <input type="hidden" name="num_{{ p['idx'] }}" value="{{ p['number'] }}">
+                {% endif %}
+                <span class="muted">第 {{ loop.index }} 题{% if p['number'] is not none
+                  and p['number'] != loop.index %}（原卷第 {{ p['number'] }} 题）{% endif %}</span>
                 {% if p['dup'] %}<span class="badge badge-exact">{{ p['dup'] }}</span>{% endif %}
                 <div class="spacer"></div>
+                <button type="button" class="btn btn-sm card-merge-up"
+                        title="把本题内容并入上一题（用于误拆的小问）">⬆ 合并到上一题</button>
+                <button type="button" class="btn btn-sm card-split"
+                        title="在本题下方插入一张空题卡，把多余的小问剪贴过去">✂ 拆分</button>
                 <button type="button" class="link link-danger card-remove">移除</button>
               </div>
-              <div class="qcard-render">{{ p['body'] | qimage }}</div>
+              <div class="qcard-render body-structured">{{ p | qbody }}</div>
               <textarea class="input qcard-src" name="body_{{ p['idx'] }}" rows="4">{{ p['body'] }}</textarea>
+              <div class="qcard-image-import" data-existing="{{ p.get('image_count', 0) }}">
+                <div class="qcard-image-toolbar">
+                  <label>图片位置
+                    <select name="img_mode_{{ p['idx'] }}" class="input qcard-img-mode"
+                            data-value="{{ p.get('img_split') or '' }}"></select>
+                  </label>
+                  <label>多图排列
+                    <select name="img_flow_{{ p['idx'] }}" class="input qcard-img-flow">
+                      <option value="column" {% if p.get('img_flow') != 'row' %}selected{% endif %}>上下排列</option>
+                      <option value="row" {% if p.get('img_flow') == 'row' %}selected{% endif %}>左右排列</option>
+                    </select>
+                    <input type="hidden" name="img_mode_touched_{{ p['idx'] }}"
+                           class="qcard-img-mode-touched" value="">
+                    <input type="hidden" name="img_flow_touched_{{ p['idx'] }}"
+                           class="qcard-img-flow-touched" value="">
+                  </label>
+                  <button type="button" class="btn btn-sm qcard-image-pick">+ 添加图片</button>
+                  <input type="file" name="images_{{ p['idx'] }}" class="qcard-image-input"
+                         accept=".png,.jpg,.jpeg,.webp,.bmp" multiple hidden>
+                  <span class="muted qcard-image-count">
+                    {% if p.get('image_count') %}原题已含 {{ p['image_count'] }} 张图片{% else %}可为本题附加图片{% endif %}
+                  </span>
+                </div>
+                <div class="qcard-image-preview" data-flow="column"></div>
+              </div>
               <details class="qcard-sol-wrap" {% if p['solution'] %}open{% endif %}>
                 <summary class="muted">解析（可编辑，留空则不导入解析）</summary>
                 <textarea class="input qcard-solution" name="solution_{{ p['idx'] }}"

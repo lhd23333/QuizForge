@@ -1,0 +1,67 @@
+{% set is_new_editor = editor_new|default(false) %}
+<section class="inline-editor" data-id="{{ q['id'] }}"
+         data-new="{{ '1' if is_new_editor else '0' }}"
+         data-collection="{{ editor_collection|default('') }}" hidden>
+  <div class="inline-editor-toolbar">
+    <div class="inline-editor-modes" role="tablist" aria-label="编辑视图">
+      <button type="button" class="inline-mode-btn" data-mode="source"
+              role="tab" aria-selected="false">源码模式</button>
+      <button type="button" class="inline-mode-btn active" data-mode="live"
+              role="tab" aria-selected="true">实时编译</button>
+      <button type="button" class="inline-mode-btn" data-mode="read"
+              role="tab" aria-selected="false">阅读模式</button>
+    </div>
+    <span class="inline-editor-hint">Markdown + KaTeX，本地即时渲染</span>
+    {% if not is_new_editor %}
+      <a href="{{ url_for('question_edit', qid=q['id']) }}" class="link inline-page-link">独立页面</a>
+    {% endif %}
+  </div>
+
+  <div class="inline-editor-workbench" data-mode="live">
+    <div class="inline-source-pane">
+      <label class="inline-field">
+        <span>题目正文</span>
+        <textarea class="input inline-body-source" rows="10" spellcheck="false"
+                  placeholder="输入 Markdown 题目正文…">{{ q['body'] }}</textarea>
+      </label>
+      <label class="inline-field">
+        <span>解析</span>
+        <textarea class="input inline-solution-source" rows="6" spellcheck="false"
+                  placeholder="可选：输入答案或解析…">{{ q['solution'] or '' }}</textarea>
+      </label>
+    </div>
+    <div class="inline-preview-pane" aria-live="polite">
+      <div class="inline-preview-status">{{ '输入题目后显示预览' if is_new_editor else '正在编译预览…' }}</div>
+      <div class="inline-preview-body body-structured"></div>
+      <div class="inline-preview-solution" hidden>
+        <div class="inline-preview-solution-body body-structured"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="inline-editor-meta">
+    <label>题型
+      <select class="input inline-type">
+        <option value="">未分类</option>
+        {% for ty in types %}<option value="{{ ty }}"{% if q['type'] == ty %} selected{% endif %}>{{ ty|qtype_label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>难度
+      <select class="input inline-difficulty">
+        <option value="">未设</option>
+        {% for n in range(1, 6) %}<option value="{{ n }}"{% if q['difficulty'] == n|string %} selected{% endif %}>{{ n }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="inline-meta-wide">题源
+      <input type="text" class="input inline-source" value="{{ q['source'] or '' }}">
+    </label>
+    <label class="inline-meta-wide">标签（逗号分隔）
+      <input type="text" class="input inline-tags" value="{{ q['tags'] | join(', ') }}">
+    </label>
+  </div>
+  <div class="inline-editor-actions">
+    <button type="button" class="btn btn-primary inline-save">{{ '添加题目' if is_new_editor else '保存修改' }}</button>
+    <button type="button" class="btn btn-ghost inline-cancel">取消</button>
+    <span class="inline-save-status" aria-live="polite"></span>
+  </div>
+</section>

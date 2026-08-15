@@ -15,6 +15,12 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+node_modules/
+.playwright-cli/
+build/
+dist/
+/$out/
+/_pre_sync_backup/
 
 # 任意 .env（真实密钥），只保留 .env.example
 .env
@@ -27,6 +33,10 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 商业发行用的第三方离线运行时体积很大，且须单独做许可证审计，不进源码仓库。
+runtime/pandoc/
+runtime/tex/
 
 # Obsidian 库配置（机器特定）
 .obsidian/

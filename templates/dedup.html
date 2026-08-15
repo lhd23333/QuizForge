@@ -1,78 +1,50 @@
 {% extends "base.html" %}
 {% block title %}查重 · QuizForge{% endblock %}
 {% block content %}
-<h2>查重</h2>
-<p class="muted">扫描全库 {{ total }} 道题。完全重复（归一化后相同）恒显示；相似题按阈值检测。</p>
-
-<form method="get" action="{{ url_for('dedup_page') }}" class="dedup-thresh">
-  <label>相似度阈值
-    <input type="number" name="threshold" min="0.5" max="1" step="0.05"
-           value="{{ threshold }}" class="input" style="width:90px">
-  </label>
-  <button type="submit" class="btn">重新扫描</button>
-</form>
-
-{% if groups %}
-  <form method="post" action="{{ url_for('dedup_delete') }}" id="dedup-form"
-        onsubmit="return confirmDedupDelete();">
-    <div class="dedup-bar">
-      <span class="muted">发现 {{ groups|length }} 组疑似重复。默认每组保留第一道、删除其余，可勾选调整（勾选=删除）。</span>
-      <div class="spacer"></div>
-      <button type="button" class="btn btn-ghost" id="dd-all">全选删除</button>
-      <button type="button" class="btn btn-ghost" id="dd-none">全不删</button>
-      <button type="submit" class="btn btn-ghost link-danger">删除勾选</button>
+<section class="app-page dedup-page">
+  <header class="app-page-head">
+    <div>
+      <h1>查重</h1>
+      <p>扫描当前题库。完全重复恒显示，相似题按阈值检测；扫描在后台运行，不再卡住页面。</p>
     </div>
+  </header>
 
-    {% for g in groups %}
-      <div class="dup-group">
-        <div class="dup-head">
-          {% if g['kind'] == 'exact' %}
-            <span class="badge badge-exact">完全重复</span>
-          {% else %}
-            <span class="badge badge-similar">相似 {{ (g['score']*100)|round|int }}%</span>
-          {% endif %}
-          <span class="muted">{{ g['members']|length }} 道</span>
-        </div>
-        {% for m in g['members'] %}
-          <article class="card">
-            <div class="card-head">
-              <label class="sel-box" title="勾选=删除">
-                <input type="checkbox" class="del-cb" name="del" value="{{ m['id'] }}"
-                       {% if not loop.first %}checked{% endif %}>
-                删除
-              </label>
-              <span class="muted">#{{ m['id'] }}</span>
-              {% if loop.first %}<span class="badge badge-keep">建议保留</span>{% endif %}
-              {% if m['type'] %}<span class="badge">{{ m['type'] }}</span>{% endif %}
-              {% if m['source'] %}<span class="src">{{ m['source'] }}</span>{% endif %}
-              <div class="spacer"></div>
-              <a href="{{ url_for('question_edit', qid=m['id']) }}" class="link">编辑</a>
-            </div>
-            <div class="body">{{ m['body'] }}</div>
-          </article>
-        {% endfor %}
+  <div class="app-surface dedup-workbench">
+    <form class="dedup-thresh" id="dedup-scan-form">
+      <label>相似度阈值
+        <input type="number" id="dedup-threshold" min="0.5" max="1" step="0.05"
+               value="{{ threshold }}" class="input">
+      </label>
+      <button type="submit" class="btn btn-primary" id="dedup-scan-button">重新扫描</button>
+    </form>
+    <div class="dedup-progress" id="dedup-progress" data-auto-start="1" role="status">
+      <span class="dedup-spinner" aria-hidden="true"></span>
+      <div>
+        <strong id="dedup-status-title">准备扫描当前题库…</strong>
+        <p class="muted" id="dedup-status-detail">页面可以正常切换；扫描完成后结果会自动显示。</p>
       </div>
-    {% endfor %}
-  </form>
-{% else %}
-  <p class="muted empty">没有发现重复题目。</p>
-{% endif %}
+    </div>
+  </div>
+
+  <div class="app-surface asset-audit-workbench">
+    <div class="asset-audit-head">
+      <div>
+        <h2>共享图片库体检</h2>
+        <p class="muted">扫描所有已登记且可访问的题库、回收站、讲义和安全备份；只有未被任何 Markdown 或重绘原图元数据引用的文件才列为可删除。</p>
+      </div>
+      <button type="button" class="btn secondary" id="asset-audit-start">扫描未引用图片</button>
+    </div>
+    <div class="asset-audit-status muted" id="asset-audit-status" role="status">尚未扫描。任一已登记题库不可访问或任一 Markdown 无法读取时，系统会拒绝删除。</div>
+    <div class="asset-audit-result" id="asset-audit-result" hidden></div>
+    <div class="asset-audit-actions">
+      <button type="button" class="btn btn-danger" id="asset-audit-delete" hidden>永久删除未引用图片</button>
+    </div>
+  </div>
+
+  <div id="dedup-results" aria-live="polite"></div>
+</section>
 {% endblock %}
 
 {% block scripts %}
-<script>
-const ddForm = document.getElementById('dedup-form');
-if (ddForm) {
-  const cbs = () => ddForm.querySelectorAll('.del-cb');
-  document.getElementById('dd-all').addEventListener('click',
-    () => cbs().forEach(cb => cb.checked = true));
-  document.getElementById('dd-none').addEventListener('click',
-    () => cbs().forEach(cb => cb.checked = false));
-}
-function confirmDedupDelete() {
-  const n = document.querySelectorAll('#dedup-form .del-cb:checked').length;
-  if (!n) { alert('没有勾选要删除的题目'); return false; }
-  return confirm('确定删除勾选的 ' + n + ' 道题？此操作不可恢复！');
-}
-</script>
+<script src="{{ static_v('js/dedup-scan.js') }}" defer></script>
 {% endblock %}

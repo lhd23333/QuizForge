@@ -1,59 +1,41 @@
 {% extends "base.html" %}
 
-{# 拍平文件夹树为 <option> 列表，depth 用全角空格缩进；跳过 exclude_id 及其整棵子树
-   （防止把文件夹移到自己或自己的后代下——服务端也会防环，这里只是不让用户选到）。 #}
-{% macro render_move_options(nodes, exclude_id, depth=0) %}
-  {% for n in nodes %}
-    {% if n['id'] != exclude_id %}
-      <option value="{{ n['id'] }}">{{ '　' * depth }}{{ n['name'] }}</option>
-      {% if n['children'] %}
-        {{ render_move_options(n['children'], exclude_id, depth + 1) }}
-      {% endif %}
-    {% endif %}
-  {% endfor %}
-{% endmacro %}
-
 {# 递归渲染文件夹树。node 含 id/name/parent_id/cnt/children/depth（软件版无内置文件夹概念）。 #}
-{% macro render_folder_tree(nodes, active, full_tree) %}
+{% macro render_folder_tree(nodes, active) %}
   {% for n in nodes %}
-    <li class="folder-item {% if active == n['id'] %}active{% endif %} {% if n['children'] %}has-children{% endif %}"
+    {% set on_active_path = active == n['id'] or active.startswith(n['id'] ~ '/') %}
+    {% set children_loaded = n.get('children_loaded', on_active_path) %}
+    {% set has_children = n.get('has_children', n['children']|length > 0) %}
+    <li class="folder-item {% if active == n['id'] %}active{% endif %} {% if has_children %}has-children{% endif %} {% if has_children and not children_loaded %}collapsed{% endif %}"
         data-folder-id="{{ n['id'] }}" data-folder-name="{{ n['name'] }}">
-      <div class="folder-row">
-        {% if n['children'] %}
+      <div class="folder-row" draggable="true">
+        {% if has_children %}
           <span class="folder-twist" title="展开/折叠">
-            <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M8 5l8 7-8 7z" fill="currentColor"/></svg>
+            <span aria-hidden="true">›</span>
           </span>
         {% else %}
           <span class="folder-twist folder-twist-empty"></span>
         {% endif %}
-        <span class="folder-ico" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="15" height="15"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" fill="currentColor"/></svg>
-        </span>
-        <a class="folder-link" href="{{ url_for('index', collection=n['id']) }}" title="{{ n['name'] }}">
+        <span class="folder-ico" aria-hidden="true">▰</span>
+        <a class="folder-link" data-ajax="1" href="{{ url_for('index', collection=n['id']) }}" title="{{ n['name'] }}">
           {{ n['name'] }}
         </a>
         <span class="folder-actions">
           <button type="button" class="folder-act folder-newsub" title="新建子文件夹"
-                  data-id="{{ n['id'] }}">＋</button>
+                  >＋</button>
           <button type="button" class="folder-act folder-rename" title="重命名"
-                  data-id="{{ n['id'] }}" data-name="{{ n['name'] }}">✎</button>
+                  >✎</button>
           <button type="button" class="folder-act folder-movebtn" title="移动到…"
-                  data-id="{{ n['id'] }}">⇄</button>
-          <form method="post" action="{{ url_for('collection_delete', cid=n['id']) }}"
-                style="display:inline"
-                onsubmit="return confirm('删除题集「{{ n['name'] }}」？子文件夹会上移一层，题目本身不会删除。')">
-            <button type="submit" class="folder-act folder-del" title="删除">×</button>
-          </form>
+                  >⇄</button>
+          <button type="button" class="folder-act folder-del" title="删除">×</button>
         </span>
       </div>
-      <select class="folder-move-select hidden" data-id="{{ n['id'] }}">
-        <option value="" disabled selected>移动到…</option>
-        <option value="">（顶层）</option>
-        {{ render_move_options(full_tree, n['id']) }}
-      </select>
-      {% if n['children'] %}
-        <ul class="folder-children">
-          {{ render_folder_tree(n['children'], active, full_tree) }}
+      {% if has_children %}
+        <ul class="folder-children {% if not children_loaded %}collapsed{% endif %}"
+            data-parent-id="{{ n['id'] }}" data-loaded="{{ 1 if children_loaded else 0 }}">
+          {% if children_loaded %}
+            {{ render_folder_tree(n['children'], active) }}
+          {% endif %}
         </ul>
       {% endif %}
     </li>
@@ -63,12 +45,31 @@
 {% block content %}
 <div class="layout">
 
-  <!-- 侧栏：标签筛选 -->
-  <aside class="sidebar">
-    <h3>标签筛选</h3>
-    <form method="get" action="{{ url_for('index') }}" id="filter-form">
-      <div class="tag-cloud">
-        {% for t in all_tags %}
+  <!-- 浏览器/Obsidian 仍按“筛选在上、题集在下”连续显示；独立桌面端把两区
+       变成页签，文件树不再被筛选表单挤出最小窗口首屏。 -->
+  {% set sidebar_filter_active = active_tags or active_type or active_difficulty or starred_only %}
+  <aside class="sidebar" id="question-sidebar">
+    <div class="sidebar-tabs" role="tablist" aria-label="题库侧栏">
+      <button type="button" class="sidebar-tab" id="sidebar-tab-files" role="tab"
+              data-sidebar-tab="files" aria-controls="sidebar-panel-files">文件</button>
+      <button type="button" class="sidebar-tab{% if sidebar_filter_active %} has-active-filter{% endif %}"
+              id="sidebar-tab-filters" role="tab" data-sidebar-tab="filters"
+              aria-controls="sidebar-panel-filters"
+              aria-label="筛选{% if sidebar_filter_active %}（已启用）{% endif %}">
+        筛选{% if sidebar_filter_active %}<span class="sidebar-filter-dot" title="已启用筛选"></span>{% endif %}
+      </button>
+    </div>
+
+    <section class="sidebar-panel sidebar-filter-panel" id="sidebar-panel-filters"
+             role="tabpanel" aria-labelledby="sidebar-tab-filters" data-sidebar-panel="filters">
+      <h3>标签筛选</h3>
+      <form method="get" action="{{ url_for('index') }}" id="filter-form">
+      <div class="tag-cloud" id="tag-cloud">
+        {% if tags_deferred %}
+          <button type="button" class="btn btn-ghost" id="load-tags-btn">加载全部标签</button>
+          <p class="muted">题库较大，按需加载可避免首页扫描全部试卷。</p>
+        {% else %}
+          {% for t in all_tags %}
           <div class="tag-row">
             <label class="tag-check">
               <input type="checkbox" name="tag" value="{{ t }}"
@@ -78,9 +79,10 @@
             <button type="button" class="tag-rename" title="改名"
                     data-name="{{ t }}">✎</button>
           </div>
-        {% else %}
-          <p class="muted">还没有标签</p>
-        {% endfor %}
+          {% else %}
+            <p class="muted">还没有标签</p>
+          {% endfor %}
+        {% endif %}
       </div>
 
       <div class="field">
@@ -96,7 +98,7 @@
         <select name="type">
           <option value="">全部</option>
           {% for ty in types %}
-            <option value="{{ ty }}" {% if ty==active_type %}selected{% endif %}>{{ ty }}</option>
+            <option value="{{ ty }}" {% if ty==active_type %}selected{% endif %}>{{ ty|qtype_label }}</option>
           {% endfor %}
         </select>
       </div>
@@ -118,34 +120,65 @@
         </label>
       </div>
 
+      <div class="field display-pref-filters" aria-label="题卡显示方式">
+        <label class="star-filter">
+          <input type="checkbox" id="all-a4-toggle">
+          全部 A4 排版
+        </label>
+        <label class="star-filter">
+          <input type="checkbox" id="all-solutions-toggle">
+          解析全部展开
+        </label>
+      </div>
+
       <button type="submit" class="btn">筛选</button>
       <a href="{{ url_for('index') }}" class="btn btn-ghost">重置</a>
-    </form>
+      </form>
+    </section>
 
     <!-- 题集：文件夹树 -->
-    <div class="folder-pane-head">
-      <h3 class="coll-title" style="margin:0;padding-top:0;border-top:none">题集</h3>
-      <button type="button" class="folder-newbtn" id="folder-newbtn" title="新建顶级文件夹">＋</button>
-    </div>
-    <ul class="folder-list" id="folder-tree">
-      <li class="folder-item folder-root {% if not active_collection %}active{% endif %}" data-folder-id="">
-        <div class="folder-row">
-          <span class="folder-twist folder-twist-empty"></span>
-          <span class="folder-ico" aria-hidden="true">
-            <svg viewBox="0 0 24 24" width="15" height="15"><path d="M3 5h18v3H3zM3 10.5h18v3H3zM3 16h18v3H3z" fill="currentColor"/></svg>
-          </span>
-          <a class="folder-link" href="{{ url_for('index') }}">全部题目</a>
-        </div>
-      </li>
-      {% if folder_tree %}
-        {{ render_folder_tree(folder_tree, active_collection, folder_tree) }}
-      {% endif %}
+    <section class="sidebar-panel sidebar-files-panel" id="sidebar-panel-files"
+             role="tabpanel" aria-labelledby="sidebar-tab-files" data-sidebar-panel="files">
+      <div class="folder-pane-head">
+        <h3 class="coll-title" style="margin:0;padding-top:0;border-top:none">题集</h3>
+        <button type="button" class="folder-newbtn" id="folder-newbtn" title="新建顶级文件夹">＋</button>
+      </div>
+      <ul class="folder-list" id="folder-tree">
+        <li class="folder-item folder-root {% if not active_collection and not blank %}active{% endif %}" data-folder-id="">
+          <div class="folder-row">
+            <span class="folder-twist folder-twist-empty"></span>
+            <span class="folder-ico" aria-hidden="true">☷</span>
+            <a class="folder-link" data-ajax="1" href="{{ url_for('index', all=1) }}">全部题目</a>
+          </div>
+        </li>
+        {% if folder_tree %}
+          {{ render_folder_tree(folder_tree, active_collection) }}
+        {% endif %}
+      </ul>
+      <form method="post" action="{{ url_for('collection_create') }}" class="coll-new" id="folder-new-form" hidden>
+        <input type="text" name="name" class="input" placeholder="新建文件夹…" required>
+        <input type="hidden" name="parent_id" value="">
+        <button type="submit" class="btn">建</button>
+      </form>
+
+      {# 全树只渲染这一份移动目标下拉框。原先每个文件夹都内嵌一份完整文件夹列表，
+         N 个文件夹会生成 N² 个 option；历年卷入库后首页因此膨胀到 21MB。点击时 JS
+         把这一份 select 临时挪到对应行下，并禁用自己及后代。 #}
+      <select class="folder-move-select hidden" id="folder-move-select">
+        <option value="__choose__" disabled selected>移动到…</option>
+        <option value="">（顶层）</option>
+      </select>
+    </section>
+
+    {# 文件夹右键菜单（默认隐藏，由脚本定位显示）。每一项都只是去点那一行上
+       对应的按钮，逻辑不重复一遍，见本模板底部的绑定。 #}
+    <ul class="folder-ctx" id="folder-ctx" hidden>
+      <li data-act="new-question">📄 新增题目</li>
+      <li data-act="new-folder">📁 新建子文件夹</li>
+      <li data-act="rename">✎ 重命名</li>
+      <li data-act="move">⇄ 移动到…</li>
+      <li data-act="delete" class="ctx-danger">🗑 删除文件夹</li>
     </ul>
-    <form method="post" action="{{ url_for('collection_create') }}" class="coll-new" id="folder-new-form" hidden>
-      <input type="text" name="name" class="input" placeholder="新建文件夹…" required>
-      <input type="hidden" name="parent_id" value="">
-      <button type="submit" class="btn">建</button>
-    </form>
   </aside>
 
   <!-- 主区：题目列表 -->
@@ -157,11 +190,14 @@
       {% if search %}<a href="{{ url_for('index') }}" class="btn btn-ghost">清除</a>{% endif %}
     </form>
     {% if search %}
-      <p class="muted search-hint">搜索「{{ search }}」，命中 {{ questions|length }} 题</p>
+      <p class="muted search-hint">搜索「{{ search }}」，命中 {{ question_total }} 题</p>
     {% endif %}
+    {# 文件夹局部切换依赖这个稳定挂载点；父文件夹现直接汇总后代原卷与题目。 #}
+    <div id="collection-overview-host" data-overview="0"></div>
+    <div id="papers-host">{% if active_collection %}{% include "_papers_pane.html" %}{% endif %}</div>
     <!-- 常驻工具栏：只留高频、始终有用的控件；批量操作移到底部浮动条 -->
-    <div class="toolbar">
-      <span>共 <b>{{ questions|length }}</b> 题，已勾选 <b id="sel-count">{{ selected_count }}</b> 题</span>
+    <div class="toolbar" id="q-toolbar">
+      <span>共 <b id="q-count">{{ question_total }}</b> 题，已勾选 <b id="sel-count">{{ selected_count }}</b> 题</span>
       <label class="sort-label">排序
         <select id="sort-select">
           <option value="custom" {% if sort=='custom' %}selected{% endif %}>自定义（拖拽）</option>
@@ -173,7 +209,8 @@
         </select>
       </label>
       <div class="spacer"></div>
-      <form method="post" action="{{ url_for('select_all') }}" style="display:inline">
+      <form method="post" action="{{ url_for('select_all') }}" id="select-all-form"
+            style="display:inline">
         <input type="hidden" name="tags" value="{{ active_tags|join(',') }}">
         <input type="hidden" name="match" value="{{ match }}">
         <input type="hidden" name="type" value="{{ active_type or '' }}">
@@ -181,6 +218,7 @@
         <input type="hidden" name="difficulty" value="{{ active_difficulty or '' }}">
         <input type="hidden" name="collection" value="{{ active_collection or '' }}">
         <input type="hidden" name="starred" value="{{ '1' if starred_only else '' }}">
+        <input type="hidden" name="all" value="{{ '1' if show_all else '' }}">
         <button type="submit" class="btn">全选</button>
       </form>
       <button type="button" class="btn btn-primary" onclick="document.getElementById('export-panel').classList.toggle('hidden')">导出试卷 ▾</button>
@@ -198,6 +236,8 @@
             <option value="exam_std">标准试卷形式（仿国标考卷版式）</option>
             <option value="note">笔记（一页两题）</option>
             <option value="lecture">讲解（一页一题）</option>
+            <option value="slides">横版课件（16:9，PPT 式一页一题）</option>
+            <option value="practice">双栏刷题（题型分组，解答题按难度与小问留白）</option>
             <option value="list">清单（紧凑无间隔）</option>
             <option value="handout">讲义（知识要点+可标独占整页）</option>
           </select>
@@ -208,7 +248,7 @@
           <summary>标准试卷说明（保密说明 / 卷首说明 / 各大题分值）</summary>
           <div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
             <label>科目
-              <input class="input" name="subject" value="数学" style="width:120px" placeholder="留空则不显示副标题">
+              <input class="input" name="subject" value="{{ bank_subject_label }}" style="width:120px" placeholder="留空则不显示副标题">
             </label>
             <label><input type="checkbox" name="info_bar" value="1" checked> 显示考生信息栏（姓名 / 班级 / 学号）</label>
             <label>保密说明
@@ -219,9 +259,15 @@
 2. 选择题用 2B 铅笔填涂，非选择题用黑色签字笔作答。
 3. 请在各题目规定区域内作答，超出答题区域书写无效。</textarea>
             </label>
-            <label>选择题分值 <input class="input" name="points_choice" placeholder="本大题共 X 小题，每小题 Y 分，共 Z 分"></label>
-            <label>填空题分值 <input class="input" name="points_blank" placeholder="本大题共 X 小题，每小题 Y 分，共 Z 分"></label>
-            <label>解答题分值 <input class="input" name="points_solve" placeholder="本大题共 X 小题，共 Z 分"></label>
+            {# 只填「每小题多少分」这一个数字：题数由实际选入的题目数决定，总分
+               = 题数 × 每小题分，都由 exporter._std_section_desc 自动算。以前这里
+               让用户填整句描述，题目一增删就得回来手改数字。#}
+            <p class="muted" style="margin:2px 0 0">每小题分值填数字即可，题数与总分按实际选入的题目自动计算，
+              生成「一、单选题：本题共 8 小题，每小题 5 分，共 40 分。…」。留空用默认（单选 5 / 多选 6 / {{ '填空题'|qtype_label }} 5）。</p>
+            <label>单选题每小题分 <input class="input" name="points_single" inputmode="numeric" style="width:80px" placeholder="5"></label>
+            <label>多选题每小题分 <input class="input" name="points_multi" inputmode="numeric" style="width:80px" placeholder="6"></label>
+            <label>{{ '填空题'|qtype_label }}每小题分 <input class="input" name="points_blank" inputmode="numeric" style="width:80px" placeholder="5"></label>
+            <label>解答题每小题分 <input class="input" name="points_solve" inputmode="numeric" style="width:80px" placeholder="留空则只写题数"></label>
           </div>
         </details>
 
@@ -231,7 +277,15 @@
             <option value="tex">LaTeX 源码（.tex）</option>
             <option value="zip">LaTeX 源码包（.tex + 图片，.zip）</option>
           </select>
+          <small class="export-runtime-hint">PDF 需要本机 XeLaTeX；没有时可导出源码包并上传 Overleaf。<a href="{{ url_for('about_page') }}">检查环境</a></small>
         </label>
+        <label>纸张底色
+          <select name="paper_tone">
+            <option value="white">纯白</option>
+            <option value="cream">米黄护眼</option>
+          </select>
+        </label>
+        <label><input type="checkbox" name="wimath_logo" value="1"> 添加 WIMath 标志</label>
         <label>试卷标题 <input type="text" name="title" value="试卷" class="input"></label>
         <label>范围
           <select name="scope">
@@ -248,9 +302,10 @@
           </select>
         </label>
 
-        <!-- 页眉页脚 DIY（6 位置，支持占位符 {页码}{总页数}{标题}） -->
+        <!-- 页眉页脚 DIY（所有模式共用；双栏模式中横跨整页，不被切成左右两份） -->
         <details class="hf-block">
-          <summary>页眉 / 页脚设置（占位符：{页码} {总页数} {标题}）</summary>
+          <summary>页眉 / 页脚设置（所有导出模式适用）</summary>
+          <p class="muted" style="margin:6px 0">双栏刷题同样生效：页眉横跨两栏，页脚横跨整页。支持占位符：{页码} {总页数} {标题}</p>
           <div class="hf-grid">
             <span class="hf-tag">页眉</span>
             <input class="input" name="header_left"   placeholder="左">
@@ -282,123 +337,83 @@
           <b>PDF 预览</b>
           <span id="preview-info" class="muted"></span>
           <div class="spacer"></div>
+          {# 兜底出口：Obsidian 里这个 iframe 是嵌在插件的 iframe 里的（两层），
+             万一宿主的 PDF 阅读器不肯在嵌套 frame 里出图，得有别的看法，不然
+             用户只看到一片空白、无从下手。生成成功后才显示。 #}
+          <a id="preview-open" class="btn btn-ghost" href="#" target="_blank"
+             rel="noopener" style="display:none">在新窗口打开</a>
           <button type="button" class="btn btn-ghost" id="preview-close">关闭</button>
         </div>
         <iframe id="preview-frame" class="preview-frame" title="PDF 预览"></iframe>
       </div>
     </div>
 
-    <div id="q-list">
+    <div id="q-list" data-custom-sort="{{ '1' if question_card_sort == 'custom' else '' }}"
+         data-page-token="{{ question_page_token }}" data-total="{{ question_total }}"
+         data-loaded="{{ questions|length }}" data-inline-created="0"
+         data-collection="{{ active_collection }}"
+         data-collection-name="{{ active_collection_name or '题库根目录' }}">
     {% for q in questions %}
-      <article class="card {% if q['selected'] %}selected{% endif %}" data-id="{{ q['id'] }}"
-               draggable="{{ 'true' if sort=='custom' else 'false' }}">
-        <div class="card-head">
-          {% if sort=='custom' %}<span class="drag-handle" title="拖拽排序">⠿</span>{% endif %}
-          <label class="sel-box">
-            <input type="checkbox" class="sel-toggle" data-id="{{ q['id'] }}"
-                   {% if q['selected'] %}checked{% endif %}>
-            选入
-          </label>
-          <label class="fullpage-box hidden" title="讲义模式：此题独占整页">
-            <input type="checkbox" name="fullpage" value="{{ q['id'] }}" form="export-form">
-            独占整页
-          </label>
-          <span class="meta">
-            {% if q['type'] %}<span class="badge">{{ q['type'] }}</span>{% endif %}
-            <span class="diff-dots" data-id="{{ q['id'] }}" title="点击设置难度 1-5，再点当前值清除">
-              {% for n in range(1, 6) %}
-                <span class="diff-dot {% if q['difficulty'] == n|string %}active{% endif %}"
-                      data-level="{{ n }}">{{ n }}</span>
-              {% endfor %}
-            </span>
-            <span class="star-toggle {% if q['starred'] %}on{% endif %}" data-id="{{ q['id'] }}"
-                  title="标星：标记高质量题（点击切换）">★</span>
-            {% if q['source'] %}<span class="src">{{ q['source'] }}</span>{% endif %}
-          </span>
-          <div class="spacer"></div>
-          <a href="{{ url_for('question_edit', qid=q['id']) }}" class="link">编辑</a>
-          <form method="post" action="{{ url_for('question_delete', qid=q['id']) }}"
-                style="display:inline" onsubmit="return confirm('确定删除这道题？')">
-            <button type="submit" class="link link-danger">删除</button>
-          </form>
-        </div>
-        {% if '![[' in q['body'] %}
-          {# data-layouts：多图逐图设置 JSON（见 filestore.set_img_layout / exporter._parse_layouts）。
-             data-width/data-align 保留作首图兜底，供老题（img_layouts 为空）初始化。
-             对齐/大小的初始高亮由脚本按「当前选中图」渲染，故此处不再写死 active。 #}
-          <div class="img-layout-bar" data-id="{{ q['id'] }}"
-               data-width="{{ q['img_width'] or '' }}"
-               data-align="{{ q['img_align'] or '' }}"
-               data-layouts="{{ q['img_layouts'] | tojson }}">
-            <span class="img-layout-label">图片位置</span>
-            <span class="img-align-chips">
-              {% for a, label in [('left', '左'), ('center', '中'), ('right', '右')] %}
-                <span class="img-align-chip" data-align="{{ a }}">{{ label }}</span>
-              {% endfor %}
-            </span>
-            <span class="img-width-wrap"
-                  title="拖动正文中图片右下角手柄等比缩放；多图时先点图片再调设置">
-              <span class="img-width-label">图片大小</span>
-              <span class="img-width-value">35%</span>
-              <span class="img-width-reset" title="清除自定义宽度，恢复默认">×</span>
-            </span>
-            {# 多图时显示「当前第几张」，点正文里的图可切换 #}
-            <span class="img-pick-label" hidden></span>
-            {% if q['type'] in ('单选题', '多选题') %}
-              <span class="img-split-chip {% if q['img_split'] and q['img_split'] not in ('full', 'sub') %}on{% endif %}"
-                    data-mode="opts" title="题干占整行，仅选项与图片左右分栏">仅选项分栏</span>
-              <span class="img-split-chip {% if q['img_split'] == 'full' %}on{% endif %}"
-                    data-mode="full" title="题干+选项一并与图片左右分栏">整题分栏</span>
-            {% elif q['type'] == '填空题' %}
-              <span class="img-split-chip {% if q['img_split'] %}on{% endif %}"
-                    data-mode="opts" title="正文与图片左右对半分栏">图文分栏</span>
-            {% elif q['type'] == '解答题' %}
-              <span class="img-split-chip {% if q['img_split'] == 'sub' %}on{% endif %}"
-                    data-mode="sub" title="题干占整行，仅小问与图片左右分栏">小问分栏</span>
-            {% endif %}
-          </div>
-        {% endif %}
-        <div class="body">{{ q['body'] | qimage }}</div>
-        {% if q['solution'] %}
-          <details class="q-solution">
-            <summary>【解析】</summary>
-            <div class="solution-body">{{ q['solution'] | qimage }}</div>
-          </details>
-        {% endif %}
-        <div class="tags">
-          {% for tg in q['tags'] %}<span class="tag">{{ tg }}</span>{% endfor %}
-        </div>
-      </article>
+      {% include "_question_card.html" %}
     {% else %}
-      <p class="muted empty">题库还是空的。去 <a href="{{ url_for('question_new') }}">新增题目</a> 或 <a href="{{ url_for('import_md') }}">批量导入</a>。</p>
+      {% if blank %}
+        <div class="empty-state">
+          <div class="empty-state-mark" aria-hidden="true">QF</div>
+          <h2>从一个题集开始</h2>
+          <p>从左侧选择一个题集，或浏览整库中的全部题目。</p>
+          <div class="empty-state-actions">
+            <a class="btn btn-primary" href="{{ url_for('index', all=1) }}">浏览全部题目</a>
+            <a class="btn" href="{{ url_for('import_md') }}">导入试卷</a>
+          </div>
+        </div>
+      {% else %}
+        <div class="empty-state">
+          <div class="empty-state-mark" aria-hidden="true">＋</div>
+          <h2>这里还没有题目</h2>
+          <p>手动新增一道题，或导入一整份试卷。</p>
+          <div class="empty-state-actions">
+            <button type="button" class="btn btn-primary" data-open-new-question>新增题目</button>
+            <a class="btn" href="{{ url_for('import_md') }}">批量导入</a>
+          </div>
+        </div>
+      {% endif %}
     {% endfor %}
     </div>
-    {% if sort=='custom' and questions %}
+    <div id="question-scroll-sentinel" class="question-scroll-sentinel"
+         {% if not question_page_token %}hidden{% endif %}>
+      <span class="question-scroll-spinner" aria-hidden="true"></span>
+      <span class="question-scroll-text">已加载 {{ questions|length }} / {{ question_total }}，继续下滑自动加载</span>
+    </div>
+    {% if question_card_sort=='custom' and questions %}
       <p class="muted hint">💡 拖动左侧 ⠿ 手柄可调整题目顺序，松手自动保存。当前顺序即导出顺序。</p>
     {% endif %}
   </section>
-</div>
 
-<!-- 浮动批量操作条：勾选≥1题时滑出，作用于所有已勾选的题 -->
+  <button type="button" class="new-question-fab" id="new-question-fab"
+          data-open-new-question
+          title="在“{{ active_collection_name or '题库根目录' }}”末尾添加题目"
+          aria-label="在当前文件夹末尾添加题目">＋</button>
+
+<!-- 已选题目操作栏：桌面端位于题目列表右侧，窄屏回落到页面内。
+     必须留在 .layout 里面——它是网格的第三列，挪到外面就变回浮动条了。 -->
 <div id="bulkbar" class="bulkbar">
-  <span class="bulk-count">已选 <b id="bulk-count">{{ selected_count }}</b> 题</span>
+  <div class="bulkbar-head">
+    <h3>已选题目</h3>
+    <span class="bulk-count"><b id="bulk-count">{{ selected_count }}</b> 题</span>
+  </div>
   <span class="divider"></span>
 
   <!-- 加入题集 -->
-  <form method="post" id="add-coll-form"
-        onsubmit="this.action='/collections/' + this.cid.value + '/add'; return this.cid.value !== '';">
+  <form method="post" id="add-coll-form">
     <select name="cid">
-      <option value="">加入题集…</option>
-      {% for c in all_collections %}
-        <option value="{{ c['id'] }}">{{ c['name'] }}</option>
-      {% endfor %}
+      <option value="">加入题集…（点击加载目录）</option>
     </select>
     <button type="submit" class="btn">加入</button>
   </form>
 
   <!-- 批量打标签 -->
   <form method="post" action="{{ url_for('tag_selected') }}">
-    <input type="text" name="tags" class="input" placeholder="批量标签(逗号)" style="width:130px">
+    <input type="text" name="tags" class="input" placeholder="批量标签(逗号)">
     <button type="submit" class="btn">打标签</button>
   </form>
 
@@ -423,9 +438,10 @@
     <button type="submit" class="btn">清空</button>
   </form>
   <form method="post" action="{{ url_for('delete_selected') }}"
-        onsubmit="return confirm('确定删除所有已勾选的题目？此操作不可恢复！');">
+        data-confirm="确定删除所有已勾选的题目？题目会进入回收站。">
     <button type="submit" class="btn btn-danger">删除勾选</button>
   </form>
+</div>
 </div>
 {% endblock %}
 
@@ -433,19 +449,424 @@
 <script>
 // 勾选切换（AJAX，不刷新页面）；custom 排序下勾选题实时置顶
 const listEl = document.getElementById('q-list');
-const isCustom = {{ 'true' if sort=='custom' else 'false' }};
+let isCustom = listEl?.dataset.customSort === '1';
 
-// 浮动批量操作条：随勾选数显隐
+// 桌面端侧栏页签：状态只落 localStorage，不进入 URL、更不会上传后端。
+// 浏览器与 Obsidian 保持原来的上下连续布局，因此这里不设置它们的 hidden 状态。
+const sidebarEl = document.getElementById('question-sidebar');
+const sidebarTabs = [...(sidebarEl?.querySelectorAll('[data-sidebar-tab]') || [])];
+const sidebarPanels = [...(sidebarEl?.querySelectorAll('[data-sidebar-panel]') || [])];
+function setSidebarPanel(name, persist = true) {
+  if (!document.documentElement.classList.contains('desktop-host')) return;
+  const next = name === 'filters' ? 'filters' : 'files';
+  document.documentElement.dataset.sidebarPanel = next;
+  sidebarTabs.forEach(tab => {
+    const active = tab.dataset.sidebarTab === next;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  sidebarPanels.forEach(panel => { panel.hidden = panel.dataset.sidebarPanel !== next; });
+  if (persist) {
+    try { localStorage.setItem('quizforge.sidebar.activePanel', next); } catch (_error) {}
+  }
+}
+if (document.documentElement.classList.contains('desktop-host')) {
+  setSidebarPanel(document.documentElement.dataset.sidebarPanel || 'files', false);
+  sidebarTabs.forEach(tab => tab.addEventListener('click', () => setSidebarPanel(tab.dataset.sidebarTab)));
+}
+
+// 已选题目操作栏：随勾选数显隐。它是 .layout 的第三列，出现时要同时给
+// .layout 和外层 <main> 加类——不然中间题卡会被凭空多出来的一列挤窄。
 const bulkbar = document.getElementById('bulkbar');
 const bulkCount = document.getElementById('bulk-count');
+const bulkLayout = bulkbar ? bulkbar.closest('.layout') : null;
+const bulkMain = bulkLayout ? bulkLayout.closest('main') : null;
 function syncBulkbar(count) {
   if (bulkCount) bulkCount.textContent = count;
   if (bulkbar) bulkbar.classList.toggle('show', count > 0);
+  if (bulkLayout) bulkLayout.classList.toggle('bulk-active', count > 0);
+  if (bulkMain) bulkMain.classList.toggle('bulk-active-page', count > 0);
 }
 syncBulkbar(Number(document.getElementById('sel-count').textContent) || 0);
 
-document.querySelectorAll('.sel-toggle').forEach(cb => {
-  cb.addEventListener('change', async () => {
+// 新增、局部回渲或无限滚动插入一张题卡后，只初始化这张卡。所有入口都走这里，
+// 避免某个按钮偷懒对 document 重新跑 KaTeX/图片控件，题卡越多就越卡。
+function initQuestionCard(card) {
+  if (!card) return;
+  window.QMath?.typeset(card);
+  window.QImgLayout?.initBars(card);
+  window.QImgLayout?.bindSplitChips(card);
+  window.QImgLayout?.bindStackChips(card);
+  window.QImgLayout?.bindQuadChips(card);
+  window.QImgRedraw?.bindAll(card);
+  window.QCardDisplay?.apply(card);
+}
+
+function replaceQuestionCard(oldCard, html) {
+  const holder = document.createElement('div');
+  holder.innerHTML = html || '';
+  const fresh = holder.firstElementChild;
+  if (!oldCard || !fresh) return null;
+  oldCard.replaceWith(fresh);
+  initQuestionCard(fresh);
+  syncModeUI();
+  return fresh;
+}
+
+let openCardPopover = null;
+function closeCardPopovers(returnFocus = false) {
+  if (!openCardPopover) return;
+  const trigger = openCardPopover.trigger;
+  if (openCardPopover.panel?.isConnected) openCardPopover.panel.hidden = true;
+  if (trigger?.isConnected) {
+    trigger.setAttribute('aria-expanded', 'false');
+    if (returnFocus) trigger.focus();
+  }
+  openCardPopover = null;
+}
+
+// 题型、难度和低频操作共用一套弹出层开关。事件委托保证无限滚动与保存后
+// 局部换入的新题卡天然可用，不给每张卡重复绑定监听器。
+listEl?.addEventListener('click', event => {
+  const trigger = event.target.closest('[data-card-popover-trigger]');
+  if (!trigger) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const card = trigger.closest('.card');
+  const name = trigger.dataset.cardPopoverTrigger;
+  const panel = card?.querySelector(`[data-card-popover="${name}"]`);
+  if (!panel) return;
+  const wasOpen = !panel.hidden;
+  closeCardPopovers();
+  if (wasOpen) return;
+  panel.hidden = false;
+  trigger.setAttribute('aria-expanded', 'true');
+  openCardPopover = {trigger, panel};
+});
+document.addEventListener('click', event => {
+  if (!event.target.closest('.question-popover, [data-card-popover-trigger]')) closeCardPopovers();
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && openCardPopover) {
+    event.preventDefault();
+    closeCardPopovers(true);
+  }
+});
+
+function syncVisibleQuestionCount() {
+  const total = Number(listEl?.dataset.total || 0);
+  const inlineCreated = Number(listEl?.dataset.inlineCreated || 0);
+  const countEl = document.getElementById('q-count');
+  if (countEl) countEl.textContent = total + inlineCreated;
+}
+
+function questionCreated(draftCard, html) {
+  const holder = document.createElement('div');
+  holder.innerHTML = html || '';
+  const fresh = holder.firstElementChild;
+  if (!draftCard || !fresh || !listEl) return null;
+  fresh.dataset.inlineCreated = '1';
+  draftCard.replaceWith(fresh);
+  listEl.dataset.inlineCreated = String(Number(listEl.dataset.inlineCreated || 0) + 1);
+  listEl.querySelectorAll('.empty-state').forEach(empty => { empty.hidden = true; });
+  initQuestionCard(fresh);
+  syncModeUI();
+  syncVisibleQuestionCount();
+  fresh.scrollIntoView({behavior: 'smooth', block: 'center'});
+  return fresh;
+}
+
+let newQuestionLoading = false;
+async function openNewQuestionCard(collectionOverride) {
+  if (!listEl) return;
+  const existing = listEl.querySelector('.inline-question-draft');
+  if (existing) {
+    existing.scrollIntoView({behavior: 'smooth', block: 'center'});
+    window.QInlineEditor?.open(existing);
+    return;
+  }
+  if (newQuestionLoading) return;
+  newQuestionLoading = true;
+  const folder = collectionOverride === undefined || collectionOverride === null
+    ? (listEl.dataset.collection || '') : collectionOverride;
+  try {
+    const response = await fetch('/question/inline-draft?collection=' + encodeURIComponent(folder));
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || '无法创建新题卡');
+    const holder = document.createElement('div');
+    holder.innerHTML = data.card_html || '';
+    const draft = holder.firstElementChild;
+    if (!draft) throw new Error('新题卡内容为空');
+    listEl.querySelectorAll('.empty-state').forEach(empty => { empty.hidden = true; });
+    listEl.appendChild(draft);
+    initQuestionCard(draft);
+    window.QInlineEditor?.open(draft);
+    draft.scrollIntoView({behavior: 'smooth', block: 'center'});
+  } catch (error) {
+    flashToast(error.message || '无法创建新题卡', 'err');
+  } finally {
+    newQuestionLoading = false;
+  }
+}
+
+// 原地编辑器保存后只替换当前题卡；把这两个窄接口公开给独立 JS，避免它复制
+// 无限滚动、KaTeX 与图片控件的初始化顺序。
+window.QInitQuestionCard = initQuestionCard;
+window.QReplaceQuestionCard = replaceQuestionCard;
+window.QQuestionCreated = questionCreated;
+window.QOpenNewQuestionCard = openNewQuestionCard;
+document.addEventListener('click', event => {
+  if (event.target.closest('[data-open-new-question]')) void openNewQuestionCard();
+});
+
+// 无限滚动：服务端保存本次排序/筛选的轻量快照，浏览器接近底部时每次只追加
+// 30 张题卡。切换文件夹仍复用同一个 #q-list，因此用 generation 丢弃旧请求的
+// 迟到响应，避免把上一个年份的题卡追加进新试卷。
+const questionScrollSentinel = document.getElementById('question-scroll-sentinel');
+const questionScrollText = questionScrollSentinel?.querySelector('.question-scroll-text');
+let questionPageLoading = false;
+let questionPageGeneration = 0;
+let questionPositionRestoreGeneration = 0;
+let questionPositionRestoreState = null;
+
+function setQuestionScrollState(message, done = false) {
+  if (!questionScrollSentinel) return;
+  if (questionScrollText && message) questionScrollText.textContent = message;
+  questionScrollSentinel.hidden = done;
+  questionScrollSentinel.classList.toggle('loading', questionPageLoading);
+}
+
+async function loadNextQuestionPage() {
+  if (!listEl || questionPageLoading) return;
+  const token = listEl.dataset.pageToken || '';
+  const total = Number(listEl.dataset.total || 0);
+  const offset = Number(listEl.dataset.loaded || 0);
+  if (!token || offset >= total) {
+    setQuestionScrollState('', true);
+    return;
+  }
+  const generation = questionPageGeneration;
+  questionPageLoading = true;
+  setQuestionScrollState(`正在加载 ${offset + 1}—${Math.min(total, offset + 30)} / ${total}…`);
+  try {
+    const response = await fetch('/questions/page?token=' + encodeURIComponent(token)
+                                 + '&offset=' + offset);
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '加载下一批题目失败');
+    if (generation !== questionPageGeneration || token !== listEl.dataset.pageToken) return;
+
+    const holder = document.createElement('div');
+    holder.innerHTML = data.html || '';
+    const cards = [...holder.children];
+    const firstInlineCreated = listEl.querySelector(':scope > .card[data-inline-created="1"]');
+    cards.forEach(card => listEl.insertBefore(card, firstInlineCreated));
+    // 只初始化本批节点；对整个列表重排 KaTeX/图片控制条会把无限滚动重新做成
+    // “每次触底重算全部已加载内容”，滚得越深反而越慢。
+    cards.forEach(initQuestionCard);
+    syncModeUI();
+    listEl.dataset.loaded = String(data.next_offset);
+    listEl.dataset.total = String(data.total);
+    const loaded = Math.min(data.next_offset, data.total);
+    setQuestionScrollState(
+      data.done ? `已加载全部 ${data.total} 题` : `已加载 ${loaded} / ${data.total}，继续下滑自动加载`,
+      !!data.done);
+  } catch (error) {
+    if (generation === questionPageGeneration) {
+      setQuestionScrollState(`加载失败：${error.message}（点击重试）`);
+      questionScrollSentinel?.classList.add('error');
+    }
+  } finally {
+    if (generation === questionPageGeneration) {
+      questionPageLoading = false;
+      questionScrollSentinel?.classList.remove('loading');
+    }
+  }
+}
+
+const questionPageObserver = ('IntersectionObserver' in window && questionScrollSentinel)
+  ? new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) void loadNextQuestionPage();
+    }, {rootMargin: '1200px 0px'})
+  : null;
+
+function resetQuestionInfiniteScroll() {
+  questionPageGeneration += 1;
+  questionPageLoading = false;
+  questionScrollSentinel?.classList.remove('loading', 'error');
+  const token = listEl?.dataset.pageToken || '';
+  const total = Number(listEl?.dataset.total || 0);
+  const loaded = Number(listEl?.dataset.loaded || 0);
+  setQuestionScrollState(
+    token ? `已加载 ${loaded} / ${total}，继续下滑自动加载` : '',
+    !token || loaded >= total);
+  questionPageObserver?.disconnect();
+  if (token && loaded < total) questionPageObserver?.observe(questionScrollSentinel);
+}
+questionScrollSentinel?.addEventListener('click', () => {
+  if (!questionPageLoading) void loadNextQuestionPage();
+});
+
+// 刷新位置按“当前第一张可见题卡”保存，而不是只记 scrollY。全库与父目录首屏
+// 只有 30 张卡，若用户已经滚到第 60 题，重载后的短页面根本承载不了旧像素位置；
+// 必须先把锚点所在批次重新加载出来，再把该卡恢复到原来的视口高度。
+// sessionStorage 只属于当前标签页，正好同时覆盖独立浏览器刷新与 Obsidian iframe
+// 重载；键里剔除插件每次附加的 _qf_refresh，否则每刷新一次都会换一份状态。
+const QUESTION_POSITION_STORE = 'quizforge:question-position:v1:';
+const QUESTION_POSITION_MAX_AGE = 15 * 60 * 1000;
+
+function questionPositionKey() {
+  const url = new URL(location.href);
+  url.searchParams.delete('_qf_refresh');
+  url.hash = '';
+  return QUESTION_POSITION_STORE + url.pathname + url.search;
+}
+
+function visibleQuestionAnchor(cards) {
+  // 顶栏和题目工具栏是 sticky；以 78px 为可读区上沿，避免保存一张完全被遮住的卡。
+  return cards.find(card => card.getBoundingClientRect().bottom > 78)
+    || cards[cards.length - 1] || null;
+}
+
+function saveQuestionPosition() {
+  if (!listEl) return;
+  const cards = [...listEl.querySelectorAll(':scope > .card[data-id]')];
+  try {
+    // 连续刷新时，第二次 pagehide 可能发生在旧锚点尚未补载出来、scrollY 仍为 0
+    // 的阶段；此时保留正在恢复的原状态，不能用半成品首屏把它清掉。
+    if (questionPositionRestoreState) {
+      sessionStorage.setItem(questionPositionKey(), JSON.stringify({
+        ...questionPositionRestoreState,
+        at: Date.now(),
+      }));
+      return;
+    }
+    if (!cards.length || window.scrollY < 1) {
+      sessionStorage.removeItem(questionPositionKey());
+      return;
+    }
+    const anchor = visibleQuestionAnchor(cards);
+    if (!anchor) return;
+    sessionStorage.setItem(questionPositionKey(), JSON.stringify({
+      id: anchor.dataset.id || '',
+      path: anchor.dataset.path || '',
+      top: anchor.getBoundingClientRect().top,
+      scrollY: window.scrollY,
+      loaded: Number(listEl.dataset.loaded || cards.length),
+      at: Date.now(),
+    }));
+  } catch (_error) {
+    // 禁用存储或配额异常不应影响题库本身；最多退回浏览器默认的顶部刷新。
+  }
+}
+
+function takeQuestionPosition() {
+  try {
+    const key = questionPositionKey();
+    const raw = sessionStorage.getItem(key);
+    sessionStorage.removeItem(key);  // 一次性状态，避免以后普通进入旧地址时突然跳走
+    if (!raw) return null;
+    const state = JSON.parse(raw);
+    if (!state || !state.at || Date.now() - Number(state.at) > QUESTION_POSITION_MAX_AGE) {
+      return null;
+    }
+    return state;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function findQuestionAnchor(state) {
+  if (!listEl || !state) return null;
+  const cards = [...listEl.querySelectorAll(':scope > .card[data-id]')];
+  return cards.find(card => state.id && card.dataset.id === state.id)
+    || cards.find(card => state.path && card.dataset.path === state.path)
+    || null;
+}
+
+function waitForLayoutFrames() {
+  return new Promise(resolve => requestAnimationFrame(
+    () => requestAnimationFrame(resolve)));
+}
+
+function waitForPageLayout() {
+  const loaded = document.readyState === 'complete'
+    ? Promise.resolve()
+    : new Promise(resolve => window.addEventListener('load', resolve, {once: true}));
+  // load 等图片完成；再等两帧让 KaTeX、content-visibility 与图片控制条的同步布局落稳。
+  return loaded.then(waitForLayoutFrames);
+}
+
+async function restoreQuestionPosition() {
+  const restoreGeneration = ++questionPositionRestoreGeneration;
+  const restorePageGeneration = questionPageGeneration;
+  const restoreKey = questionPositionKey();
+  const isCurrentRestore = () => (
+    restoreGeneration === questionPositionRestoreGeneration
+    && restorePageGeneration === questionPageGeneration
+    && restoreKey === questionPositionKey()
+  );
+  const state = takeQuestionPosition();
+  if (!state) {
+    resetQuestionInfiniteScroll();
+    return;
+  }
+  questionPositionRestoreState = state;
+  // 首次 observe 必须等恢复结束。否则 sentinel 与恢复循环会同时请求同一 offset，
+  // questionPageLoading 会让其中一边静默返回，深于首屏的锚点便会偶发找不到。
+  questionPageObserver?.disconnect();
+  try {
+    let anchor = findQuestionAnchor(state);
+    const total = Number(listEl?.dataset.total || 0);
+    const savedLoaded = Math.max(30, Number(state.loaded) || 30);
+    // 多补一批，容忍刷新前有人在 Obsidian 里向锚点之前插入或删除少量题目。
+    const targetLoaded = Math.min(total, savedLoaded + 30);
+    let attempts = 0;
+    while (!anchor && listEl?.dataset.pageToken
+           && Number(listEl.dataset.loaded || 0) < targetLoaded
+           && attempts <= Math.ceil(total / 30)) {
+      const before = Number(listEl.dataset.loaded || 0);
+      await loadNextQuestionPage();
+      if (!isCurrentRestore()) return;
+      const after = Number(listEl.dataset.loaded || 0);
+      if (after <= before) break;  // 快照过期或网络失败，不能无休止重试
+      anchor = findQuestionAnchor(state);
+      attempts += 1;
+    }
+
+    await waitForPageLayout();
+    if (!isCurrentRestore()) return;
+    if (anchor?.isConnected) {
+      const oldTop = Number(state.top);
+      const targetTop = Number.isFinite(oldTop) ? oldTop : 78;
+      // 深处题卡滚入视口后，content-visibility 会把前方卡片从占位尺寸换成真实
+      // 尺寸。一次 scrollBy 会因此再漂移约一张卡；逐帧复测才能稳定回到卡内原位。
+      for (let attempt = 0; attempt < 4 && anchor.isConnected; attempt += 1) {
+        if (!isCurrentRestore()) return;
+        const delta = anchor.getBoundingClientRect().top - targetTop;
+        if (Math.abs(delta) <= 1) break;
+        window.scrollBy(0, delta);
+        await waitForLayoutFrames();
+      }
+    } else {
+      // 目标题可能刚被外部删除；已恢复到原先加载深度后，再以像素位置温和兜底。
+      const oldScrollY = Number(state.scrollY);
+      if (Number.isFinite(oldScrollY)) window.scrollTo(0, oldScrollY);
+    }
+  } finally {
+    // 用户可能在恢复批次期间已经切换题集或排序；旧协程不得滚动新列表，也不得
+    // 再递增 generation 把新列表刚发出的首个分页请求作废。
+    if (isCurrentRestore()) resetQuestionInfiniteScroll();
+    if (questionPositionRestoreState === state) questionPositionRestoreState = null;
+  }
+}
+
+window.addEventListener('pagehide', saveQuestionPosition, {capture: true});
+void restoreQuestionPosition();
+
+listEl?.addEventListener('change', async event => {
+    const cb = event.target.closest('.sel-toggle');
+    if (!cb) return;
     const id = cb.dataset.id;
     const res = await fetch(`/question/${id}/toggle`, {method: 'POST'});
     const data = await res.json();
@@ -470,172 +891,16 @@ document.querySelectorAll('.sel-toggle').forEach(cb => {
         else listEl.prepend(card);
       }
     }
-  });
 });
 
-// 图片排版控制条（含图题目才有）：正文里每张图各套一个 .qimg-resizable + 自己的
-// 右下手柄，逐图独立设宽度/对齐。序号 idx = `.body img` 的出现顺序，与后端
-// img_layouts 里的 i、导出时 exporter._extract_mark 列表下标一一对应（三者同源于
-// 正文图片引用顺序）。控制条只有一套 chips 和一个宽度读数，多图时作用于「当前选中
-// 的那张」——点正文里的图即切换，条上显示「第 n/N 张」。
-// 宽度语义 = 导出时占正文宽度的百分比，与 PDF 一致。默认 35%。
-const DEFAULT_IMG_W = 35;
+// 图片排版控制条（对齐/宽度手柄/图文分栏/并排堆叠/交换顺序）整块搬到了
+// static/js/image-layout.js —— 与服务器版逐字同一份，见本模板底部的 <script>。
+// 内联版曾少了「连续两图」的拖动交换与并排↔堆叠，且不认 qrender 现在渲的
+// .q-split-img / .q-fig-cell 结构（分栏时宽度会二次缩小），故不再保留两份。
 
-// data-layouts（img_layouts 的 JSON 串）→ idx -> {w, align}；老题该列为空则退回
-// data-width/data-align 当首图设置，与后端 exporter._layout_at 的兜底逻辑对称。
-function parseImgLayouts(bar) {
-  const out = {};
-  const raw = (bar.dataset.layouts || '').trim();
-  if (raw) {
-    try {
-      (JSON.parse(raw) || []).forEach(it => {
-        const i = parseInt(it.i, 10);
-        if (Number.isFinite(i) && i >= 0) out[i] = {w: it.w, align: it.align || ''};
-      });
-    } catch (_) { /* 脏数据当作没设置，别让整条控件挂掉 */ }
-  }
-  if (!(0 in out)) {
-    const w = parseInt(bar.dataset.width, 10);              // '' → NaN（未自定义）
-    out[0] = {w: Number.isFinite(w) ? w : null, align: bar.dataset.align || ''};
-  }
-  return out;
-}
-
-document.querySelectorAll('.img-layout-bar').forEach(bar => {
-  const card = bar.closest('.card');
-  const imgs = card ? Array.from(card.querySelectorAll('.body img')) : [];
-  if (!imgs.length) return;
-  const id = bar.dataset.id;
-  const layouts = parseImgLayouts(bar);
-  const wrap = bar.querySelector('.img-width-wrap');
-  const valueEl = bar.querySelector('.img-width-value');
-  const pickEl = bar.querySelector('.img-pick-label');
-  const boxes = [];
-  let sel = 0;                                              // 控制条当前作用的图序号
-
-  const at = i => (layouts[i] = layouts[i] || {w: null, align: ''});
-  const rawW = i => parseInt(at(i).w, 10);
-  const isCustom = i => Number.isFinite(rawW(i));
-  const widthOf = i => (isCustom(i) ? rawW(i) : DEFAULT_IMG_W);
-  const alignOf = i => at(i).align || '';
-
-  const post = async (path, payload) => {
-    const res = await fetch(`/question/${id}/${path}`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    return res.json();
-  };
-
-  // 控制条同步到当前选中图：宽度读数、是否自定义、对齐高亮、第几张
-  function syncBar() {
-    valueEl.textContent = widthOf(sel) + '%';
-    wrap.classList.toggle('active', isCustom(sel));
-    bar.querySelectorAll('.img-align-chip').forEach(c => {
-      c.classList.toggle('active', c.dataset.align === alignOf(sel));
-    });
-    if (imgs.length > 1) {
-      pickEl.hidden = false;
-      pickEl.textContent = `第 ${sel + 1}/${imgs.length} 张`;
-    }
-    boxes.forEach((b, i) => b.classList.toggle('picked', imgs.length > 1 && i === sel));
-  }
-
-  const clamp = v => Math.max(10, Math.min(100, Math.round(v)));
-
-  imgs.forEach((img, idx) => {
-    const box = document.createElement('span');
-    box.className = 'qimg-resizable';
-    img.parentNode.insertBefore(box, img);
-    box.appendChild(img);
-    const handle = document.createElement('span');
-    handle.className = 'qimg-handle';
-    handle.title = '拖动等比缩放';
-    box.appendChild(handle);
-    boxes.push(box);
-    box.style.width = widthOf(idx) + '%';
-
-    // 点图片（不含手柄）= 把控制条切到这张
-    box.addEventListener('click', e => {
-      if (e.target === handle) return;
-      sel = idx;
-      syncBar();
-    });
-
-    let dragging = false, startX = 0, startW = widthOf(idx), bodyW = 1;
-    handle.addEventListener('pointerdown', e => {
-      e.preventDefault();
-      dragging = true;
-      sel = idx;                                            // 拖哪张就选中哪张
-      syncBar();
-      startX = e.clientX;
-      startW = box.offsetWidth / box.parentNode.offsetWidth * 100;
-      bodyW = box.parentNode.offsetWidth || 1;              // 正文容器宽度（换算基准）
-      handle.setPointerCapture(e.pointerId);
-    });
-    handle.addEventListener('pointermove', e => {
-      if (!dragging) return;
-      const pct = clamp(startW + (e.clientX - startX) / bodyW * 100);
-      box.style.width = pct + '%';
-      valueEl.textContent = pct + '%';
-    });
-    const finish = async e => {
-      if (!dragging) return;
-      dragging = false;
-      try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
-      const pct = clamp(box.offsetWidth / box.parentNode.offsetWidth * 100);
-      const data = await post('img_width', {width: String(pct), index: idx});
-      if (data.ok) { at(idx).w = pct; if (sel === idx) syncBar(); }
-    };
-    handle.addEventListener('pointerup', finish);
-    handle.addEventListener('pointercancel', finish);
-  });
-
-  // 对齐切换（作用于当前选中图）：再点一次已选项 = 清空对齐设置
-  bar.querySelectorAll('.img-align-chip').forEach(chip => {
-    chip.addEventListener('click', async () => {
-      const newAlign = chip.classList.contains('active') ? '' : chip.dataset.align;
-      const data = await post('img_align', {align: newAlign, index: sel});
-      if (data.ok) { at(sel).align = data.align || ''; syncBar(); }
-    });
-  });
-
-  // 重置：清除当前选中图的自定义宽度，回默认 35%
-  bar.querySelector('.img-width-reset')?.addEventListener('click', async () => {
-    const data = await post('img_width', {width: '', index: sel});
-    if (data.ok) {
-      at(sel).w = null;
-      boxes[sel].style.width = DEFAULT_IMG_W + '%';
-      syncBar();
-    }
-  });
-
-  syncBar();
-});
-
-// 图文分栏（选择题两档：仅选项/整题；填空题单档；解答题：小问分栏）。同一控制条内
-// 互斥，再点已选项 = 关闭。存 mode 字符串（''|'opts'|'full'|'sub'）。分栏只作用于
-// 首图（版面上只容得下一张），故不带 index。
-document.querySelectorAll('.img-split-chip').forEach(chip => {
-  chip.addEventListener('click', async () => {
-    const bar = chip.closest('.img-layout-bar');
-    const id = bar.dataset.id;
-    const wasOn = chip.classList.contains('on');
-    const mode = wasOn ? '' : (chip.dataset.mode || 'opts');
-    const res = await fetch(`/question/${id}/img_split`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode})
-    });
-    const data = await res.json();
-    if (data.ok) {
-      bar.querySelectorAll('.img-split-chip').forEach(c => {
-        c.classList.toggle('on', !!data.mode && c.dataset.mode === data.mode);
-      });
-    }
-  });
-});
+// 图文分栏 chip 的绑定也在 image-layout.js 里（bindSplitChips）——它切完还要拿
+// 后端回的 body_html 换掉正文重排版面。这里**不能**再绑一份，否则一次点击发两个
+// 请求、第二个把第一个刚设上的模式又关掉。
 
 // 排序下拉：切换 sort 参数，保留其他筛选条件
 const sortSel = document.getElementById('sort-select');
@@ -643,29 +908,117 @@ if (sortSel) {
   sortSel.addEventListener('change', () => {
     const u = new URL(window.location.href);
     u.searchParams.set('sort', sortSel.value);
-    window.location.href = u.toString();
+    // 排序只改变题卡顺序，不销毁侧栏、原卷面板和整页公式树。
+    void loadFolderFragment(u.toString());
   });
 }
 
-// 拖拽排序（仅 custom 模式，HTML5 原生拖放）
+// 轻提示：拖题进文件夹之类的 AJAX 动作没有页面跳转，得有个反馈
+function flashToast(msg, kind = 'ok') {
+  document.querySelector('.toast.toast-live')?.remove();
+  const toast = document.createElement('div');
+  toast.className = `toast toast-live ${kind === 'err' ? 'toast-error' : ''}`;
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  setTimeout(() => {
+    toast.classList.remove('show');
+    setTimeout(() => toast.remove(), 180);
+  }, 1800);
+}
+
+// 原生拖拽默认截整张题卡当半透明影子，又大又显得「拖不动」，换成轻量浮层。
+// 节点要留在 DOM 到 dragend，Chrome 才会持续显示预览。
+let dragGhost = null;
+function setDragGhost(event, icon, text) {
+  dragGhost?.remove();
+  dragGhost = document.createElement('div');
+  dragGhost.className = 'folder-drag-ghost';
+  dragGhost.textContent = `${icon} ${text}`;
+  document.body.appendChild(dragGhost);
+  event.dataTransfer.setDragImage(dragGhost, 18, 16);
+}
+function clearDragGhost() {
+  dragGhost?.remove();
+  dragGhost = null;
+}
+
+// 拖题：custom 模式下在列表内重排，任何模式下都能拖到左侧文件夹上归类。
+// dragQuestionId 是这两端共享的状态（文件夹树的 drop 要用它），所以两段代码
+// 挨在一起写、不拆到别处。
 const list = document.getElementById('q-list');
-if (list && list.querySelector('.card[draggable="true"]')) {
+let dragQuestionId = null;
+
+// HTML5 拖拽不会替页面做可靠的边缘滚动，长列表里把题目拖出当前视口后就会卡住。
+// 用最后一次 dragover 的纵坐标驱动 rAF：停在上下边缘也能连续滚，速度随贴边程度
+// 增加。只认 dragQuestionId，文件夹排序和图片 pointer 拖动不受影响。
+const QUESTION_DRAG_SCROLL_EDGE = 96;
+const QUESTION_DRAG_SCROLL_MAX = 24;
+let questionDragY = null;
+let questionDragScrollFrame = null;
+function stopQuestionDragAutoScroll() {
+  questionDragY = null;
+  if (questionDragScrollFrame !== null) {
+    cancelAnimationFrame(questionDragScrollFrame);
+    questionDragScrollFrame = null;
+  }
+}
+function stepQuestionDragAutoScroll() {
+  questionDragScrollFrame = null;
+  if (!dragQuestionId || questionDragY === null) return;
+  const viewport = window.innerHeight;
+  const edge = Math.min(QUESTION_DRAG_SCROLL_EDGE, viewport / 3);
+  let delta = 0;
+  if (questionDragY < edge) {
+    delta = -QUESTION_DRAG_SCROLL_MAX * (1 - questionDragY / edge);
+  } else if (questionDragY > viewport - edge) {
+    delta = QUESTION_DRAG_SCROLL_MAX *
+      (1 - (viewport - questionDragY) / edge);
+  }
+  if (Math.abs(delta) >= 1) {
+    window.scrollBy(0, delta);
+    questionDragScrollFrame = requestAnimationFrame(stepQuestionDragAutoScroll);
+  }
+}
+function updateQuestionDragAutoScroll(clientY) {
+  if (!dragQuestionId) return;
+  questionDragY = Math.max(0, Math.min(window.innerHeight, clientY));
+  if (questionDragScrollFrame === null) {
+    questionDragScrollFrame = requestAnimationFrame(stepQuestionDragAutoScroll);
+  }
+}
+document.addEventListener('dragover', e => {
+  if (dragQuestionId) updateQuestionDragAutoScroll(e.clientY);
+}, true);
+document.addEventListener('drop', stopQuestionDragAutoScroll, true);
+window.addEventListener('blur', stopQuestionDragAutoScroll);
+if (list) {
   let dragging = null;
 
   list.addEventListener('dragstart', e => {
     dragging = e.target.closest('.card');
-    if (dragging) dragging.classList.add('dragging');
+    if (!dragging) return;
+    dragQuestionId = dragging.dataset.id;
+    dragging.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', `q:${dragQuestionId}`);
+    setDragGhost(e, '📄', '移动题目');
   });
 
   list.addEventListener('dragend', () => {
     if (dragging) dragging.classList.remove('dragging');
+    const reorder = isCustom && dragging;
     dragging = null;
-    saveOrder();
+    dragQuestionId = null;
+    stopQuestionDragAutoScroll();
+    clearDragGhost();
+    clearFolderDragOver();
+    if (reorder) saveOrder();
   });
 
   list.addEventListener('dragover', e => {
+    if (!isCustom || !dragging) return;   // 非 custom 排序不做列表内重排
     e.preventDefault();
-    if (!dragging) return;
     // 找到当前指针位置下、应插入到其前面的那张卡
     const after = [...list.querySelectorAll('.card:not(.dragging)')].find(card => {
       const box = card.getBoundingClientRect();
@@ -676,7 +1029,7 @@ if (list && list.querySelector('.card[draggable="true"]')) {
   });
 
   async function saveOrder() {
-    const ids = [...list.querySelectorAll('.card')].map(c => c.dataset.id);
+    const ids = [...list.querySelectorAll('.card[data-id]')].map(c => c.dataset.id);
     await fetch('/reorder', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -685,11 +1038,31 @@ if (list && list.querySelector('.card[draggable="true"]')) {
   }
 }
 
+// 题型按钮：点击切换题型，再点当前项清除（AJAX）
+// 题型决定正文走哪条渲染分支（选项分栏/图文分栏/小问分栏都看它），所以改完要
+// 重新取一遍这张卡的正文——只切亮灭的话按钮说的是新题型、正文还是旧排版。
+listEl?.addEventListener('click', async event => {
+    const chip = event.target.closest('.type-chip');
+    if (!chip) return;
+    const group = chip.closest('.type-chips');
+    const id = group.dataset.id;
+      const type = chip.classList.contains('active') ? '' : chip.dataset.type;
+      const res = await fetch(`/question/${id}/type`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({type, card_sort: isCustom ? 'custom' : 'browse'})
+      });
+      const data = await res.json();
+      if (!data.ok) { alert(data.error || '设置题型失败'); return; }
+      replaceQuestionCard(group.closest('.card'), data.card_html);
+});
+
 // 难度圈圈：点击设 1-5，再点当前值清除（AJAX）
-document.querySelectorAll('.diff-dots').forEach(group => {
-  const id = group.dataset.id;
-  group.querySelectorAll('.diff-dot').forEach(dot => {
-    dot.addEventListener('click', async () => {
+listEl?.addEventListener('click', async event => {
+    const dot = event.target.closest('.diff-dot');
+    if (!dot) return;
+    const group = dot.closest('.diff-dots');
+    const id = group.dataset.id;
       const level = dot.classList.contains('active') ? '' : dot.dataset.level;
       const res = await fetch(`/question/${id}/difficulty`, {
         method: 'POST',
@@ -698,40 +1071,115 @@ document.querySelectorAll('.diff-dots').forEach(group => {
       });
       const data = await res.json();
       if (!data.ok) { alert(data.error || '设置失败'); return; }
-      // 更新本组圈圈：仅选中的那个亮
-      group.querySelectorAll('.diff-dot').forEach(d => {
+      const card = group.closest('.card');
+      // 桌面摘要与浏览器旧控件同时存在，统一同步，避免切换运行形态后看到旧值。
+      card.querySelectorAll('.diff-dot').forEach(d => {
         d.classList.toggle('active', d.dataset.level === data.level);
+        d.setAttribute('aria-checked', String(d.dataset.level === data.level));
       });
-    });
-  });
+      const summary = card.querySelector('.difficulty-summary-value');
+      if (summary) summary.textContent = data.level || '—';
+      closeCardPopovers();
 });
 
 // 标星：点击切换（AJAX）
-document.querySelectorAll('.star-toggle').forEach(star => {
-  star.addEventListener('click', async () => {
+listEl?.addEventListener('click', async event => {
+    const star = event.target.closest('.star-toggle');
+    if (!star) return;
     const id = star.dataset.id;
     const res = await fetch(`/question/${id}/star`, {method: 'POST'});
     const data = await res.json();
     if (!data.ok) { alert('标星失败'); return; }
     star.classList.toggle('on', !!data.starred);
-  });
+    star.setAttribute('aria-pressed', String(!!data.starred));
 });
 
-// 标签改名：点 ✎ 输入新名，提交（新名已存在则后端合并）
-document.querySelectorAll('.tag-rename').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const cur = btn.dataset.name;
-    const name = prompt('把标签「' + cur + '」改为：', cur);
-    if (!name || name.trim() === '' || name.trim() === cur) return;
-    const f = document.createElement('form');
-    f.method = 'post';
-    f.action = '/tags/' + encodeURIComponent(cur) + '/rename';
-    const inp = document.createElement('input');
-    inp.type = 'hidden'; inp.name = 'name'; inp.value = name.trim();
-    f.appendChild(inp);
-    document.body.appendChild(f);
-    f.submit();
-  });
+// 标签区支持按需加载；双击筛选和改名都用事件委托，后来插入的标签无需重新绑监听。
+const tagCloud = document.getElementById('tag-cloud');
+function renderTagRow(name) {
+  const row = document.createElement('div');
+  row.className = 'tag-row';
+  const label = document.createElement('label');
+  label.className = 'tag-check';
+  const input = document.createElement('input');
+  input.type = 'checkbox'; input.name = 'tag'; input.value = name;
+  label.append(input, document.createTextNode(' ' + name));
+  const rename = document.createElement('button');
+  rename.type = 'button'; rename.className = 'tag-rename'; rename.title = '改名';
+  rename.dataset.name = name; rename.textContent = '✎';
+  row.append(label, rename);
+  return row;
+}
+tagCloud?.addEventListener('dblclick', event => {
+  const label = event.target.closest('.tag-check');
+  if (!label) return;
+  event.preventDefault();
+  const form = document.getElementById('filter-form');
+  const checkbox = label.querySelector('input[type=checkbox]');
+  form.querySelectorAll('input[name="tag"]').forEach(other => { other.checked = false; });
+  checkbox.checked = true;
+  form.submit();
+});
+tagCloud?.addEventListener('click', async event => {
+  const load = event.target.closest('#load-tags-btn');
+  if (load) {
+    load.disabled = true;
+    load.textContent = '正在扫描题库…';
+    try {
+      const response = await fetch('/api/tags');
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '标签加载失败');
+      tagCloud.replaceChildren(...data.tags.map(renderTagRow));
+      if (!data.tags.length) {
+        const empty = document.createElement('p');
+        empty.className = 'muted'; empty.textContent = '还没有标签';
+        tagCloud.appendChild(empty);
+      }
+    } catch (error) {
+      load.disabled = false;
+      load.textContent = '重新加载全部标签';
+      flashToast(error.message, 'err');
+    }
+    return;
+  }
+  const rename = event.target.closest('.tag-rename');
+  if (!rename) return;
+  const cur = rename.dataset.name;
+  const name = prompt('把标签「' + cur + '」改为：', cur);
+  if (!name || name.trim() === '' || name.trim() === cur) return;
+  const form = new FormData();
+  form.set('name', name.trim());
+  try {
+    const response = await fetch('/tags/' + encodeURIComponent(cur) + '/rename', {
+      method: 'POST', headers: {'Accept': 'application/json'}, body: form
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || '标签改名失败');
+    const next = new URL(location.href);
+    const activeTags = next.searchParams.getAll('tag');
+    if (activeTags.includes(cur)) {
+      next.searchParams.delete('tag');
+      activeTags.forEach(tag => next.searchParams.append(
+        'tag', tag === cur ? data.new_name : tag));
+    }
+    const packed = next.searchParams.get('tags');
+    if (packed) {
+      next.searchParams.set('tags', packed.split(',').map(
+        tag => tag === cur ? data.new_name : tag).join(','));
+    }
+    await loadFolderFragment(next, next.href !== location.href);
+    const row = rename.closest('.tag-row');
+    const input = row?.querySelector('input[name="tag"]');
+    if (input) input.value = data.new_name;
+    const label = row?.querySelector('.tag-check');
+    if (label && input) {
+      label.replaceChildren(input, document.createTextNode(` ${data.new_name}`));
+    }
+    rename.dataset.name = data.new_name;
+    flashToast(data.message || '标签已改名');
+  } catch (error) {
+    flashToast(error.message, 'err');
+  }
 });
 
 // 导出模式切换：讲义模式显示「知识要点」文本域 + 每题「独占整页」勾选框；
@@ -752,43 +1200,59 @@ if (modeSel) {
   syncModeUI();  // 初始化
 }
 
-// —— 真实 PDF 预览（iframe 嵌入）——
+// —— 真实 PDF 预览 / 导出 ——
+// 两者都是「POST 拿一个取件地址，再由地址去取文件」，不再直接收文件流。原因是本页
+// 会被 Obsidian 插件嵌在 iframe 里（Electron 渲染进程），那里有两件事不成立：
+//   ① blob: URL 赋给 iframe 的 src —— 预览层永远空白；
+//   ② 表单提交触发的附件下载 —— 点「导出」毫无反应。
+// 换成普通的 http 地址后，预览就是同源 iframe 的一次正常加载；导出则在独立浏览器
+// 里点一个 <a download>，在 Obsidian 里交给插件抓下来写进 vault（见 base.html 的桥）。
 const previewBtn = document.getElementById('preview-btn');
 const overlay = document.getElementById('preview-overlay');
 const frame = document.getElementById('preview-frame');
 const previewInfo = document.getElementById('preview-info');
-let previewURL = null;  // 当前 objectURL，关闭时释放
+const previewOpen = document.getElementById('preview-open');
+const embedded = window.parent !== window;   // 被 Obsidian 插件嵌着
 
 function closePreview() {
   overlay.classList.add('hidden');
   frame.src = 'about:blank';
-  if (previewURL) { URL.revokeObjectURL(previewURL); previewURL = null; }
+  if (previewOpen) { previewOpen.style.display = 'none'; previewOpen.href = '#'; }
+}
+
+// 后端出错时回的是 JSON（{ok:false,error}），网络层出错时连 JSON 都没有；
+// 统一收成一句话，免得每个调用点各写一遍 try。
+async function postForExport(url, fd) {
+  const res = await fetch(url, {method: 'POST', body: fd});
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = null; }
+  if (!res.ok || !data || !data.ok) {
+    throw new Error((data && data.error) || ('请求失败（HTTP ' + res.status + '）'));
+  }
+  return data;
 }
 
 if (previewBtn) {
   previewBtn.addEventListener('click', async () => {
     const form = document.getElementById('export-form');
     const fd = new FormData(form);
+    // 预览固定出 PDF：表单里的「格式」下拉是给导出用的，选了 tex/zip 时
+    // 也要能预览版式，所以这里覆盖掉它，而不是把 tex 源码塞进 iframe。
+    fd.set('fmt', 'pdf');
     previewInfo.textContent = '正在生成 PDF…';
     overlay.classList.remove('hidden');
     frame.src = 'about:blank';
     try {
-      const res = await fetch('/preview', {method: 'POST', body: fd});
-      if (!res.ok) {
-        const msg = await res.text();
-        previewInfo.textContent = '';
-        alert(msg || '预览生成失败');
-        closePreview();
-        return;
+      const data = await postForExport('/preview', fd);
+      frame.src = data.url;
+      if (previewOpen) {
+        previewOpen.href = data.url;
+        previewOpen.style.display = 'inline-block';
       }
-      const blob = await res.blob();
-      if (previewURL) URL.revokeObjectURL(previewURL);
-      previewURL = URL.createObjectURL(blob);
-      frame.src = previewURL;
       previewInfo.textContent = '所见即所得（与导出一致）';
     } catch (e) {
       previewInfo.textContent = '';
-      alert('预览请求出错：' + e.message);
+      alert('预览失败：' + e.message);
       closePreview();
     }
   });
@@ -796,19 +1260,366 @@ if (previewBtn) {
   overlay.addEventListener('click', e => { if (e.target === overlay) closePreview(); });
 }
 
+// 导出：接管表单提交（原先是普通 submit + as_attachment 附件响应）
+const exportForm = document.getElementById('export-form');
+if (exportForm) {
+  exportForm.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = exportForm.querySelector('button[type="submit"]');
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '正在生成…'; }
+    try {
+      const data = await postForExport('/export', new FormData(exportForm));
+      if (embedded) {
+        // Obsidian 里：地址交给插件，由它用主进程的 requestUrl 抓下来落盘。
+        // 这里不等回执——插件那边成功与否会自己弹 Notice，页面拿不到也管不着。
+        window.parent.postMessage({source: 'quizforge', type: 'download',
+                                   url: new URL(data.url, location.href).href,
+                                   filename: data.filename}, '*');
+      } else {
+        const a = document.createElement('a');
+        a.href = data.url;
+        a.download = data.filename || '';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+    } catch (err) {
+      alert('导出失败：' + err.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+    }
+  });
+}
+
 // —— 文件夹树：展开/折叠、新建（顶级/子）、改名、移动、删除 ——
 const folderTree = document.getElementById('folder-tree');
+const collectionOverviewHost = document.getElementById('collection-overview-host');
+let folderLoadGeneration = 0;
 
-document.querySelectorAll('.folder-list .folder-twist:not(.folder-twist-empty)').forEach(tg => {
-  tg.addEventListener('click', e => {
-    e.preventDefault();
-    e.stopPropagation();
-    const li = tg.closest('.folder-item');
-    const kids = li.querySelector(':scope > .folder-children');
-    if (!kids) return;
-    li.classList.toggle('collapsed');
-    kids.classList.toggle('collapsed');
+function syncHiddenFormContext(formId, doc) {
+  const current = document.getElementById(formId);
+  const incoming = doc.getElementById(formId);
+  if (!current || !incoming) return;
+  incoming.querySelectorAll('input[type="hidden"][name]').forEach(source => {
+    const target = current.elements.namedItem(source.name);
+    if (target && 'value' in target) target.value = source.value;
   });
+}
+
+// 点题集只替换题卡与原卷面板，保留文件夹展开状态和页面滚动位置。响应仍是完整
+// HTML，JS 失效或解析失败时退回普通跳转，因此链接本身始终可用。
+async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
+  // 用户一发起新导航就取消旧页面的刷新恢复，而不是等片段响应回来才取消。
+  questionPositionRestoreGeneration += 1;
+  const generation = ++folderLoadGeneration;
+  const url = new URL(rawUrl, location.href);
+  if (sortSel?.value) url.searchParams.set('sort', sortSel.value);
+  try {
+    const res = await fetch(url, {headers: {'X-QF-Fragment': '1'}});
+    if (!res.ok) throw new Error('片段请求失败');
+    const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    // 连续快速点击文件夹时，晚返回的旧请求不得覆盖新文件夹。
+    if (generation !== folderLoadGeneration) return;
+    const incoming = doc.getElementById('q-list');
+    if (!incoming || !listEl) throw new Error('响应缺少题目列表');
+    const incomingOverview = doc.getElementById('collection-overview-host');
+    if (collectionOverviewHost && incomingOverview) {
+      collectionOverviewHost.innerHTML = incomingOverview.innerHTML;
+      collectionOverviewHost.dataset.overview = incomingOverview.dataset.overview || '0';
+    }
+    listEl.innerHTML = incoming.innerHTML;
+    listEl.dataset.customSort = incoming.dataset.customSort || '';
+    listEl.dataset.pageToken = incoming.dataset.pageToken || '';
+    listEl.dataset.total = incoming.dataset.total || '0';
+    listEl.dataset.loaded = incoming.dataset.loaded || '0';
+    listEl.dataset.inlineCreated = '0';
+    listEl.dataset.collection = incoming.dataset.collection || '';
+    listEl.dataset.collectionName = incoming.dataset.collectionName || '题库根目录';
+    isCustom = listEl.dataset.customSort === '1';
+    const count = Number(incoming.dataset.total || 0);
+    const countEl = document.getElementById('q-count');
+    if (countEl) countEl.textContent = count;
+    const addButton = document.getElementById('new-question-fab');
+    if (addButton) {
+      const folderName = listEl.dataset.collectionName || '题库根目录';
+      addButton.title = `在“${folderName}”末尾添加题目`;
+      addButton.setAttribute('aria-label', addButton.title);
+    }
+    const toolbar = document.getElementById('q-toolbar');
+    toolbar?.classList.toggle('hidden', incomingOverview?.dataset.overview === '1');
+    if (incomingOverview?.dataset.overview === '1') {
+      document.getElementById('export-panel')?.classList.add('hidden');
+    }
+    const papersHost = document.getElementById('papers-host');
+    const incomingPapers = doc.getElementById('papers-host');
+    if (papersHost && incomingPapers) {
+      papersHost.innerHTML = incomingPapers.innerHTML;
+      window.QPapersInit?.(papersHost);
+    }
+    // 题卡换成了新文件夹后，所有按“当前范围”工作的表单也必须同步。此前漏了
+    // 这一项，页面显示 A 文件夹、全选表单却仍提交初始根页的空 collection。
+    syncHiddenFormContext('select-all-form', doc);
+    if (refreshTree) {
+      replaceFolderTreeFromDocument(doc);
+    } else {
+      document.querySelectorAll('.folder-item').forEach(item => item.classList.remove('active'));
+      const activeLink = [...document.querySelectorAll('a.folder-link[data-ajax="1"]')]
+        .find(link => new URL(link.href).searchParams.get('collection') === url.searchParams.get('collection')
+                      && new URL(link.href).searchParams.has('all') === url.searchParams.has('all'));
+      activeLink?.closest('.folder-item')?.classList.add('active');
+    }
+    listEl.querySelectorAll('.card').forEach(initQuestionCard);
+    syncModeUI();
+    resetQuestionInfiniteScroll();
+    if (push) history.pushState({qfFragment: true}, '', url);
+  } catch (_error) {
+    if (generation !== folderLoadGeneration) return;
+    location.href = url;
+  }
+}
+
+folderTree?.addEventListener('click', event => {
+  const link = event.target.closest('a.folder-link[data-ajax="1"]');
+  if (!link) return;
+  event.preventDefault();
+  loadFolderFragment(link.href);
+});
+collectionOverviewHost?.addEventListener('click', event => {
+  const link = event.target.closest('a[data-folder-nav="1"]');
+  if (!link) return;
+  event.preventDefault();
+  loadFolderFragment(link.href);
+});
+window.addEventListener('popstate', () => loadFolderFragment(location.href, false));
+
+function syncQuestionCountAfterRemoval(removed, removedInline = 0) {
+  if (!listEl || removed < 1) return;
+  const snapshotRemoved = Math.max(0, removed - removedInline);
+  const total = Math.max(0, Number(listEl.dataset.total || 0) - snapshotRemoved);
+  const loaded = Math.max(0, Number(listEl.dataset.loaded || 0) - snapshotRemoved);
+  const inlineCreated = Math.max(
+    0, Number(listEl.dataset.inlineCreated || 0) - removedInline);
+  listEl.dataset.total = String(total);
+  listEl.dataset.loaded = String(loaded);
+  listEl.dataset.inlineCreated = String(inlineCreated);
+  syncVisibleQuestionCount();
+}
+
+// 单题删除：文件先进入回收站，页面只移除这一张卡。无限滚动快照里仍可能保留
+// 旧路径，因此有分页令牌时后台重取一次列表片段；这不是整页刷新，导航栏、滚动宿主
+// 和其它页面状态都不销毁。
+listEl?.addEventListener('submit', async event => {
+  const form = event.target.closest('.question-delete-form');
+  if (!form) return;
+  event.preventDefault();
+  if (!confirm('确定删除这道题？题目会进入回收站。')) return;
+  const card = form.closest('.card');
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(form.action, {
+      method: 'POST', headers: {'Accept': 'application/json'}, body: new FormData(form)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '删除失败');
+    const removedInline = card?.dataset.inlineCreated === '1' ? 1 : 0;
+    card?.remove();
+    syncQuestionCountAfterRemoval(1, removedInline);
+    document.getElementById('sel-count').textContent = data.count;
+    syncBulkbar(data.count);
+    flashToast(data.message || '题目已移入回收站');
+    if (listEl.dataset.pageToken) await loadFolderFragment(location.href, false);
+  } catch (error) {
+    flashToast(error.message, 'err');
+    if (button) button.disabled = false;
+  }
+});
+
+// 已选题目的操作统一改为 fetch。标签、难度和清空可直接改现有卡片；移动会改变当前
+// 文件夹成员，删除会改变无限滚动快照，这两类只重取题目列表片段，不再整页跳转。
+bulkbar?.addEventListener('submit', async event => {
+  const form = event.target.closest('form');
+  if (!form) return;
+  event.preventDefault();
+  const promptText = form.dataset.confirm;
+  if (promptText && !confirm(promptText)) return;
+  let action = form.action;
+  if (form.id === 'add-coll-form') {
+    const cid = form.querySelector('select[name="cid"]')?.value || '';
+    if (!cid) return;
+    action = new URL(collectionActionUrl(cid, 'add'), location.href).href;
+  }
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(action, {
+      method: 'POST', headers: {'Accept': 'application/json'}, body: new FormData(form)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '操作失败');
+    const path = new URL(action).pathname;
+    const ids = new Set(data.ids || data.deleted || []);
+    if (path === '/clear') {
+      listEl?.querySelectorAll('.card.selected').forEach(card => {
+        card.classList.remove('selected');
+        const checkbox = card.querySelector('.sel-toggle');
+        if (checkbox) checkbox.checked = false;
+      });
+    } else if (path === '/tag_selected') {
+      listEl?.querySelectorAll('.card').forEach(card => {
+        if (!ids.has(card.dataset.id)) return;
+        const host = card.querySelector('.tags');
+        (data.tags || []).forEach(tag => {
+          if ([...host.querySelectorAll('.tag')].some(node => node.textContent === tag)) return;
+          const chip = document.createElement('span');
+          chip.className = 'tag'; chip.textContent = tag; host.appendChild(chip);
+        });
+      });
+    } else if (path === '/difficulty_selected') {
+      listEl?.querySelectorAll('.card').forEach(card => {
+        if (!ids.has(card.dataset.id)) return;
+        card.querySelectorAll('.diff-dot').forEach(dot => {
+          dot.classList.toggle('active', dot.dataset.level === data.level);
+          dot.setAttribute('aria-checked', String(dot.dataset.level === data.level));
+        });
+        const summary = card.querySelector('.difficulty-summary-value');
+        if (summary) summary.textContent = data.level || '—';
+      });
+    } else if (data.deleted) {
+      let removed = 0;
+      let removedInline = 0;
+      listEl?.querySelectorAll('.card').forEach(card => {
+        if (!ids.has(card.dataset.id)) return;
+        if (card.dataset.inlineCreated === '1') removedInline += 1;
+        card.remove(); removed += 1;
+      });
+      syncQuestionCountAfterRemoval(removed, removedInline);
+      if (listEl?.dataset.pageToken) await loadFolderFragment(location.href, false);
+    } else {
+      await loadFolderFragment(location.href, false);
+    }
+    const count = Number(data.count || 0);
+    document.getElementById('sel-count').textContent = count;
+    syncBulkbar(count);
+    flashToast(data.message || '操作完成');
+  } catch (error) {
+    flashToast(error.message, 'err');
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+// “全选”会按当前筛选条件查询全部命中项，但查询完成后只需更新题卡勾选态与底部
+// 工具栏。旧的 POST + redirect 会把刚渲染好的 30 张题卡、公式和文件夹树全部销毁
+// 再建一遍，题库越大越像按钮卡死。
+function currentSelectionScope(form) {
+  const body = new FormData(form);
+  const url = new URL(location.href);
+  const tags = url.searchParams.getAll('tag');
+  body.set('tags', tags.length ? tags.join(',') : (url.searchParams.get('tags') || ''));
+  body.set('match', url.searchParams.get('match') || 'and');
+  body.set('type', url.searchParams.get('type') || '');
+  body.set('q', url.searchParams.get('q') || '');
+  body.set('difficulty', url.searchParams.get('difficulty') || '');
+  body.set('collection', url.searchParams.get('collection') || '');
+  body.set('starred', url.searchParams.get('starred') || '');
+  const all = url.searchParams.get('all');
+  body.set('all', ['1', 'true', 'on'].includes(all) ? '1' : '');
+  return body;
+}
+
+document.getElementById('select-all-form')?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch(form.action, {
+      method: 'POST', headers: {'Accept': 'application/json'},
+      body: currentSelectionScope(form)
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '全选失败');
+    listEl?.querySelectorAll('.card').forEach(card => {
+      card.classList.add('selected');
+      const checkbox = card.querySelector('.sel-toggle');
+      if (checkbox) checkbox.checked = true;
+    });
+    const count = Number(data.count || 0);
+    document.getElementById('sel-count').textContent = count;
+    syncBulkbar(count);
+    flashToast(data.message || `已全选 ${data.matched || 0} 道题`);
+  } catch (error) {
+    flashToast(error.message, 'err');
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+function renderLazyFolder(node) {
+  const li = document.createElement('li');
+  li.className = `folder-item${node.has_children ? ' has-children collapsed' : ''}`;
+  li.dataset.folderId = node.id;
+  li.dataset.folderName = node.name;
+  const row = document.createElement('div');
+  row.className = 'folder-row';
+  row.draggable = true;
+  row.innerHTML = node.has_children
+    ? '<span class="folder-twist" title="展开/折叠"><span aria-hidden="true">›</span></span>'
+    : '<span class="folder-twist folder-twist-empty"></span>';
+  const icon = document.createElement('span');
+  icon.className = 'folder-ico'; icon.setAttribute('aria-hidden', 'true');
+  icon.textContent = '▰';
+  const link = document.createElement('a');
+  link.className = 'folder-link'; link.dataset.ajax = '1';
+  link.href = '/?collection=' + encodeURIComponent(node.id);
+  link.title = node.name; link.textContent = node.name;
+  const actions = document.createElement('span');
+  actions.className = 'folder-actions';
+  actions.innerHTML = '<button type="button" class="folder-act folder-newsub" title="新建子文件夹">＋</button>'
+    + '<button type="button" class="folder-act folder-rename" title="重命名">✎</button>'
+    + '<button type="button" class="folder-act folder-movebtn" title="移动到…">⇄</button>'
+    + '<button type="button" class="folder-act folder-del" title="删除">×</button>';
+  row.append(icon, link, actions);
+  li.appendChild(row);
+  if (node.has_children) {
+    const children = document.createElement('ul');
+    children.className = 'folder-children collapsed';
+    children.dataset.parentId = node.id;
+    children.dataset.loaded = '0';
+    li.appendChild(children);
+  }
+  return li;
+}
+
+folderTree?.addEventListener('click', async event => {
+  const twist = event.target.closest('.folder-twist:not(.folder-twist-empty)');
+  if (!twist) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const li = twist.closest('.folder-item');
+  const children = li?.querySelector(':scope > .folder-children');
+  if (!li || !children) return;
+  const expanding = li.classList.contains('collapsed');
+  if (expanding && children.dataset.loaded !== '1') {
+    twist.classList.add('loading');
+    try {
+      const response = await fetch('/collections/children?parent='
+                                   + encodeURIComponent(children.dataset.parentId));
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '读取文件夹失败');
+      children.replaceChildren(...data.children.map(renderLazyFolder));
+      children.dataset.loaded = '1';
+    } catch (error) {
+      flashToast(error.message, 'err');
+      return;
+    } finally {
+      twist.classList.remove('loading');
+    }
+  }
+  li.classList.toggle('collapsed', !expanding);
+  children.classList.toggle('collapsed', !expanding);
 });
 
 // 顶部「＋」：新建顶级文件夹（展开输入框）
@@ -821,55 +1632,435 @@ folderNewBtn?.addEventListener('click', () => {
   if (!folderNewForm.hidden) folderNewForm.querySelector('input[name="name"]').focus();
 });
 
-// 每个文件夹行的「＋」：新建子文件夹（走同一个隐藏表单，先填 parent_id）
-folderTree?.querySelectorAll('.folder-newsub').forEach(btn => {
-  btn.addEventListener('click', () => {
+// 完整目录只在用户首次操作“加入/移动”时请求。它有 642 项，放进每次文件夹
+// 切换的 HTML 不仅增加体积，还会迫使服务端反复递归扫描整棵目录树。
+const folderMoveSelect = document.getElementById('folder-move-select');
+const addCollectionSelect = document.querySelector('#add-coll-form select[name="cid"]');
+let collectionOptionsPromise = null;
+function collectionActionUrl(fid, action) {
+  const path = fid.split('/').map(encodeURIComponent).join('/');
+  return `/collections/${path}/${action}`;
+}
+function resetCollectionOptions() {
+  collectionOptionsPromise = null;
+  if (addCollectionSelect) {
+    while (addCollectionSelect.options.length > 1) addCollectionSelect.remove(1);
+    addCollectionSelect.options[0].textContent = '加入题集…';
+    addCollectionSelect.dataset.loaded = '';
+  }
+  if (folderMoveSelect) {
+    if (folderTree?.contains(folderMoveSelect)) folderTree.after(folderMoveSelect);
+    while (folderMoveSelect.options.length > 2) folderMoveSelect.remove(2);
+    folderMoveSelect.dataset.loaded = '';
+    folderMoveSelect.dataset.id = '';
+    folderMoveSelect.classList.add('hidden');
+    folderMoveSelect.value = '__choose__';
+  }
+}
+function replaceFolderTreeFromDocument(doc) {
+  const incomingTree = doc.getElementById('folder-tree');
+  if (!folderTree || !incomingTree) return;
+  if (folderMoveSelect && folderTree.contains(folderMoveSelect)) {
+    folderTree.after(folderMoveSelect);
+  }
+  folderTree.innerHTML = incomingTree.innerHTML;
+  resetCollectionOptions();
+}
+function remapActiveCollection(oldId, newId, keepSuffix = true) {
+  const url = new URL(location.href);
+  const active = url.searchParams.get('collection') || '';
+  if (active !== oldId && !active.startsWith(oldId + '/')) {
+    return {url, changed: false};
+  }
+  const suffix = keepSuffix ? active.slice(oldId.length) : '';
+  const target = `${newId || ''}${suffix}`.replace(/^\/+/, '');
+  if (target) {
+    url.searchParams.set('collection', target);
+    url.searchParams.delete('all');
+  } else {
+    url.searchParams.delete('collection');
+    url.searchParams.delete('recursive');
+    url.searchParams.set('all', '1');
+  }
+  return {url, changed: true};
+}
+async function postFolderForm(url, body) {
+  const response = await fetch(url, {
+    method: 'POST', headers: {'Accept': 'application/json'}, body
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.ok) throw new Error(data.error || '文件夹操作失败');
+  return data;
+}
+async function loadCollectionOptions() {
+  if (addCollectionSelect?.dataset.loaded === '1') return;
+  if (!collectionOptionsPromise) {
+    collectionOptionsPromise = fetch('/collections/options').then(async response => {
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '读取目录失败');
+      if (addCollectionSelect) {
+        addCollectionSelect.options[0].textContent = '加入题集…';
+        data.collections.forEach(row => {
+          const option = document.createElement('option');
+          option.value = row.id;
+          option.textContent = '　'.repeat(row.depth) + row.name;
+          addCollectionSelect.appendChild(option);
+        });
+        addCollectionSelect.dataset.loaded = '1';
+      }
+    }).catch(error => {
+      collectionOptionsPromise = null;
+      throw error;
+    });
+  }
+  return collectionOptionsPromise;
+}
+addCollectionSelect?.addEventListener('focus', () => {
+  loadCollectionOptions().catch(error => flashToast(error.message, 'err'));
+});
+
+folderNewForm?.addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = folderNewForm.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  try {
+    const data = await postFolderForm(folderNewForm.action, new FormData(folderNewForm));
+    folderNewForm.reset();
+    folderNewForm.hidden = true;
+    await loadFolderFragment(location.href, false, true);
+    flashToast(data.message || '文件夹已新建');
+  } catch (error) {
+    flashToast(error.message, 'err');
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
+async function showFolderMove(li) {
+  if (!li || !folderMoveSelect) return;
+  try {
+    await loadCollectionOptions();
+  } catch (error) {
+    flashToast(error.message, 'err');
+    return;
+  }
+  if (folderMoveSelect.dataset.loaded !== '1') {
+    [...(addCollectionSelect?.options || [])].slice(1).forEach(opt => {
+      folderMoveSelect.appendChild(opt.cloneNode(true));
+    });
+    folderMoveSelect.dataset.loaded = '1';
+  }
+  const fid = li.dataset.folderId;
+  const alreadyOpen = (folderMoveSelect.dataset.id === fid
+                       && !folderMoveSelect.classList.contains('hidden'));
+  folderMoveSelect.classList.toggle('hidden', alreadyOpen);
+  if (alreadyOpen) return;
+  folderMoveSelect.dataset.id = fid;
+  folderMoveSelect.value = '__choose__';
+  folderMoveSelect.querySelectorAll('option').forEach(opt => {
+    const target = opt.value;
+    opt.disabled = (target === '__choose__'
+                    || target === fid || target.startsWith(fid + '/'));
+  });
+  li.querySelector(':scope > .folder-row').after(folderMoveSelect);
+  folderMoveSelect.focus();
+}
+
+async function renameFolder(li) {
+  const fid = li.dataset.folderId;
+  const oldName = li.dataset.folderName;
+  const name = prompt('新文件夹名：', oldName);
+  if (!name || name.trim() === '' || name.trim() === oldName) return;
+  const form = new FormData();
+  form.set('name', name.trim());
+  try {
+    const data = await postFolderForm(collectionActionUrl(fid, 'rename'), form);
+    const next = remapActiveCollection(fid, data.id, true);
+    await loadFolderFragment(next.url, next.changed, true);
+    flashToast(data.message || '文件夹已改名');
+  } catch (error) {
+    flashToast(error.message, 'err');
+  }
+}
+
+async function deleteFolder(li) {
+  const fid = li.dataset.folderId;
+  if (!confirm(`删除题集「${li.dataset.folderName}」？整个子树会移入回收站。`)) return;
+  try {
+    const data = await postFolderForm(collectionActionUrl(fid, 'delete'), new FormData());
+    const next = remapActiveCollection(fid, data.parent_id || '', false);
+    await loadFolderFragment(next.url, next.changed, true);
+    flashToast(data.message || '题集已移入回收站');
+  } catch (error) {
+    flashToast(error.message, 'err');
+  }
+}
+
+// 四类行内操作统一委托给文件夹树，避免数百个文件夹各绑三套监听器、各带一份表单。
+folderTree?.addEventListener('click', event => {
+  const btn = event.target.closest('.folder-act');
+  if (!btn) return;
+  const li = btn.closest('.folder-item');
+  if (!li) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const fid = li.dataset.folderId;
+  if (btn.classList.contains('folder-newsub')) {
     if (!folderNewForm) return;
-    folderNewForm.querySelector('input[name="parent_id"]').value = btn.dataset.id;
+    folderNewForm.querySelector('input[name="parent_id"]').value = fid;
     folderNewForm.hidden = false;
     folderNewForm.querySelector('input[name="name"]').focus();
-  });
+  } else if (btn.classList.contains('folder-rename')) {
+    void renameFolder(li);
+  } else if (btn.classList.contains('folder-movebtn')) {
+    void showFolderMove(li);
+  } else if (btn.classList.contains('folder-del')) {
+    void deleteFolder(li);
+  }
+});
+folderMoveSelect?.addEventListener('change', async () => {
+    const fid = folderMoveSelect.dataset.id;
+    const parentId = folderMoveSelect.value;  // '' = 顶层
+    try {
+      const res = await fetch(collectionActionUrl(fid, 'move'), {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({parent_id: parentId || null})
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || '移动失败');
+      const next = remapActiveCollection(fid, data.id, true);
+      await loadFolderFragment(next.url, next.changed, true);
+      flashToast(data.message || '文件夹已移动');
+    } catch (error) {
+      flashToast(error.message, 'err');
+      folderMoveSelect.classList.add('hidden');
+    }
 });
 
-// 改名（AJAX：表单提交而非 fetch，因为路由走 form POST + redirect）
-folderTree?.querySelectorAll('.folder-rename').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const name = prompt('新文件夹名：', btn.dataset.name);
-    if (!name || name.trim() === '' || name.trim() === btn.dataset.name) return;
-    const f = document.createElement('form');
-    f.method = 'post';
-    f.action = '/collections/' + btn.dataset.id + '/rename';
-    const inp = document.createElement('input');
-    inp.type = 'hidden'; inp.name = 'name'; inp.value = name.trim();
-    f.appendChild(inp);
-    document.body.appendChild(f);
-    f.submit();
-  });
+// —— 文件夹右键菜单 ——
+// 菜单项都复用上面那几个按钮的逻辑（新建子夹走隐藏表单、改名走 prompt+POST、
+// 删除走同一套委托逻辑），所以这里只负责「点哪一项 → 触发哪个按钮」，
+// 不再重写一遍请求，两条入口的行为天然一致。
+const folderCtx = document.getElementById('folder-ctx');
+let ctxItem = null;
+function hideFolderCtx() {
+  if (folderCtx) folderCtx.hidden = true;
+}
+function showFolderCtx(x, y) {
+  if (!folderCtx || !ctxItem) return;
+  folderCtx.hidden = false;
+  // 先取消 hidden 才量得到尺寸，再夹到视口内，免得贴边时菜单被裁掉
+  const left = Math.min(x, window.innerWidth - folderCtx.offsetWidth - 6);
+  const top = Math.min(y, window.innerHeight - folderCtx.offsetHeight - 6);
+  folderCtx.style.left = `${left}px`;
+  folderCtx.style.top = `${top}px`;
+}
+
+folderTree?.addEventListener('contextmenu', e => {
+  // 「全部题目」那一行是虚拟根，没有 id，右键菜单里每一项都对它无意义
+  const li = e.target.closest('.folder-item:not(.folder-root)');
+  if (!li) return;
+  e.preventDefault();
+  ctxItem = li;
+  showFolderCtx(e.clientX, e.clientY);
 });
 
-// 「⇄ 移动到…」：点按钮显示该文件夹自带的下拉选择框，选中即 AJAX 提交
-folderTree?.querySelectorAll('.folder-movebtn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const li = btn.closest('.folder-item');
-    const sel = li.querySelector(':scope > .folder-move-select');
-    if (!sel) return;
-    sel.classList.toggle('hidden');
-    if (!sel.classList.contains('hidden')) sel.focus();
-  });
+folderCtx?.addEventListener('click', async e => {
+  const act = e.target.closest('li[data-act]')?.dataset.act;
+  if (!act || !ctxItem) return;
+  const li = ctxItem;
+  hideFolderCtx();
+  if (act === 'new-question') {
+    const folderId = li.dataset.folderId;
+    if ((listEl?.dataset.collection || '') !== folderId) {
+      await loadFolderFragment('/?collection=' + encodeURIComponent(folderId));
+    }
+    await openNewQuestionCard(folderId);
+  } else if (act === 'new-folder') {
+    li.querySelector(':scope > .folder-row .folder-newsub')?.click();
+  } else if (act === 'rename') {
+    li.querySelector(':scope > .folder-row .folder-rename')?.click();
+  } else if (act === 'move') {
+    li.querySelector(':scope > .folder-row .folder-movebtn')?.click();
+  } else if (act === 'delete') {
+    // 点那一行现成的删除按钮：确认对话框与 onsubmit 校验都在表单上，不用复制
+    li.querySelector(':scope > .folder-row .folder-del')?.click();
+  }
 });
-folderTree?.querySelectorAll('.folder-move-select').forEach(sel => {
-  sel.addEventListener('change', async () => {
-    const fid = sel.dataset.id;
-    const parentId = sel.value;  // '' = 顶层
-    const res = await fetch(`/collections/${fid}/move`, {
+document.addEventListener('click', e => {
+  if (!folderCtx?.contains(e.target)) hideFolderCtx();
+});
+document.addEventListener('scroll', hideFolderCtx, true);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') hideFolderCtx();
+});
+
+// —— 拖文件夹、拖题进文件夹 ——
+// 两种拖动共用文件夹行作为落点，但使用独立状态和 MIME，避免把文件夹路径误当题目 id。
+// 「全部题目」是虚拟根：题目不能放进这里，文件夹则可放进这里成为顶级目录。
+const FOLDER_DRAG_MIME = 'application/x-quizforge-folder';
+let dragFolderId = null;
+let folderDragOverRow = null;
+function clearFolderDragOver() {
+  folderDragOverRow?.classList.remove('drag-over', 'drag-invalid');
+  folderDragOverRow = null;
+}
+
+function folderDropItem(target) {
+  return target.closest('.folder-row')?.closest('.folder-item') || null;
+}
+
+function isInvalidFolderDrop(sourceId, parentId) {
+  return parentId === sourceId || parentId.startsWith(sourceId + '/');
+}
+
+folderTree?.addEventListener('dragstart', e => {
+  const row = e.target.closest('.folder-row[draggable="true"]');
+  const li = row?.closest('.folder-item:not(.folder-root)');
+  if (!row || !li || e.target.closest('.folder-act')) return;
+  dragFolderId = li.dataset.folderId || null;
+  if (!dragFolderId) return;
+  row.classList.add('folder-dragging');
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData(FOLDER_DRAG_MIME, dragFolderId);
+  e.dataTransfer.setData('text/plain', `folder:${dragFolderId}`);
+  setDragGhost(e, '▰', li.dataset.folderName || '移动文件夹');
+});
+
+folderTree?.addEventListener('dragend', e => {
+  e.target.closest('.folder-row')?.classList.remove('folder-dragging');
+  dragFolderId = null;
+  clearFolderDragOver();
+  clearDragGhost();
+});
+
+folderTree?.addEventListener('dragover', e => {
+  if (!dragQuestionId && !dragFolderId) return;
+  const li = folderDropItem(e.target);
+  if (!li) return;
+  e.preventDefault();
+  const row = li.querySelector(':scope > .folder-row');
+  const invalid = !!dragFolderId && isInvalidFolderDrop(
+    dragFolderId, li.dataset.folderId || '');
+  if (e.dataTransfer) e.dataTransfer.dropEffect = invalid ? 'none' : 'move';
+  if (row === folderDragOverRow
+      && row?.classList.contains('drag-invalid') === invalid) return;
+  clearFolderDragOver();
+  folderDragOverRow = row;
+  folderDragOverRow?.classList.add(invalid ? 'drag-invalid' : 'drag-over');
+});
+
+folderTree?.addEventListener('dragleave', e => {
+  if (!folderDragOverRow) return;
+  if (e.relatedTarget && folderDragOverRow.contains(e.relatedTarget)) return;
+  if (e.target.closest('.folder-row') === folderDragOverRow) clearFolderDragOver();
+});
+
+folderTree?.addEventListener('drop', async e => {
+  const li = folderDropItem(e.target);
+  if (!li || (!dragQuestionId && !dragFolderId)) return;
+  e.preventDefault();
+  clearFolderDragOver();
+  const cid = li.dataset.folderId || '';
+
+  if (dragFolderId) {
+    // drop 后浏览器很快触发 dragend，所以在第一个 await 前保存源路径。
+    const sourceId = dragFolderId;
+    if (isInvalidFolderDrop(sourceId, cid)) {
+      flashToast('不能把文件夹移动到自身或其子文件夹中', 'err');
+      return;
+    }
+    const oldParent = sourceId.includes('/')
+      ? sourceId.slice(0, sourceId.lastIndexOf('/')) : '';
+    if (oldParent === cid) {
+      flashToast('文件夹已在这个位置');
+      return;
+    }
+    try {
+      const res = await fetch(collectionActionUrl(sourceId, 'move'), {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({parent_id: cid || null})
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || '移动文件夹失败');
+      const next = remapActiveCollection(sourceId, data.id, true);
+      await loadFolderFragment(next.url, next.changed, true);
+      flashToast(data.message || '文件夹已移动');
+    } catch (error) {
+      flashToast(error.message, 'err');
+      // 服务端失败时重取目录树，撤销浏览器拖动期间可能遗留的视觉状态。
+      await loadFolderFragment(location.href, false, true);
+    }
+    return;
+  }
+
+  // 根行没有真实文件夹 id：题目不能写到虚拟根，仍维持原有行为。
+  if (!cid) return;
+  const qid = dragQuestionId;   // dragend 会在响应回来前清空，先留副本
+  try {
+    const res = await fetch(`/collections/${encodeURIComponent(cid)}/add_one`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({parent_id: parentId || null})
+      body: JSON.stringify({question_id: qid})
     });
-    const data = await res.json();
-    if (data.ok) location.reload();
-    else { alert('移动失败：目标不能是自己或自己的子文件夹'); sel.classList.add('hidden'); }
-  });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.ok === false) throw new Error(data.error || '移动失败');
+    flashToast(`已移入「${li.dataset.folderName}」`);
+    // 一题只能在一个目录下，移动后局部重取题目列表；导航树和整页不销毁。
+    await loadFolderFragment(location.href, false);
+  } catch (err) {
+    flashToast(err.message, 'err');
+  }
 });
+
+/* ---------- 原卷面板：勾选 → 重新转换 ---------- */
+/* 与服务器版 folder-tree.js 的 initPapersReconvert 同一逻辑。软件版没有
+   folder-tree.js（文件夹相关的脚本全在本模板内联），所以放这里。
+   两个 id 各自最多一份：勾了第二份同类的就置成 -1（冲突），按钮变灰并说明原因
+   ——静默忽略第二次勾选会让用户以为选上了，转出来的却是第一份。 */
+(function () {
+function initPapers(host) {
+  if (!host) return;
+  const btn = document.getElementById('reconvert-btn');
+  const hint = document.getElementById('reconvert-hint');
+  const examInput = document.getElementById('reconvert-exam-id');
+  const solInput = document.getElementById('reconvert-sol-id');
+  if (!btn || !hint || !examInput || !solInput) return;
+
+  function refresh() {
+    let examId = '', solId = '';
+    host.querySelectorAll('.papers-chk').forEach(chk => {
+      if (!chk.checked) return;
+      if (chk.dataset.kind === 'solution') {
+        solId = solId ? '-1' : chk.value;
+      } else {
+        examId = examId ? '-1' : chk.value;
+      }
+    });
+    let msg = '';
+    if (examId === '-1') msg = '只能选一份「题干」原卷';
+    else if (solId === '-1') msg = '只能选一份「解析」卷';
+    else if (!examId) msg = '需勾选一份「题干」原卷';
+    hint.textContent = msg;
+    btn.disabled = !!msg;
+    examInput.value = msg ? '' : examId;
+    solInput.value = (msg || solId === '-1') ? '' : solId;
+  }
+
+  host.addEventListener('change', e => {
+    if (e.target.classList.contains('papers-chk')) refresh();
+  });
+  refresh();
+}
+window.QPapersInit = initPapers;
+initPapers(document.getElementById('papers-host'));
+})();
 </script>
+{# 图片排版控制条（对齐/宽度/分栏/并排堆叠/交换顺序），与服务器版同一份文件。
+   必须排在 image-redraw.js **之前**：deferred 脚本按文档顺序执行，重绘那边要用
+   本模块暴露的 window.QImgLayout.replaceBody（应用重绘后整块换题干 HTML）。 #}
+<script src="{{ static_v('js/image-layout.js') }}" defer></script>
+<script src="{{ static_v('js/image-redraw.js') }}" defer></script>
+<script src="{{ static_v('js/inline-editor.js') }}" defer></script>
+<script src="{{ static_v('js/card-a4-preview.js') }}" defer></script>
 {% endblock %}

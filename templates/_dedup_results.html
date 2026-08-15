@@ -1,0 +1,25 @@
+{% if total_groups %}
+  <form method="post" action="{{ url_for('dedup_delete') }}" id="dedup-form"
+        onsubmit="return window.confirmDedupDelete();">
+    <div class="dedup-bar app-surface">
+      <span class="muted">发现 {{ total_groups }} 组疑似重复。默认每组保留第一道、删除其余；勾选表示删除。</span>
+      <div class="spacer"></div>
+      <button type="button" class="btn btn-ghost" data-dedup-select="all">全选已加载</button>
+      <button type="button" class="btn btn-ghost" data-dedup-select="none">全不删</button>
+      <button type="submit" class="btn btn-ghost link-danger">删除勾选</button>
+    </div>
+    <div data-dedup-groups>
+      {% include "_dedup_groups.html" %}
+    </div>
+    <div class="dedup-more-row" data-dedup-more-row{% if not has_more %} hidden{% endif %}>
+      <button type="button" class="btn" data-dedup-more data-job-id="{{ job_id }}"
+              data-next-offset="{{ next_offset }}">继续加载结果</button>
+      <span class="muted">每次加载 20 组，避免几千组结果一次撑满页面。</span>
+    </div>
+  </form>
+{% else %}
+  <div class="app-empty-state app-surface">
+    <strong>没有发现重复题目</strong>
+    <p class="muted">可降低相似度阈值后重新扫描。</p>
+  </div>
+{% endif %}

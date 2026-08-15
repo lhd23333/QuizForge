@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}拆题审核 · QuizForge{% endblock %}
+{% block content %}
+<h2>拆题审核 · {{ filename }}</h2>
+<p class="muted">这是<strong>送 AI 之前</strong>的机械切块结果。题号切歪、两题粘一起、
+  解析被算进题干，在这里改比事后逐题改省事。改完选下面两种收尾方式之一。</p>
+{% if note %}<p class="bp-err">{{ note }}</p>{% endif %}
+
+<div class="prev-toolbar">
+  <button type="button" class="btn btn-ghost btn-sm" id="br-toggle-src">只看原文件</button>
+  <a class="btn btn-ghost btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_id) }}">返回看板</a>
+</div>
+
+<form method="post" id="block-review-form"
+      action="{{ url_for('batch_group_blocks_confirm', batch_id=batch_id, gid=gid) }}">
+  <input type="hidden" name="action" id="block-review-action">
+  <input type="hidden" name="blocks_json" id="block-review-json">
+
+  <div class="br-split">
+    <div class="br-pane br-pane-src">
+      {% if src_kind == 'pdf' %}
+      <iframe class="br-frame" src="{{ url_for('convert_file_view', job_id=job_id) }}"></iframe>
+      {% elif src_kind == 'image' %}
+      <img class="br-srcimg" src="{{ url_for('convert_file_view', job_id=job_id) }}" alt="原文件">
+      {% else %}
+      <p class="muted">这种格式没法内嵌预览，
+        <a href="{{ url_for('convert_file_view', job_id=job_id) }}">下载原文件</a>对照。</p>
+      {% endif %}
+    </div>
+
+    <div class="br-pane br-pane-blocks">
+      <p class="muted" id="br-count">共 0 块</p>
+      {# 块数据用 data-* 传：JS 里不写 Jinja。forceescape 不能省——
+         块正文里的引号会把属性提前截断。 #}
+      <div id="br-list"
+           data-blocks="{{ blocks | tojson | forceescape }}"
+           data-imgbase="{{ url_for('batch_group_block_image', batch_id=batch_id, gid=gid, name='') }}">
+      </div>
+    </div>
+  </div>
+
+  <div class="batch-actions">
+    <button type="button" class="btn" data-br-submit="skip">机械渲染入库（不花额度）</button>
+    <button type="button" class="btn btn-primary" data-br-submit="ai">送 AI 规范化</button>
+  </div>
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_v('js/block-review.js') }}" defer></script>
+{% endblock %}

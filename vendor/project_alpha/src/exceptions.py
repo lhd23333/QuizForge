@@ -15,6 +15,10 @@ class ConfigError(PDFNormalizerError):
 class MinerUAPIError(PDFNormalizerError):
     """MinerU API 调用错误（上传失败、轮询超时、返回码异常等）。"""
 
+    def __init__(self, message: str, *, code=""):
+        super().__init__(message)
+        self.code = str(code or "")
+
 
 class DeepSeekAPIError(PDFNormalizerError):
     """DeepSeek API 调用错误。"""
