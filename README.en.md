@@ -8,9 +8,9 @@ A complete toolchain for "PDF/image exam → OCR → AI normalization → questi
 
 ## Desktop prototype
 
-Install `build/installer/QuizForge-0.15.3-beta-Setup.exe` to try the latest generated Windows beta installer. The setup provides Start Menu and optional desktop shortcuts plus a standard uninstaller. Python and Obsidian are not required.
+Install `build/installer/QuizForge-0.17.0-beta-Setup.exe` to try the current Windows beta installer. The setup provides Start Menu and optional desktop shortcuts plus a standard uninstaller. Python and Obsidian are not required.
 
-The current source and daily installed build are version `0.17.0-beta` (file version `0.17.0.0`). This update built only the desktop directory and copied it over the local installation, so no `0.17.0-beta` installer was generated. The latest installer remains `0.15.3-beta`: 61,605,232 bytes, SHA-256 `D09BC2E10CB0237E0B3A9544E0341014274F64043426B35B4A16BC0F269E5DC7`.
+The source, setup package, and daily installed build are all version `0.17.0-beta` (file version `0.17.0.0`). The setup is 61,622,643 bytes with SHA-256 `4DE8D3D9D038C6C6F7A3E5429472015C8818CF2850FEE0388DE34BA1CA2FFB1F`. An isolated in-place upgrade from `0.15.3-beta` to `0.17.0-beta` preserved both the uninstaller and user data.
 
 Updates do not require uninstalling first: run the newer setup and keep the existing installation directory. Program files live in that directory, while bank registration, conversion tasks, encrypted credentials, device identity, and the licence remain under `%LOCALAPPDATA%\QuizForge` or the user-selected bank directories. The closed beta intentionally has no online auto-updater; setup packages are rebuilt only for an explicit release.
 
@@ -100,7 +100,9 @@ API keys are encrypted with Fernet and stored under `data/` in `providers.json`,
   config.py               Paths and constants
   filestore.py             File-based bank storage layer (one .md per question)
   importer.py              Markdown question-splitting logic
+  import_defaults.py       Default imported-image placement and layout rules
   exporter.py               PDF export (pandoc + xelatex)
+  export_tables.py         Shared HTML/Markdown table row parsing
   converter.py             Unified OCR-backend and downstream splitting adapter
   pdf_collection.py        Pre-OCR splitting and pairing for bookmarked collections
   collection_structure.py  Post-OCR grouping and strict pairing for unbookmarked collections

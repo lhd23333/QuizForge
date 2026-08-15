@@ -8,9 +8,9 @@
 
 ## 独立桌面初版
 
-`build/installer/QuizForge-0.15.3-beta-Setup.exe` 是最近一次生成的 Windows 封闭内测安装包；支持中文安装向导、当前用户安装、开始菜单/可选桌面快捷方式和标准卸载，不需要安装 Python，也不依赖 Obsidian。目录版保留在 `build/desktop/QuizForge/QuizForge.exe`，供开发验收和不生成安装包的本机直接更新使用。
+`build/installer/QuizForge-0.17.0-beta-Setup.exe` 是当前 Windows 封闭内测安装包；支持中文安装向导、当前用户安装、开始菜单/可选桌面快捷方式和标准卸载，不需要安装 Python，也不依赖 Obsidian。目录版保留在 `build/desktop/QuizForge/QuizForge.exe`，供开发验收和不生成安装包的本机直接更新使用。
 
-当前源码与日常安装版为 `0.17.0-beta`（文件版本 `0.17.0.0`）；本轮按要求只构建目录版并直接覆盖现有安装目录，没有生成 `0.17.0-beta` 安装包。最近的 `0.15.3-beta` 安装包为 61,605,232 字节，SHA-256 为 `D09BC2E10CB0237E0B3A9544E0341014274F64043426B35B4A16BC0F269E5DC7`。
+当前源码、安装包与日常安装版均为 `0.17.0-beta`（文件版本 `0.17.0.0`）。安装包为 61,622,643 字节，SHA-256 为 `4DE8D3D9D038C6C6F7A3E5429472015C8818CF2850FEE0388DE34BA1CA2FFB1F`；已用隔离数据完成 `0.15.3-beta → 0.17.0-beta` 原位覆盖升级，卸载器与用户数据均保留。
 
 更新时不需要先卸载：正式分发可运行新版安装包并沿用原安装目录；只更新本机时可执行 `.\update_installed.ps1 -DirectBundle`，只重建桌面目录并覆盖程序文件，不生成安装包。题库登记、转换任务、加密密钥、OCR／LLM 配置、设备身份和许可证独立保存在 `%LOCALAPPDATA%\QuizForge` 或用户选择的题库目录，更新器会在覆盖与启动前后核对这些受保护数据。当前内测阶段不启用联网自动更新；只有明确需要对外发布时才重新构建安装包。
 
@@ -147,7 +147,9 @@ API Key 使用 Fernet 对称加密后存储在 `data/.enc_key`（密钥文件）
   config.py               路径与常量配置
   filestore.py             文件式题库存储层（每题一个 .md）
   importer.py              Markdown 题目切分逻辑
+  import_defaults.py       导入图片默认位置与排列规则
   exporter.py               PDF 导出（pandoc + xelatex）
+  export_tables.py         页面与导出共用的表格行列解析
   handouts.py               讲义 schema、快照、标记与安全原子存储
   handout_exporter.py       讲义 PDF/TeX/ZIP 导出适配层
   converter.py             OCR 后端与下游拆题方式的统一转换层
