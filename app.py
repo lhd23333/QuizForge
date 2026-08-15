@@ -22,6 +22,7 @@ import license_manager
 import device_identity
 import desktop_product
 import qrender
+import import_defaults
 import dedup
 import converter
 import blocksplit
@@ -103,7 +104,7 @@ def _too_large(_e):
 
 # 题目正文里的图片引用：Obsidian 双链嵌入 ![[filename]]（可带 |alt 后缀）——
 # 由 converter/save_image 写入，filename 只在 config.ASSETS_DIR 下找。
-_QIMG_RE = re.compile(r"!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]")
+_QIMG_RE = import_defaults.QIMG_RE
 
 
 @app.template_filter("qimage")
@@ -4698,56 +4699,19 @@ def _import_image_defaults(qtype: str, body: str, requested_mode: str = "",
     规则；否则按科目、题型和图片数量选位置。``requested_*`` 来自人工校对页，合法值
     永远优先，用户手改不能被默认值覆盖。
     """
-    image_count = len(_QIMG_RE.findall(body or ""))
-    if not image_count:
-        return None, [], "column"
-    allowed = {
-        "单选题": ("pair", "opts", "full", "between", "after"),
-        "多选题": ("pair", "opts", "full", "between", "after"),
-        "解答题": ("sub", "full", "between", "after"),
-        "填空题": ("full", "between", "after"),
-    }.get(qtype, ())
-    pair_default = (qtype in ("单选题", "多选题")
-                    and qrender.pair_applies(body, qtype))
-    if requested_mode in allowed:
-        mode = requested_mode
-    elif pair_default:
-        mode = "pair"
-    elif qtype in ("单选题", "多选题"):
-        mode = "between" if image_count > 1 else "opts"
-    elif qtype == "填空题":
-        mode = "between" if config.BANK_SUBJECT == "physics" else "full"
-    elif qtype == "解答题":
-        mode = "after" if config.BANK_SUBJECT == "physics" else "sub"
-    else:
-        mode = None
-
-    row_default = (
-        (qtype in ("单选题", "多选题") and image_count > 1 and not pair_default)
-        or (config.BANK_SUBJECT == "physics" and qtype in ("填空题", "解答题"))
+    return import_defaults.import_image_defaults(
+        qtype,
+        body,
+        subject=config.BANK_SUBJECT,
+        pair_applies=qrender.pair_applies,
+        requested_mode=requested_mode,
+        requested_flow=requested_flow,
     )
-    flow = (requested_flow if requested_flow in ("row", "column")
-            else "row" if row_default else "column")
-
-    # 一图一选项由专用网格控制，普通图片组的 stack/align 在这条路径上不应介入。
-    if mode == "pair":
-        return mode, [], flow
-    lead: dict = {"i": 0}
-    if config.BANK_SUBJECT == "physics" and qtype == "解答题":
-        lead["align"] = "center"
-    if image_count > 1 and flow == "column":
-        lead["stack"] = True
-    layouts = [lead] if len(lead) > 1 else []
-    return mode, layouts, flow
 
 
 def _import_solution_image_defaults(solution: str) -> tuple[str | None, list[dict]]:
     """解析图片默认图文混排；多图作为一个纵向视觉组，避免横排挤压推导文字。"""
-    image_count = len(_QIMG_RE.findall(solution or ""))
-    if not image_count:
-        return None, []
-    layouts = [{"i": 0, "stack": True}] if image_count > 1 else []
-    return "full", layouts
+    return import_defaults.import_solution_image_defaults(solution)
 
 
 def _read_import_images(idx: int) -> list[tuple[bytes, str]]:

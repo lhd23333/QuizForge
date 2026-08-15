@@ -85,6 +85,8 @@ exporter.py         PDF 导出：题目列表 → Markdown → pandoc → xelate
 qrender.py          页面侧题目正文结构化渲染
                     ——选项分列/图片位置/表格解析与 exporter 共享规则
                     ——题干与解析各自消费图片分栏设置；公式不碰（留给前端 KaTeX）
+import_defaults.py  新导入题目的图片位置、方向与逐图布局默认规则
+                    ——只接收科目和配对判定，不读取 Flask 请求或题库
 handouts.py         讲义 schema、题目快照、Markdown 往返与安全原子存储
 handout_exporter.py 讲义题卡局部编译及 PDF/TeX/ZIP 导出适配
 importer.py         Markdown 题目切分与题号提取
