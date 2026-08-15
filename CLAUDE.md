@@ -22,6 +22,9 @@ python app.py
 .venv\Scripts\python.exe -m py_compile filestore.py exporter.py converter.py pdf_collection.py collection_structure.py ocr_pool.py mineru_store.py doc2x_client.py doc2x_store.py imgorder.py blockpipe.py blocksplit.py blocknorm.py mechfix.py importer.py dedup.py llm_client.py providers.py qrender.py task_store.py cleanup_output.py corpus.py tools\eval_doc2x.py
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 
+# 一键运行完整源码验证；构建目录版后去掉 -SkipBundleScan 可同时检查发行文件
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1 -SkipBundleScan
+
 # 模板语法检查
 .venv\Scripts\python.exe -c "from app import app; [app.jinja_env.get_template(t) for t in app.jinja_env.list_templates()]"
 

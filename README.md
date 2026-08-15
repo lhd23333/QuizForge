@@ -32,6 +32,12 @@ npm.cmd run build:handouts
 .\build_installer.ps1
 ```
 
+提交或发布前可统一运行完整源码验证；生成桌面目录版后去掉 `-SkipBundleScan`，会继续检查发行文件中是否混入源码或私密数据：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1 -SkipBundleScan
+```
+
 桌面构建脚本优先选择可用的 Nuitka；当前 Python 3.13 且没有 MSVC 时自动回落到 PyInstaller。安装器使用 Inno Setup 6。正式收费发布前还需购买/确认 Inno Setup 商业使用许可、替换内测许可文本、做 Windows 代码签名，并考虑用 MSVC + Nuitka 加强逆向门槛；当前内测包不应宣称“无法逆向”。
 
 封闭内测许可证由发布者在开发机离线签发，私钥不进入项目发行目录。建议使用本地台账工具统一管理；以下命令把 SQLite 台账、签发文件和当前 beta 密钥副本放在仓库外的“文档/QuizForgePublisher”，与已经内置该公钥的 `0.15.3-beta` 安装包直接配套：
