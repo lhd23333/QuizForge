@@ -93,6 +93,8 @@ SELECTIONS_PATH = BANK_STATE_DIR / "selections.json"
 # 应用读取。源码/Obsidian 模式默认不强制，独立桌面入口会显式开启校验。
 LICENSE_PATH = DATA_DIR / "license.qflicense"
 LICENSE_PUBLIC_KEY_PATH = BASE_DIR / "assets" / "license_public_key.pem"
+# Pandoc 的 Word 样式模板是只读发行资源，不存放任何用户内容。
+WORD_REFERENCE_DOCX = BASE_DIR / "assets" / "word-reference.docx"
 # 设备身份只包含随机秘密的 Windows DPAPI 密文，不采集主板、硬盘或题库信息。
 # 与许可证一样放在用户数据目录，升级/卸载应用都不能把它当安装资源覆盖。
 DEVICE_IDENTITY_PATH = DATA_DIR / "device_identity.dat"
