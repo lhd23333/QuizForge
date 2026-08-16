@@ -1,6 +1,7 @@
 """题库首页 Word 语义导出的回归测试。"""
 
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -170,6 +171,65 @@ class WordContentTests(unittest.TestCase):
                         word_exporter.ExportError, "图片路径无效"):
                     word_exporter.stage_word_images(
                         questions, root / "work", "word_test")
+
+
+class WordPipelineTests(unittest.TestCase):
+    def test_export_invokes_pandoc_with_reference_doc_and_argument_array(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "output"
+            assets = root / "assets"
+            assets.mkdir()
+            commands = []
+
+            def fake_pandoc(command, *, cwd):
+                commands.append((command, cwd))
+                target = Path(command[command.index("-o") + 1])
+                shutil.copy2(config.WORD_REFERENCE_DOCX, target)
+
+            with (mock.patch.object(config, "OUTPUT_DIR", output),
+                  mock.patch.object(config, "ASSETS_DIR", assets),
+                  mock.patch.object(word_exporter, "_run_pandoc", fake_pandoc)):
+                result = word_exporter.export(
+                    sample_questions(), title="含 空格", fmt="docx", mode="list")
+
+            self.assertEqual(result.suffix, ".docx")
+            self.assertTrue(result.is_file())
+            self.assertEqual(len(commands), 1)
+            command, cwd = commands[0]
+            self.assertIsInstance(command, list)
+            self.assertIn("--reference-doc", command)
+            self.assertIn(str(config.WORD_REFERENCE_DOCX), command)
+            self.assertEqual(cwd, result.parent)
+
+    def test_pandoc_failure_removes_partial_work_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "output"
+            assets = root / "assets"
+            assets.mkdir()
+
+            def failed_pandoc(command, *, cwd):
+                Path(command[command.index("-o") + 1]).write_bytes(b"partial")
+                raise word_exporter.ExportError("Pandoc 生成 Word 失败：测试错误")
+
+            with (mock.patch.object(config, "OUTPUT_DIR", output),
+                  mock.patch.object(config, "ASSETS_DIR", assets),
+                  mock.patch.object(word_exporter, "_run_pandoc", failed_pandoc)):
+                with self.assertRaisesRegex(
+                        word_exporter.ExportError, "Pandoc 生成 Word 失败"):
+                    word_exporter.export(
+                        sample_questions(), title="失败测试", fmt="docx")
+
+            self.assertFalse(any(output.glob("word_*")))
+
+    def test_word_export_rejects_pdf_only_options(self):
+        with self.assertRaisesRegex(word_exporter.ExportError, "底色"):
+            word_exporter.export(
+                sample_questions(), fmt="docx", paper_tone="cream")
+        with self.assertRaisesRegex(word_exporter.ExportError, "WIMath"):
+            word_exporter.export(
+                sample_questions(), fmt="docx", wimath_logo=True)
 
 
 if __name__ == "__main__":

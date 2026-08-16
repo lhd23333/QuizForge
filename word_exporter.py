@@ -7,11 +7,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import json
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import threading
 from typing import Iterable
+import uuid
 
 import config
 import export_tables
@@ -42,6 +47,7 @@ _QIMG_RE = re.compile(r"!\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
 _WORD_IMAGE_EXTENSIONS = frozenset({
     ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp",
 })
+_EXPORT_SLOTS = threading.BoundedSemaphore(2)
 
 
 @dataclass(frozen=True)
@@ -358,3 +364,129 @@ def build_word_plan(questions, *, title, mode, keypoints="", fullpage_ids=None,
         markdown="\n\n".join(block for block in blocks if block).rstrip() + "\n",
         sections=tuple(sections),
     )
+
+
+def _run_pandoc(command: list[str], *, cwd: Path) -> None:
+    """用参数数组执行 Pandoc，并把外部错误收敛成产品错误。"""
+    try:
+        process = subprocess.run(
+            command,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            shell=False,
+        )
+    except FileNotFoundError:
+        raise ExportError("未找到 Pandoc，请到“关于与环境”检查 Word 导出环境") from None
+    except OSError as exc:
+        raise ExportError(f"无法启动 Pandoc：{exc}") from exc
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "未知错误").strip()
+        if len(detail) > 2000:
+            detail = detail[-2000:]
+        raise ExportError(f"Pandoc 生成 Word 失败：{detail}")
+
+
+def _cleanup_success_inputs(work_dir: Path, output_path: Path) -> None:
+    """DOCX 已嵌入媒体，成功后只保留最终取件文件。"""
+    for path in work_dir.iterdir():
+        if path == output_path:
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except OSError:
+            # 24 小时输出清理会再次处理；不能因清理警告撤销已经完整生成的 DOCX。
+            pass
+
+
+def export(questions: list[dict], title: str = "试卷", fmt: str = "docx",
+           mode: str = "list", keypoints: str = "", fullpage_ids=None,
+           header_footer: dict | None = None, solution_mode: str = "none",
+           std_opts: dict | None = None, paper_tone: str = "white",
+           wimath_logo: bool = False, bank_subject: str = "math") -> Path:
+    """生成可继续编辑的 DOCX，失败不暴露半成品。"""
+    if fmt != "docx":
+        raise ExportError("Word 导出器只接受 docx 格式")
+    if paper_tone not in ("", "white", None):
+        raise ExportError("纸张底色仅用于 PDF/TeX，Word 会使用客户端页面颜色")
+    if wimath_logo:
+        raise ExportError("WIMath 标志当前仅用于 PDF/TeX 导出")
+    if not questions:
+        raise ExportError("没有题目可导出")
+    reference = Path(config.WORD_REFERENCE_DOCX)
+    if (not reference.is_file() or reference.is_symlink()
+            or not zipfile_is_docx(reference)):
+        raise ExportError("Word 参考模板缺失或损坏，请重新安装 QuizForge")
+
+    import word_ooxml  # SectionSpec 定义在本模块，延迟导入避免模块初始化环。
+
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    work_dir = config.OUTPUT_DIR / f"word_{stamp}_{uuid.uuid4().hex}"
+    work_dir.mkdir()
+    markdown_path = work_dir / f"word_{stamp}.md"
+    part_path = work_dir / f"word_{stamp}.docx.part"
+    output_path = work_dir / f"word_{stamp}.docx"
+
+    with _EXPORT_SLOTS:
+        try:
+            staged, image_widths = stage_word_images(
+                questions, work_dir, f"word_{stamp}")
+            normalized = []
+            for question in staged:
+                copy = dict(question)
+                copy["body"] = normalize_word_markdown(copy.get("body", ""))
+                copy["solution"] = normalize_word_markdown(copy.get("solution", ""))
+                normalized.append(copy)
+            plan = build_word_plan(
+                normalized,
+                title=title,
+                mode=mode,
+                keypoints=normalize_word_markdown(keypoints),
+                fullpage_ids=fullpage_ids,
+                solution_mode=solution_mode,
+                std_opts=std_opts,
+                bank_subject=bank_subject,
+            )
+            plan = WordPlan(plan.markdown, plan.sections, image_widths)
+            markdown_path.write_text(plan.markdown, encoding="utf-8")
+            command = [
+                config.PANDOC,
+                str(markdown_path),
+                "--from", "markdown+fenced_divs+raw_attribute+pipe_tables+tex_math_dollars",
+                "--to", "docx",
+                "--reference-doc", str(reference),
+                "--resource-path", str(work_dir),
+                "-o", str(part_path),
+            ]
+            _run_pandoc(command, cwd=work_dir)
+            if not part_path.is_file():
+                raise ExportError("Pandoc 未生成 Word 文档")
+            word_ooxml.patch_docx(
+                part_path,
+                title=str(title or "试卷"),
+                sections=plan.sections,
+                header_footer=header_footer or {},
+            )
+            os.replace(part_path, output_path)
+            _cleanup_success_inputs(work_dir, output_path)
+            return output_path
+        except Exception:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
+
+
+def zipfile_is_docx(path: Path) -> bool:
+    """轻量检查参考模板，完整输出仍由 ``word_ooxml.validate_docx`` 校验。"""
+    import zipfile
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+        return {"[Content_Types].xml", "word/document.xml"} <= names
+    except (OSError, zipfile.BadZipFile):
+        return False

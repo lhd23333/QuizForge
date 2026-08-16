@@ -48,6 +48,19 @@ class ServicePortsTests(unittest.TestCase):
             self.assertEqual(result, Path("x.pdf"))
             call.assert_called_once_with([{"id": "q1"}], title="测试")
 
+    def test_local_gateway_dispatches_docx_after_license_gate(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "missing.json"
+            with (mock.patch.object(config, "SERVICE_PORTS_PATH", path),
+                  mock.patch.object(
+                      service_ports.word_exporter, "export",
+                      return_value=Path("x.docx")) as call):
+                result = service_ports.export_document(
+                    [{"id": "q1"}], title="测试", fmt="docx")
+            self.assertEqual(result, Path("x.docx"))
+            call.assert_called_once_with(
+                [{"id": "q1"}], title="测试", fmt="docx")
+
 
 class DesktopSettingsTests(unittest.TestCase):
     def test_desktop_config_roundtrip(self):

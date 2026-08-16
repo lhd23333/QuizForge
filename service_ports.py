@@ -15,6 +15,7 @@ import config
 import exporter
 import handout_exporter
 import license_manager
+import word_exporter
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,10 @@ def _require_local_export() -> None:
 
 
 def export_document(*args, **kwargs):
-    """统一试卷导出入口；初版只允许现有本地 Pandoc/XeLaTeX 链路。"""
+    """统一试卷导出入口；许可证通过后再选择本地语义导出器。"""
     _require_local_export()
+    if kwargs.get("fmt", "pdf") == "docx":
+        return word_exporter.export(*args, **kwargs)
     return exporter.export(*args, **kwargs)
 
 
