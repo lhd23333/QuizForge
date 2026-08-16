@@ -7,8 +7,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
+import re
+import shutil
 from typing import Iterable
 
+import config
+import export_tables
 from exporter import ExportError
 
 
@@ -31,6 +37,11 @@ _TYPE_KEYS = {
     "填空题": "blank",
     "解答题": "solve",
 }
+_EXPORT_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_QIMG_RE = re.compile(r"!\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
+_WORD_IMAGE_EXTENSIONS = frozenset({
+    ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp",
+})
 
 
 @dataclass(frozen=True)
@@ -50,6 +61,144 @@ class WordPlan:
     markdown: str
     sections: tuple[SectionSpec, ...]
     image_widths: tuple[tuple[str, int], ...] = ()
+
+
+def _pipe_cell(text: str) -> str:
+    return str(text or "").replace("|", r"\|").replace("\r", " ").replace("\n", " ")
+
+
+def _table_markdown(inner: str) -> str | None:
+    parsed = export_tables.html_table_rows(inner)
+    if not parsed:
+        return None
+    column_count = max(sum(span for _text, span in row) for row in parsed)
+    if column_count < 1:
+        return None
+    rows: list[list[str]] = []
+    for row in parsed:
+        expanded: list[str] = []
+        for text, span in row:
+            expanded.append(_pipe_cell(text))
+            expanded.extend([""] * (max(1, span) - 1))
+        expanded.extend([""] * (column_count - len(expanded)))
+        rows.append(expanded[:column_count])
+
+    def _line(cells: list[str]) -> str:
+        return "| " + " | ".join(cells) + " |"
+
+    separator = ["---"] * column_count
+    return "\n".join([_line(rows[0]), _line(separator), *(_line(row) for row in rows[1:])])
+
+
+def normalize_word_markdown(text: str) -> str:
+    """清理不可见 OCR 噪声，并把 HTML 表格改为 Pandoc 原生表格。"""
+    cleaned = _EXPORT_CONTROL_RE.sub("", str(text or "")).replace("\uf8f3", "")
+
+    def _replace_table(match: re.Match) -> str:
+        table = _table_markdown(match.group(1))
+        return match.group(0) if table is None else f"\n\n{table}\n\n"
+
+    return export_tables.TABLE_RE.sub(_replace_table, cleaned).rstrip()
+
+
+def _parse_image_layouts(value) -> dict[int, dict]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(value, list):
+        return {}
+    layouts: dict[int, dict] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        try:
+            index = int(item.get("i"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            width = int(item.get("w")) if item.get("w") not in (None, "") else None
+        except (TypeError, ValueError):
+            width = None
+        align = item.get("align")
+        layouts[index] = {
+            "width": max(10, min(100, width)) if width is not None else None,
+            "align": align if align in {"left", "center", "right"} else None,
+            "stack": bool(item.get("stack")),
+        }
+    return layouts
+
+
+def _safe_image_source(raw_name: str, question_number: int) -> Path:
+    name = str(raw_name or "").strip().replace("\\", "/")
+    if not name or "/" in name or Path(name).name != name:
+        raise ExportError(f"第 {question_number} 题图片路径无效：{raw_name}")
+    if Path(name).suffix.lower() not in _WORD_IMAGE_EXTENSIONS:
+        raise ExportError(f"第 {question_number} 题图片格式不支持 Word：{name}")
+    source = config.ASSETS_DIR / name
+    try:
+        assets_root = config.ASSETS_DIR.resolve(strict=True)
+        resolved = source.resolve(strict=True)
+    except OSError:
+        raise ExportError(f"第 {question_number} 题图片缺失：{name}") from None
+    if source.is_symlink() or resolved.parent != assets_root or not resolved.is_file():
+        raise ExportError(f"第 {question_number} 题图片路径无效：{name}")
+    return resolved
+
+
+def stage_word_images(questions: list[dict], work_dir: Path,
+                      stem: str) -> tuple[list[dict], tuple[tuple[str, int], ...]]:
+    """把 Obsidian 图片复制到独占目录并改写为安全的相对 Markdown 引用。"""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    cache: dict[Path, str] = {}
+    widths: list[tuple[str, int]] = []
+    counter = 0
+
+    def _stage_text(text: str, question: dict, question_number: int,
+                    *, solution: bool) -> str:
+        nonlocal counter
+        layouts = _parse_image_layouts(
+            question.get("sol_img_layouts" if solution else "img_layouts"))
+        occurrence = 0
+
+        def _replace(match: re.Match) -> str:
+            nonlocal counter, occurrence
+            source = _safe_image_source(match.group(1), question_number)
+            local_name = cache.get(source)
+            if local_name is None:
+                counter += 1
+                local_name = f"{stem}_img_{counter}{source.suffix.lower()}"
+                shutil.copy2(source, work_dir / local_name)
+                cache[source] = local_name
+
+            layout = layouts.get(occurrence, {})
+            fallback = question.get("img_width") if not solution and occurrence == 0 else None
+            try:
+                fallback_width = int(fallback) if fallback not in (None, "") else None
+            except (TypeError, ValueError):
+                fallback_width = None
+            width = layout.get("width") or fallback_width or 70
+            width = max(10, min(100, width))
+            occurrence += 1
+            widths.append((local_name, width))
+            image = f"![图片]({local_name}){{width={width}%}}"
+            align = layout.get("align")
+            if align:
+                return f'\n\n::: {{custom-style="Image{align.title()}"}}\n{image}\n:::\n\n'
+            return image
+
+        return _QIMG_RE.sub(_replace, str(text or ""))
+
+    staged: list[dict] = []
+    for question_number, question in enumerate(questions, start=1):
+        copy = dict(question)
+        copy["body"] = _stage_text(
+            copy.get("body", ""), copy, question_number, solution=False)
+        copy["solution"] = _stage_text(
+            copy.get("solution", ""), copy, question_number, solution=True)
+        staged.append(copy)
+    return staged, tuple(widths)
 
 
 def _styled(style: str, text: str) -> str:

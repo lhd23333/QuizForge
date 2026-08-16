@@ -1,7 +1,11 @@
 """题库首页 Word 语义导出的回归测试。"""
 
+from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
+import config
 import word_exporter
 
 
@@ -88,6 +92,84 @@ class WordPlanTests(unittest.TestCase):
         with self.assertRaisesRegex(word_exporter.ExportError, "不支持"):
             word_exporter.build_word_plan(
                 sample_questions(), title="非法模式", mode="unknown")
+
+
+class WordContentTests(unittest.TestCase):
+    def test_math_and_html_table_remain_pandoc_semantics(self):
+        text = (
+            "已知 $x^2$。\n\n"
+            "<table><tr><td>名称</td><td>值</td></tr>"
+            "<tr><td>A</td><td>$1$</td></tr></table>"
+        )
+
+        rendered = word_exporter.normalize_word_markdown(text)
+
+        self.assertIn("$x^2$", rendered)
+        self.assertIn("| 名称 | 值 |", rendered)
+        self.assertIn("| A | $1$ |", rendered)
+        self.assertNotIn("<table", rendered)
+        self.assertNotIn("\\begin{tabular}", rendered)
+
+    def test_pipe_table_is_kept_as_an_editable_table(self):
+        source = "| 项目 | 数值 |\n|---|---|\n| 甲 | $2$ |"
+
+        rendered = word_exporter.normalize_word_markdown(source)
+
+        self.assertEqual(rendered, source)
+
+    def test_stage_image_uses_safe_relative_name_and_width(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            assets = root / "assets"
+            work = root / "work"
+            assets.mkdir()
+            (assets / "diagram.png").write_bytes(b"valid-image-fixture")
+            questions = sample_questions()[:1]
+            questions[0]["body"] = "图示如下：\n\n![[diagram.png]]"
+            questions[0]["img_layouts"] = [
+                {"i": 0, "w": 42, "align": "center"},
+            ]
+
+            with mock.patch.object(config, "ASSETS_DIR", assets):
+                staged, widths = word_exporter.stage_word_images(
+                    questions, work, "word_test")
+
+            self.assertIn("word_test_img_1.png", staged[0]["body"])
+            self.assertNotIn(str(assets), staged[0]["body"])
+            self.assertEqual(widths, (("word_test_img_1.png", 42),))
+            self.assertEqual(
+                (work / "word_test_img_1.png").read_bytes(),
+                b"valid-image-fixture",
+            )
+
+    def test_missing_image_reports_question_and_resource(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            assets = root / "assets"
+            assets.mkdir()
+            questions = sample_questions()[:1]
+            questions[0]["body"] = "![[missing.png]]"
+
+            with mock.patch.object(config, "ASSETS_DIR", assets):
+                with self.assertRaisesRegex(
+                        word_exporter.ExportError, "第 1 题.*missing.png"):
+                    word_exporter.stage_word_images(
+                        questions, root / "work", "word_test")
+
+    def test_image_path_cannot_escape_assets_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            assets = root / "assets"
+            assets.mkdir()
+            (root / "outside.png").write_bytes(b"outside")
+            questions = sample_questions()[:1]
+            questions[0]["body"] = "![[../outside.png]]"
+
+            with mock.patch.object(config, "ASSETS_DIR", assets):
+                with self.assertRaisesRegex(
+                        word_exporter.ExportError, "图片路径无效"):
+                    word_exporter.stage_word_images(
+                        questions, root / "work", "word_test")
 
 
 if __name__ == "__main__":
