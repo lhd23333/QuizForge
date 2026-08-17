@@ -5,10 +5,10 @@
 ## 提交前检查
 
 - [ ] GitHub 账号已启用多因素认证。
-- [ ] `Windows release candidate` GitHub Actions 在公开 `master` 提交上完整通过。
-- [ ] 仓库首页和下载入口能看到 `Code signing policy` 链接与 SignPath 署名。
-- [ ] 代码签名政策列明构建来源、签名范围、角色、人工批准和隐私声明。
-- [ ] 隐私政策准确描述更新检查和用户自选第三方 OCR／模型服务。
+- [x] [`Windows release candidate` #3](https://github.com/lhd23333/QuizForge/actions/runs/32049277954) 已在公开 `master` 提交上完整通过。
+- [x] 仓库首页和下载入口能看到 `Code signing policy` 链接与 SignPath 署名。
+- [x] 代码签名政策列明构建来源、签名范围、角色、人工批准和隐私声明。
+- [x] 隐私政策准确描述更新检查和用户自选第三方 OCR／模型服务。
 - [ ] 已准备可核验的公开发布或采用情况证据；不虚构 Star、下载量、媒体报道或社区规模。
 
 SignPath 条款要求项目已经发布、持续维护并具有可核验信誉。QuizForge 当前属于新公开项目，即使技术材料齐全，是否满足信誉门槛仍由 SignPath Foundation 独立审核。
