@@ -59,6 +59,10 @@ jobs:
 
       - name: Verify source
         shell: pwsh
+        env:
+          # Runner 用户目录可能以 8.3 短路径暴露；统一到规范路径，避免同一目录被误判为两个题库。
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1 -SkipBundleScan
 
       - name: Build unsigned desktop bundle
