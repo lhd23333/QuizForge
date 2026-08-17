@@ -54,13 +54,15 @@ class ReleasePolicyTests(unittest.TestCase):
         self.assertNotRegex(raw, r"\bgh\s+release\b")
         self.assertNotIn("release-action", raw)
 
-        verify_step = next(
+        verify_steps = [
             step
             for step in data["jobs"]["build"]["steps"]
-            if step.get("name") == "Verify source"
-        )
-        self.assertEqual("${{ runner.temp }}", verify_step["env"]["TEMP"])
-        self.assertEqual("${{ runner.temp }}", verify_step["env"]["TMP"])
+            if step.get("name") in {"Verify source", "Verify release bundle"}
+        ]
+        self.assertEqual(2, len(verify_steps))
+        for step in verify_steps:
+            self.assertEqual("${{ runner.temp }}", step["env"]["TEMP"])
+            self.assertEqual("${{ runner.temp }}", step["env"]["TMP"])
 
         uses = re.findall(r"^\s*uses:\s*([^\s#]+)", raw, re.MULTILINE)
         self.assertGreaterEqual(len(uses), 4)

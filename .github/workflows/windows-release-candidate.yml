@@ -84,6 +84,9 @@ jobs:
 
       - name: Verify release bundle
         shell: pwsh
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
         run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1
 
       - name: Confirm unsigned candidate and record digest
