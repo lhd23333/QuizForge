@@ -77,9 +77,19 @@ python -m venv .venv
 - [CHANGELOG](CHANGELOG.md)：了解每个版本增加、修复和移除了什么。
 - [参与贡献](CONTRIBUTING.md)：搭建开发环境、提交 Issue 或 Pull Request。
 - [安全策略](SECURITY.md)：私密报告安全问题，避免公开真实密钥或题库。
+- [隐私政策](PRIVACY.md)：查看主动更新检查与用户自选第三方服务的联网边界。
+- [Code signing policy](docs/CODE_SIGNING_POLICY.md)：查看 Windows 构建来源、签名角色与人工批准规则。
 - [发布维护手册](docs/RELEASING.md)：维护者构建新版本、发布 GitHub Release 和开启一键更新的完整流程。
 
 QuizForge 按 [GNU GPL v3.0 或更高版本](LICENSE) 开源。你可以在许可证允许的范围内使用、研究、修改和再分发。
+
+### Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation
+
+服务链接：[SignPath.io](https://signpath.io/) · [SignPath Foundation](https://signpath.org/)
+
+SignPath Foundation 审核尚未完成。当前 GitHub Actions 只构建短期保留的未签名候选供来源验证，不创建 Release；公开安装包必须在签名、哈希复验和覆盖升级验收全部完成后发布。角色、构建来源和隐私声明见 [完整代码签名政策](docs/CODE_SIGNING_POLICY.md)。
 
 <details>
 <summary><strong>开发、构建与实现细节</strong></summary>
@@ -96,7 +106,7 @@ QuizForge 按 [GNU GPL v3.0 或更高版本](LICENSE) 开源。你可以在许�
 
 ## 独立桌面初版
 
-源码与日常安装目录版已经定稿为 `1.0.0`（文件版本 `1.0.0.0`）。本机已生成未签名的 Setup 发布候选用于构建验收；它不是公开发行包，也不会上传到 Releases。公开安装包将在可信 Windows 代码签名和覆盖升级验收完成后发布。
+源码与日常安装目录版已经定稿为 `1.0.0`（文件版本 `1.0.0.0`）。本机和 GitHub Actions 生成的未签名 Setup 候选只用于构建验收与 SignPath 接入；它们不是公开发行包，也不会上传到 Releases。公开安装包将在可信 Windows 代码签名和覆盖升级验收完成后发布。
 
 历史 `0.17.0-beta` 测试包只保留在维护者本机，不进入仓库。发布前的目录版原位覆盖已经验证：程序升级到 `1.0.0` 后，题库登记、任务状态、OCR／LLM 配置、界面设置及历史兼容文件均保持不变。
 

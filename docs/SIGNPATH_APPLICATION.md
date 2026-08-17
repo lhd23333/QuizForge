@@ -1,0 +1,54 @@
+# SignPath Foundation 申请清单
+
+本页记录 QuizForge 的非个人申请信息。真实姓名、邮箱、协议勾选和最终提交必须由维护者本人在 [SignPath Foundation 申请页](https://signpath.org/apply) 完成，不写入仓库。
+
+## 提交前检查
+
+- [ ] GitHub 账号已启用多因素认证。
+- [ ] `Windows release candidate` GitHub Actions 在公开 `master` 提交上完整通过。
+- [ ] 仓库首页和下载入口能看到 `Code signing policy` 链接与 SignPath 署名。
+- [ ] 代码签名政策列明构建来源、签名范围、角色、人工批准和隐私声明。
+- [ ] 隐私政策准确描述更新检查和用户自选第三方 OCR／模型服务。
+- [ ] 已准备可核验的公开发布或采用情况证据；不虚构 Star、下载量、媒体报道或社区规模。
+
+SignPath 条款要求项目已经发布、持续维护并具有可核验信誉。QuizForge 当前属于新公开项目，即使技术材料齐全，是否满足信誉门槛仍由 SignPath Foundation 独立审核。
+
+## 项目信息
+
+| 字段 | 内容 |
+|---|---|
+| Project Name | `QuizForge` |
+| Repository URL | `https://github.com/lhd23333/QuizForge` |
+| Homepage URL | `https://github.com/lhd23333/QuizForge` |
+| Download URL | 首个公开下载页满足 SignPath 署名要求后再填写；不得指向空 Releases 页面 |
+| Privacy Policy URL | `https://github.com/lhd23333/QuizForge/blob/master/PRIVACY.md` |
+| Wikipedia URL | 留空 |
+| Maintainer Type | `Individual maintainer(s)` |
+| Build System | `GitHub Actions` |
+| Company Name | 留空 |
+| Primary Discovery Channel | `AI / LLM tools` |
+| Exact source | `OpenAI Codex` |
+
+### Tagline
+
+```text
+A local-first Windows app for building searchable question banks and editable teaching materials.
+```
+
+### Description
+
+```text
+QuizForge is an open-source, local-first Windows application for educators and students. It turns exam documents into a structured question bank, supports organizing and reviewing questions, composing handouts and papers, and exporting reusable teaching materials while keeping user data and API credentials under the user's control.
+```
+
+### Reputation
+
+提交当天按 GitHub 公开数据更新数字，并只陈述能够提供链接验证的事实：
+
+```text
+QuizForge is a newly open-sourced GPL-3.0-or-later project and is actively maintained. The public repository includes an automated Windows build, an extensive Python and frontend test suite, documented release and security processes, contribution guidelines, and a public issue tracker. Public evidence: https://github.com/lhd23333/QuizForge and https://github.com/lhd23333/QuizForge/actions
+```
+
+## 个人字段与协议
+
+`First Name`、`Last Name` 使用维护者愿意用于 SignPath 账号的真实姓名；`Email` 使用长期有效并能接收审核通知的地址。必须亲自阅读并同意 Code of Conduct 与必要的数据处理条款；营销通信不是申请必需项，可以不勾选。

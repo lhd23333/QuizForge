@@ -26,11 +26,13 @@ GitHub Release 中的已签名 Setup
 
 Windows 代码签名证书是包含发布者身份和私钥控制证明的 Authenticode 证书。发布时用私钥给 `QuizForge.exe` 与 Setup 签名，并附加可信时间戳；Windows 和更新器据此确认文件由同一发布者提供，且签名后没有被修改。证书私钥不得进入仓库、安装包或服务器明文配置。
 
-公开发行应使用受 Windows 信任的 OV／EV 代码签名证书，或通过 SignPath 等面向开源项目的托管签名服务完成签名。自签名证书只适合本机流程测试，不能替代正式发行证书，也不会消除普通用户看到的未知发布者警告。
+公开发行应使用受 Windows 信任的 OV／EV 代码签名证书，或通过 SignPath 等面向开源项目的托管签名服务完成签名。自签名证书只适合本机流程测试，不能替代正式发行证书，也不会消除普通用户看到的未知发布者警告。QuizForge 当前选择申请 SignPath Foundation，公开政策见 [`CODE_SIGNING_POLICY.md`](CODE_SIGNING_POLICY.md)，申请准备清单见 [`SIGNPATH_APPLICATION.md`](SIGNPATH_APPLICATION.md)。
 
 ## 发布前准备
 
-发布机需要 Windows、项目虚拟环境、Node.js、Inno Setup 6、Windows SDK 的 `signtool.exe`，以及安装在当前用户或计算机证书存储中的代码签名证书。私钥和证书密码不得进入仓库、脚本参数示例或 GitHub Release。
+使用本地 OV／EV 证书时，发布机需要 Windows、项目虚拟环境、Node.js、Inno Setup 6、Windows SDK 的 `signtool.exe`，以及安装在当前用户或计算机证书存储中的代码签名证书。私钥和证书密码不得进入仓库、脚本参数示例或 GitHub Release。
+
+SignPath 路径使用 `.github/workflows/windows-release-candidate.yml` 证明公开源码到未签名候选的构建来源。该工作流只有 `contents: read` 权限，不读取仓库 Secret，不创建 tag 或 Release；Pandoc 从固定官方地址下载并逐文件校验 SHA-256。SignPath 审核通过前，它上传的 14 天候选只能用于构建验证，不得公开分发。审核通过后再按 SignPath 分配的组织、项目和 Artifact Configuration 接入官方签名步骤，不能预先虚构配置标识。
 
 正式版本使用三段式版本号，例如 `0.18.0`，不带 `beta` 后缀。版本选择遵循根级 `docs/VERSIONING.md`：新增用户能力提升 MINOR，只有修复与文案调整才提升 PATCH。
 
@@ -64,6 +66,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 ### 3. 构建并签名安装包
 
+#### 本地 OV／EV 证书
+
 把代码签名证书的 SHA-1 指纹放入当前 PowerShell 进程环境，不要写进脚本：
 
 ```powershell
@@ -76,6 +80,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```
 
 `build_installer.ps1` 会构建桌面目录版，签名 `QuizForge.exe`，编译 Setup，再签名安装包。正式三段式版本没有证书时脚本会直接中止；`-AllowUnsigned` 只供本地实验，不得用于公开一键更新。
+
+#### SignPath Foundation
+
+推送公开提交后，先确认 [Windows release candidate](https://github.com/lhd23333/QuizForge/actions/workflows/windows-release-candidate.yml) 完整通过。当前工作流只证明构建可复现并产生未签名候选；SignPath 审核通过后，正式流程必须依次让 `QuizForge.exe` 和最终 Setup 获得受信任签名，且每次签名请求由 Approver 手动批准。只签外层 Setup、让内层主程序保持未签名，不算完成。
+
+最终产物无论来自本地证书还是 SignPath，都继续执行下列发行扫描、签名与摘要检查；签名服务成功状态不能替代本机 `Get-AuthenticodeSignature` 复验。
 
 对最终目录版再次运行包含发行扫描的完整检查：
 
@@ -115,7 +125,7 @@ git push origin master
 git push origin "v$version"
 ```
 
-在 GitHub 的 Releases 页面选择刚推送的 tag，创建正式 Release，上传 `QuizForge-$version-Setup.exe`。Release 说明从对应 CHANGELOG 段落整理，至少写清新增、修复、兼容影响与已知限制。也可以在安装好 GitHub CLI 后使用 `gh release create`，但不要把签名私钥交给 GitHub Actions。
+在 GitHub 的 Releases 页面选择刚推送的 tag，创建正式 Release，上传 `QuizForge-$version-Setup.exe`。Release 说明从对应 CHANGELOG 段落整理，至少写清新增、修复、兼容影响与已知限制，并包含 `Free code signing provided by SignPath.io, certificate by SignPath Foundation` 以及 [Code signing policy](CODE_SIGNING_POLICY.md) 链接。也可以在安装好 GitHub CLI 后使用 `gh release create`，但不要把签名私钥交给 GitHub Actions。
 
 发布后从 GitHub 实际下载一次安装包，重新计算 SHA-256 并复验 Authenticode。用于更新清单的必须是用户最终下载到的那个文件，而不是上传前的临时副本。
 

@@ -19,7 +19,11 @@ runtime/
 
 Pandoc 以未经修改的独立命令行程序聚合分发；发行目录必须同时含 GPL 文本、版权
 声明和该二进制版本的对应源码归档，不得只复制 `pandoc.exe`。总体第三方说明见
-`installer/THIRD_PARTY_NOTICES-preview.md`。
+`installer/THIRD_PARTY_NOTICES.md`。
+
+干净的 GitHub Actions Runner 通过 `tools/prepare_ci_runtime.ps1` 从 Pandoc 官方
+Release、上游源码仓库和 Hackage 下载固定版本，并在写入本目录前校验每个文件的
+SHA-256。哈希不匹配时立即停止构建，不回退到浮动版本或其他镜像。
 
 TeX 仍兼容 `runtime/tex/bin/windows/` 与 MiKTeX 风格的
 `runtime/tex/miktex/bin/x64/`。只有完成体积、更新和许可证审计后，才能随商业包加入。

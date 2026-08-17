@@ -13,9 +13,10 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $desktopDist = Join-Path $projectRoot "build\desktop\QuizForge"
 $pandoc = Join-Path $projectRoot "runtime\pandoc\pandoc.exe"
 $pandocLicense = Join-Path $projectRoot "runtime\pandoc\licenses\COPYING.md"
+$pandocCopyright = Join-Path $projectRoot "runtime\pandoc\licenses\COPYRIGHT"
 $pandocSource = Join-Path $projectRoot "runtime\pandoc\source\pandoc-3.9.0.2.tar.gz"
 
-foreach ($required in @($pandoc, $pandocLicense, $pandocSource)) {
+foreach ($required in @($pandoc, $pandocLicense, $pandocCopyright, $pandocSource)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Required release component missing: $required"
     }

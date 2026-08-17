@@ -23,5 +23,6 @@ npm.cmd run test:handouts
 - 修改用户可感知行为时同步 `CHANGELOG.md`；改变长期产品边界时同步 `docs/PRODUCT.md`。
 - Python 改动至少通过语法检查和完整 `unittest`；前端改动同时运行相关 Node 测试并检查窄屏布局。
 - 新增依赖前说明必要性、许可证和安装体积影响。
+- 来自维护者之外的代码必须通过 Pull Request 审核后合并；构建脚本、GitHub Actions、依赖来源和签名配置属于高敏感发布边界，需要重点检查固定版本、权限与产物范围。
 
 提交 Pull Request 即表示你同意按项目的 `GPL-3.0-or-later` 许可贡献相应代码，并确认你有权提交这些内容。

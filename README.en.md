@@ -73,9 +73,19 @@ Open <http://127.0.0.1:5000>. This local service has no user authentication. **N
 - [CHANGELOG](CHANGELOG.md) for user-visible changes and known limitations.
 - [Contributing](CONTRIBUTING.md) for the development environment, issues, and pull requests.
 - [Security policy](SECURITY.md) for private vulnerability reports.
+- [Privacy policy](PRIVACY.md) for user-initiated update checks and user-selected third-party services.
+- [Code signing policy](docs/CODE_SIGNING_POLICY.md) for Windows build provenance, team roles, and manual approval.
 - [Release guide](docs/RELEASING.md) for maintainer builds, GitHub Releases, and the signed one-click update flow.
 
 QuizForge is licensed under the [GNU GPL v3.0 or later](LICENSE).
+
+### Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation
+
+Provider links: [SignPath.io](https://signpath.io/) · [SignPath Foundation](https://signpath.org/)
+
+SignPath Foundation approval is pending. GitHub Actions currently creates only a short-retention unsigned candidate for build verification and SignPath onboarding; it does not create a Release. Public installers require completed signing, digest verification, and in-place upgrade testing. See the [complete code signing policy](docs/CODE_SIGNING_POLICY.md) for build provenance, team roles, manual approval, and privacy details.
 
 <details>
 <summary><strong>Development, build, and implementation details</strong></summary>
@@ -84,7 +94,7 @@ The sections below retain the complete technical and compatibility notes. Regula
 
 ## Desktop prototype
 
-The source and daily installed build are finalized as `1.0.0` (file version `1.0.0.0`). An unsigned Setup release candidate has been built locally for packaging checks, but it is not a public release and will not be uploaded to Releases. The public installer will follow after trusted Windows code signing and in-place upgrade verification.
+The source and daily installed build are finalized as `1.0.0` (file version `1.0.0.0`). Unsigned Setup candidates built locally and by GitHub Actions are restricted to packaging verification and SignPath onboarding; they are not public releases and will not be uploaded to Releases. The public installer will follow after trusted Windows code signing and in-place upgrade verification.
 
 Historical `0.17.0-beta` test installers remain local to the maintainer and are not tracked in the repository. The pre-release direct-bundle update to `1.0.0` preserved bank registration, task state, OCR/LLM configuration, interface settings, and legacy compatibility files.
 

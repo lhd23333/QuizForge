@@ -1,0 +1,112 @@
+name: Windows release candidate
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-candidate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Verify and build unsigned Windows candidate
+    runs-on: windows-2025
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Read product version
+        id: version
+        shell: pwsh
+        run: |
+          $versionMatch = Select-String -Path desktop_product.py -Pattern '^PRODUCT_VERSION = "(\d+\.\d+\.\d+)"$'
+          if ($versionMatch.Matches.Count -ne 1) {
+            throw "desktop_product.py must contain one formal PRODUCT_VERSION"
+          }
+          $version = $versionMatch.Matches[0].Groups[1].Value
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "file_version=$version.0" >> $env:GITHUB_OUTPUT
+
+      - name: Install locked dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --disable-pip-version-check -r requirements-desktop.txt
+          npm.cmd ci
+
+      - name: Prepare verified third-party runtime
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\prepare_ci_runtime.ps1
+
+      - name: Verify source
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1 -SkipBundleScan
+
+      - name: Build unsigned desktop bundle
+        shell: pwsh
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File build_desktop.ps1
+          -Engine pyinstaller
+          -Version "${{ steps.version.outputs.version }}"
+          -FileVersion "${{ steps.version.outputs.file_version }}"
+
+      - name: Build unsigned Setup
+        shell: pwsh
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File build_installer.ps1
+          -Version "${{ steps.version.outputs.version }}"
+          -FileVersion "${{ steps.version.outputs.file_version }}"
+          -SkipDesktopBuild
+          -AllowUnsigned
+
+      - name: Verify release bundle
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1
+
+      - name: Confirm unsigned candidate and record digest
+        id: candidate
+        shell: pwsh
+        run: |
+          $setup = "build\installer\QuizForge-${{ steps.version.outputs.version }}-Setup.exe"
+          $exe = "build\desktop\QuizForge\QuizForge.exe"
+          foreach ($path in @($exe, $setup)) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $path
+            if ($signature.Status -ne "NotSigned") {
+              throw "The pre-SignPath candidate must be unsigned: $path ($($signature.Status))"
+            }
+          }
+          $sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
+          "setup_sha256=$sha256" >> $env:GITHUB_OUTPUT
+          "### Unsigned Windows candidate" >> $env:GITHUB_STEP_SUMMARY
+          "Version: ${{ steps.version.outputs.version }}" >> $env:GITHUB_STEP_SUMMARY
+          "Setup SHA-256: ``$sha256``" >> $env:GITHUB_STEP_SUMMARY
+          "This artifact is for build verification and SignPath onboarding only. It is not a public release." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload unsigned candidate for verification
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: QuizForge-${{ steps.version.outputs.version }}-unsigned-windows-candidate
+          path: |
+            build/desktop/QuizForge/QuizForge.exe
+            build/installer/QuizForge-${{ steps.version.outputs.version }}-Setup.exe
+          if-no-files-found: error
+          retention-days: 14
