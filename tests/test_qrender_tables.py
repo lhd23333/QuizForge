@@ -49,6 +49,21 @@ class QrenderTableTests(unittest.TestCase):
             "解析正文\n\n![[answer.png]]", sol_img_split="full"))
         self.assertIn('class="q-solution-flow-img"', html)
         self.assertIn('style="width:35.0%"', html)
+        self.assertLess(html.index("解析正文"),
+                        html.index('class="q-solution-flow-img"'))
+
+    def test_solution_wrap_starts_at_image_reference(self):
+        html = str(qrender.render_solution(
+            "图片前保持整行\n\n![[answer.png]]\n\n从这里开始环绕\n图片下恢复整行",
+            sol_img_split="full",
+        ))
+
+        self.assertLess(html.index("图片前保持整行"),
+                        html.index('class="q-solution-flow-img"'))
+        self.assertLess(html.index('class="q-solution-flow-img"'),
+                        html.index("从这里开始环绕"))
+        self.assertLess(html.index("从这里开始环绕"),
+                        html.index("图片下恢复整行"))
 
     def test_solution_wrap_group_direction_comes_from_first_image(self):
         source = "解析正文\n\n![[a.png]]\n![[b.png]]"

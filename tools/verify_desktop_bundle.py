@@ -5,15 +5,13 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-
 FORBIDDEN_NAMES = {
     ".enc_key",
     ".env",
     "desktop.json",
     "device_identity.dat",
+    "cloud_account.json",
+    "activation.json",
     "doc2x.json",
     "license.qflicense",
     "mineru.json",
@@ -28,6 +26,7 @@ PRIVATE_MARKERS = (
 )
 REQUIRED_HANDOUT_RESOURCES = (
     "assets/wimath-logo-latex-black.pdf",
+    "assets/word-reference.docx",
     "templates/handouts.html",
     "static/js/handout-editor.bundle.js",
     "static/js/katex/katex.min.css",
@@ -39,23 +38,6 @@ def scan(dist: Path, project_root: Path) -> list[str]:
     if not (dist / "QuizForge.exe").is_file():
         problems.append("缺少 QuizForge.exe")
         return problems
-
-    public_key_path = next(
-        (candidate for candidate in (
-            dist / "assets" / "license_public_key.pem",
-            dist / "_internal" / "assets" / "license_public_key.pem",
-        ) if candidate.is_file()),
-        None,
-    )
-    if public_key_path is None:
-        problems.append("缺少离线许可证公钥 assets/license_public_key.pem")
-    else:
-        try:
-            key = serialization.load_pem_public_key(public_key_path.read_bytes())
-            if not isinstance(key, Ed25519PublicKey):
-                problems.append("许可证公钥不是 Ed25519 类型")
-        except (OSError, ValueError, TypeError) as exc:
-            problems.append(f"许可证公钥不可读：{exc}")
 
     resource_root = dist / "_internal" if (dist / "_internal").is_dir() else dist
     for relative in REQUIRED_HANDOUT_RESOURCES:

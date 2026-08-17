@@ -3,10 +3,7 @@
 {% block content %}
 <section class="app-page recycle-page">
 <header class="app-page-head app-page-head-actions">
-  <div>
-    <h1>回收站</h1>
-    <p>删除的题目和题集会先进这里，可恢复或彻底删除。</p>
-  </div>
+  <h1>回收站</h1>
   <div class="spacer"></div>
   {% if questions or folders %}
   <form method="post" action="{{ url_for('recycle_empty') }}"
@@ -61,7 +58,7 @@
   {% for f in folders %}
   <article class="card">
     <div class="card-head">
-      📁 <b>{{ f['name'] }}</b>
+      <b>{{ f['name'] }}</b>
       <span class="muted" style="font-size:12px">删除于 {{ f['deleted_at'] }}</span>
       <div class="spacer"></div>
       <form method="post" action="{{ url_for('recycle_restore_folder', fid=f['id']) }}" style="display:inline">
@@ -72,7 +69,6 @@
         <button type="submit" class="btn btn-sm link-danger">彻底删除</button>
       </form>
     </div>
-    <p class="muted" style="font-size:12px;margin:4px 0 0">恢复后若原父题集已不在，将恢复为顶级题集。</p>
   </article>
   {% endfor %}
 {% else %}
@@ -83,12 +79,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-document.getElementById('q-sel-all')?.addEventListener('click', () => {
-  document.querySelectorAll('#restore-form input[name="qid"]').forEach(cb => cb.checked = true);
-});
-document.getElementById('q-sel-none')?.addEventListener('click', () => {
-  document.querySelectorAll('#restore-form input[name="qid"]').forEach(cb => cb.checked = false);
-});
-</script>
+<script src="{{ static_v('js/recycle-bin.js') }}" defer></script>
 {% endblock %}

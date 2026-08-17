@@ -79,6 +79,15 @@ _UNIT_TITLE_RE = re.compile(
     r"(?P<unit>套|卷|章|节|讲|练|单元|专题|部分|篇|回|次)"
     r"\s*(?:(?P<sep>[:：、.．\-])\s*)?(?P<topic>.*)$"
 )
+# 教辅专题常把阿拉伯序号放在结构词之后，例如“重难专题 16 圆锥曲线”。
+# 这与“突破 1”之类卷内小节不同：这里只接受专题/单元/章/讲等稳定结构词，
+# 并要求序号后仍有主题正文，因此不会把普通题号或小问标题当成合集边界。
+_TRAILING_ARABIC_UNIT_TITLE_RE = re.compile(
+    r"^(?P<prefix>[\u3400-\u9fffA-Za-z]{0,16}?)"
+    r"(?P<unit>专题|单元|章|节|讲|套|卷)\s*"
+    r"(?P<num>\d{1,3})\s*"
+    r"(?:(?P<sep>[:：、.．\-])\s*)?(?P<topic>.+)$"
+)
 # 弱标题：“一、运动学基础”。这种写法也用于卷内题型分区，所以只在
 # 全文找不到至少两个强标题时启用，并排除常见题型名。
 _ORDINAL_TITLE_RE = re.compile(
@@ -191,6 +200,12 @@ def _candidate(line: str, line_index: int) -> _TitleCandidate | None:
         semantic = (match.group("unit") + topic).strip()
         return _TitleCandidate(
             line_index, title, semantic, _cn_to_int(match.group("num")), True)
+    match = _TRAILING_ARABIC_UNIT_TITLE_RE.match(title)
+    if match:
+        topic = match.group("topic").strip()
+        semantic = (match.group("prefix") + match.group("unit") + topic).strip()
+        return _TitleCandidate(
+            line_index, title, semantic, int(match.group("num")), True)
     match = _ORDINAL_TITLE_RE.match(title)
     if match:
         topic = match.group("topic").strip()

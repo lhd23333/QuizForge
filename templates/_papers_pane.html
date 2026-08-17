@@ -23,6 +23,8 @@
           <a href="{{ url_for('folder_paper_view', id=p['id']) }}"
              class="paper-open-obsidian" data-path="{{ p['id'] }}"
              target="_blank" rel="noopener">{{ p['filename'] }}</a>
+          <button type="button" class="btn btn-ghost btn-sm paper-open-library"
+                  data-library-path="{{ p['id'] }}">在资料库中打开</button>
           {% if p['folder'] != active_collection %}
             <span class="papers-from">来自 {{ p['folder'].split('/')[-1] }}</span>
           {% endif %}
@@ -46,8 +48,8 @@
       <input type="hidden" name="exam_paper_id" id="reconvert-exam-id" value="">
       <input type="hidden" name="solution_paper_id" id="reconvert-sol-id" value="">
       <select name="ocr_backend" class="input" aria-label="PDF 解析服务">
-        <option value="mineru">MinerU</option>
-        <option value="doc2x">Doc2X v3</option>
+        <option value="mineru">MinerU（按设置）</option>
+        <option value="doc2x">平台 Doc2X v3</option>
       </select>
       <button type="submit" class="btn" id="reconvert-btn" disabled>重新转换</button>
       <span class="muted" id="reconvert-hint" style="margin-left:0.5em">需勾选一份「题干」原卷</span>

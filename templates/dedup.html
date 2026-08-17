@@ -3,10 +3,7 @@
 {% block content %}
 <section class="app-page dedup-page">
   <header class="app-page-head">
-    <div>
-      <h1>查重</h1>
-      <p>扫描当前题库。完全重复恒显示，相似题按阈值检测；扫描在后台运行，不再卡住页面。</p>
-    </div>
+    <h1>查重</h1>
   </header>
 
   <div class="app-surface dedup-workbench">
@@ -15,26 +12,24 @@
         <input type="number" id="dedup-threshold" min="0.5" max="1" step="0.05"
                value="{{ threshold }}" class="input">
       </label>
-      <button type="submit" class="btn btn-primary" id="dedup-scan-button">重新扫描</button>
+      <button type="submit" class="btn btn-primary" id="dedup-scan-button">开始扫描</button>
+      <button type="button" class="btn" id="dedup-pause-button" hidden>暂停</button>
     </form>
-    <div class="dedup-progress" id="dedup-progress" data-auto-start="1" role="status">
+    <div class="dedup-progress" id="dedup-progress" role="status">
       <span class="dedup-spinner" aria-hidden="true"></span>
       <div>
-        <strong id="dedup-status-title">准备扫描当前题库…</strong>
-        <p class="muted" id="dedup-status-detail">页面可以正常切换；扫描完成后结果会自动显示。</p>
+        <strong id="dedup-status-title">尚未扫描</strong>
+        <p class="muted" id="dedup-status-detail">点击“开始扫描”后才会读取题库</p>
       </div>
     </div>
   </div>
 
   <div class="app-surface asset-audit-workbench">
     <div class="asset-audit-head">
-      <div>
-        <h2>共享图片库体检</h2>
-        <p class="muted">扫描所有已登记且可访问的题库、回收站、讲义和安全备份；只有未被任何 Markdown 或重绘原图元数据引用的文件才列为可删除。</p>
-      </div>
+      <h2>共享图片库</h2>
       <button type="button" class="btn secondary" id="asset-audit-start">扫描未引用图片</button>
     </div>
-    <div class="asset-audit-status muted" id="asset-audit-status" role="status">尚未扫描。任一已登记题库不可访问或任一 Markdown 无法读取时，系统会拒绝删除。</div>
+    <div class="asset-audit-status muted" id="asset-audit-status" role="status">尚未扫描</div>
     <div class="asset-audit-result" id="asset-audit-result" hidden></div>
     <div class="asset-audit-actions">
       <button type="button" class="btn btn-danger" id="asset-audit-delete" hidden>永久删除未引用图片</button>

@@ -269,13 +269,23 @@ def _standard_exam_front(title: str, std_opts: dict) -> list[str]:
 
 
 def _render_questions(questions: list[dict], mode: str, solution_mode: str,
-                      std_opts: dict) -> list[str]:
+                      std_opts: dict, fullpage_ids=None) -> list[str]:
     blocks: list[str] = []
     numbered = list(enumerate(questions, start=1))
+    fullpage_ids = {str(value) for value in (fullpage_ids or [])}
     if mode not in _GROUPED_MODES:
         for index, (number, question) in enumerate(numbered):
+            is_fullpage = (mode == "handout"
+                           and str(question.get("id")) in fullpage_ids)
+            previous_fullpage = (index > 0 and mode == "handout"
+                                 and str(numbered[index - 1][1].get("id"))
+                                 in fullpage_ids)
+            if is_fullpage and index > 0 and not previous_fullpage:
+                blocks.append(_marker("QF_PAGE_BREAK"))
             blocks.append(_question_item(number, question, solution_mode))
-            if mode in {"lecture", "slides"} and index < len(numbered) - 1:
+            if is_fullpage and index < len(numbered) - 1:
+                blocks.append(_marker("QF_PAGE_BREAK"))
+            elif mode in {"lecture", "slides"} and index < len(numbered) - 1:
                 blocks.append(_marker("QF_PAGE_BREAK"))
             elif mode == "note" and (index + 1) % 2 == 0 and index < len(numbered) - 1:
                 blocks.append(_marker("QF_PAGE_BREAK"))
@@ -298,10 +308,9 @@ def _render_separate_solutions(questions: list[dict]) -> list[str]:
     blocks = [_styled("QuestionType", "答案与解析")]
     for number, question in enumerate(questions, start=1):
         solution = str(question.get("solution") or "").strip() or "（无解析）"
-        blocks.append(
-            f"{number}. {_marker(f'QF-Q-{number}')} "
-            + _styled("Solution", solution)
-        )
+        # fenced div 必须独占块级位置；拼到列表项同行会被 Pandoc 当普通文本输出。
+        blocks.append(_styled(
+            "Solution", f"{number}. {_marker(f'QF-Q-{number}')} {solution}"))
     return blocks
 
 
@@ -352,7 +361,8 @@ def build_word_plan(questions, *, title, mode, keypoints="", fullpage_ids=None,
             if question.get("type") == "填空题" else question
             for question in questions
         ]
-    blocks.extend(_render_questions(display_questions, mode, solution_mode, std_opts))
+    blocks.extend(_render_questions(
+        display_questions, mode, solution_mode, std_opts, fullpage_ids))
 
     if solution_mode == "separate":
         marker = "QF_SECTION_SOLUTIONS"
@@ -387,6 +397,12 @@ def _run_pandoc(command: list[str], *, cwd: Path) -> None:
         if len(detail) > 2000:
             detail = detail[-2000:]
         raise ExportError(f"Pandoc 生成 Word 失败：{detail}")
+
+
+def pandoc_available() -> bool:
+    """只检查 Pandoc 可执行文件是否可定位，不启动进程。"""
+    candidate = Path(str(config.PANDOC))
+    return candidate.is_file() or shutil.which(str(config.PANDOC)) is not None
 
 
 def _cleanup_success_inputs(work_dir: Path, output_path: Path) -> None:

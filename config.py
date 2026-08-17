@@ -37,7 +37,7 @@ if BANK_SUBJECT not in {"math", "physics"}:
     BANK_SUBJECT = "math"
 BANK_SUBJECT_LABEL = {"math": "数学", "physics": "物理"}[BANK_SUBJECT]
 
-# 多题库可同时由多个桌面进程打开。凭据、许可证和外观仍放全局 DATA_DIR；会包含
+# 多题库可同时由多个桌面进程打开。凭据、账号缓存和外观仍放全局 DATA_DIR；会包含
 # 题目 id、上传件或 OCR 中间产物的运行状态必须按题库隔离，避免两个窗口串任务。
 _BANK_STATE_ENV = os.environ.get("QUIZFORGE_BANK_STATE_DIR", "").strip()
 if _BANK_STATE_ENV:
@@ -75,9 +75,13 @@ PROVIDERS_PATH = DATA_DIR / "providers.json"
 # 没有「多套切换」的概念，混进那份列表结构里会让 providers.py 的 active 语义变形。
 MINERU_TOKEN_PATH = DATA_DIR / "mineru.json"
 
-# Doc2X API Key（第二条 OCR 链路）：与 MinerU、LLM 共用本机 Fernet 密钥，
-# 但单独落文件，避免把不同服务的凭证与启停语义混在一起。
+# 旧 Doc2X API Key 文件仅为紧急回退保留；新版运行入口不读取或编辑它。
 DOC2X_KEY_PATH = DATA_DIR / "doc2x.json"
+# 新版本地多 Key 单独存放，避免设置页增删时改写旧回退文件。
+DOC2X_LOCAL_KEY_PATH = DATA_DIR / "doc2x_local.json"
+
+# 历史激活文件仅为覆盖更新兼容保留；开源版不再读取或校验。
+ACTIVATION_PATH = DATA_DIR / "activation.json"
 
 # 界面外观偏好（深浅色 / 主题色 / 壁纸文件名）。单用户，一个 JSON 就够；
 # 服务器版存在 users 表的 theme_mode / theme_color / wallpaper 三列。
@@ -89,15 +93,16 @@ TASKS_PATH = BANK_STATE_DIR / "conversion_tasks.json"
 # 组卷篮选题状态。题目本身仍在 vault，只在这里保存被选中的题目 id。
 SELECTIONS_PATH = BANK_STATE_DIR / "selections.json"
 
-# 离线许可证是用户数据，不随安装包覆盖；发行包只携带公钥，签发私钥永远不被
-# 应用读取。源码/Obsidian 模式默认不强制，独立桌面入口会显式开启校验。
+# 旧离线许可证、设备身份和账号缓存仅为回退保留；开源版不再读取或校验。
 LICENSE_PATH = DATA_DIR / "license.qflicense"
 LICENSE_PUBLIC_KEY_PATH = BASE_DIR / "assets" / "license_public_key.pem"
 # Pandoc 的 Word 样式模板是只读发行资源，不存放任何用户内容。
 WORD_REFERENCE_DOCX = BASE_DIR / "assets" / "word-reference.docx"
-# 设备身份只包含随机秘密的 Windows DPAPI 密文，不采集主板、硬盘或题库信息。
-# 与许可证一样放在用户数据目录，升级/卸载应用都不能把它当安装资源覆盖。
 DEVICE_IDENTITY_PATH = DATA_DIR / "device_identity.dat"
+
+# 历史云端账号文件与公钥路径继续保留，防止覆盖升级误删用户原有文件。
+CLOUD_ACCOUNT_PATH = DATA_DIR / "cloud_account.json"
+CLOUD_ENTITLEMENT_PUBLIC_KEY_PATH = BASE_DIR / "assets" / "cloud_entitlement_public_key.pem"
 
 # 壁纸文件存放目录（用户上传的图片/视频）。放 BASE_DIR 而不是 BANK_DIR：
 # 它是应用外观配置，不是题库内容，落进 vault 会被 Obsidian 当成笔记附件。
@@ -204,9 +209,20 @@ BATCH_UPLOAD_DIR = UPLOAD_DIR / "batch"
 # 本应用的扫描，管不了 Obsidian）。
 CORPUS_DIR = BANK_STATE_DIR / "corpus"
 
-# 未来授权、自动更新和远程导出的配置孔位。初版文件不存在时全部走离线默认值，
-# service_ports.py 不会建立任何网络连接。
+# 更新服务配置。旧文件里的授权和云导出字段会被忽略。
 SERVICE_PORTS_PATH = DATA_DIR / "service_ports.json"
+
+# 更新清单是唯一服务器接口，不上传题库、正文、路径或凭据。
+UPDATE_MANIFEST_URL = os.environ.get(
+    "QUIZFORGE_UPDATE_MANIFEST_URL",
+    "https://api.quizforge.tech/api/v1/updates/windows/latest",
+).strip()
+
+GITHUB_REPOSITORY_URL = "https://github.com/lhd23333/QuizForge"
+GITHUB_RELEASES_URL = GITHUB_REPOSITORY_URL + "/releases"
+
+# 爱发电页面由部署环境注入，源码不写入个人收款链接。
+SPONSOR_URL = os.environ.get("QUIZFORGE_SPONSOR_URL", "").strip()
 
 # 图片资产目录的别名：从服务器版移植来的模块用 IMAGES_DIR 这个名字。单机版图片
 # 扁平存在 _assets 下（无 scope 子目录），正文用 ![[文件名]] 双链引用。

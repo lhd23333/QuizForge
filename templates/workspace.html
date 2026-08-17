@@ -4,8 +4,10 @@
 
 {% block content %}
 <section class="workspace-shell" id="workspace-shell" data-initial-path="{{ initial_path }}">
-  <iframe class="workspace-frame is-active" id="workspace-page-frame"
-          title="QuizForge 工作区"></iframe>
+  <iframe class="workspace-frame is-active" id="workspace-question-frame"
+          title="QuizForge 题库"></iframe>
+  <iframe class="workspace-frame" id="workspace-page-frame"
+          title="QuizForge 工作区" hidden></iframe>
   <iframe class="workspace-frame" id="workspace-library-frame"
           title="QuizForge 资料库" hidden></iframe>
 </section>

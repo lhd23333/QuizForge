@@ -7,7 +7,7 @@
   <aside class="handout-rail">
     <div class="handout-rail-section handout-documents-section">
       <div class="handout-section-head">
-        <div><h1>讲义</h1><p>保存在题库的 _handouts</p></div>
+        <h1>讲义</h1>
         <button type="button" class="btn primary compact" id="handout-create">新建</button>
       </div>
       <div class="handout-document-list" id="handout-document-list">
@@ -17,7 +17,7 @@
 
     <div class="handout-rail-section handout-question-section">
       <div class="handout-section-head">
-        <div><h2>已选试题</h2><p>拖入画布，或插入到光标</p></div>
+        <h2>已选试题</h2>
         <button type="button" class="icon-btn" id="handout-refresh-selected"
                 title="刷新已选试题" aria-label="刷新已选试题">↻</button>
       </div>
@@ -26,6 +26,14 @@
       </div>
     </div>
   </aside>
+
+  <div class="split-resizer handout-rail-resizer" role="separator" tabindex="0"
+       aria-label="调整讲义侧栏宽度" aria-orientation="vertical"
+       title="拖动调整宽度，双击恢复"
+       data-split-resizer data-split-owner="#handout-app" data-split-panel=".handout-rail"
+       data-split-property="--handout-rail-width" data-split-side="left"
+       data-split-min="180" data-split-max="430" data-split-main-min="420"
+       data-split-key="handout-rail"></div>
 
   <section class="handout-workspace">
     <div class="handout-document-bar">
@@ -57,6 +65,7 @@
       <button type="button" class="btn secondary compact" id="handout-preview">PDF 预览</button>
       <select id="handout-export-format" aria-label="导出格式">
         <option value="pdf">PDF</option>
+        <option value="md">Markdown</option>
         <option value="tex">TeX</option>
         <option value="zip">tex.zip</option>
       </select>
@@ -108,6 +117,14 @@
       </article>
     </div>
   </section>
+
+  <div class="split-resizer handout-inspector-resizer" role="separator" tabindex="0"
+       aria-label="调整题卡编辑栏宽度" aria-orientation="vertical"
+       title="拖动调整宽度，双击恢复"
+       data-split-resizer data-split-owner="#handout-app" data-split-panel="#handout-inspector"
+       data-split-property="--handout-inspector-width" data-split-side="right"
+       data-split-min="240" data-split-max="520" data-split-main-min="420"
+       data-split-key="handout-inspector"></div>
 
   <aside class="handout-inspector" id="handout-inspector" hidden>
     <div class="handout-inspector-head">

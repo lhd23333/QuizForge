@@ -1,8 +1,7 @@
-"""联网能力的配置孔位；初版只启用离线实现。
+"""本地功能与公开更新服务的边界。
 
-业务代码只通过本模块选择导出后端。以后接授权、更新或云端编译时，在这里增加
-实现并切换 mode，题库、页面和现有 exporter 不需要跟着改。当前模块不导入 HTTP
-客户端，也不会主动建立任何网络连接。
+QuizForge 的核心功能全部在本机开放。服务器只提供公开更新清单，不参与授权、
+账号、OCR 或 TeX；旧版配置文件仍可留在用户目录，但这里不会读取其中的授权字段。
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import logging
 import config
 import exporter
 import handout_exporter
-import license_manager
 import word_exporter
 
 logger = logging.getLogger(__name__)
@@ -22,33 +20,29 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ServicePorts:
-    """三个未来服务的稳定配置边界。"""
+    """联网更新开关；本地导出不再是可配置的联网服务。"""
 
-    license_mode: str = "offline_signed"
-    license_base_url: str = ""
-    update_mode: str = "disabled"
+    update_mode: str = "remote"
     update_manifest_url: str = ""
-    export_mode: str = "local"
-    export_base_url: str = ""
 
 
-_DEFAULTS = ServicePorts()
+_DEFAULTS = ServicePorts(
+    update_manifest_url=getattr(config, "UPDATE_MANIFEST_URL", ""),
+)
 _VALID_MODES = {
-    "license_mode": {"offline_signed", "remote"},
     "update_mode": {"disabled", "remote"},
-    "export_mode": {"local", "remote"},
 }
 
 
 def load() -> ServicePorts:
-    """读取服务配置；缺失、损坏或非法值一律保守回落到纯离线。"""
+    """只读取更新配置；旧文件中的授权和云导出字段会被忽略。"""
     path = config.SERVICE_PORTS_PATH
     if not path.is_file():
         return _DEFAULTS
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("联网服务配置不可读，保持纯离线：%s", exc)
+        logger.warning("更新服务配置不可读，使用默认更新地址：%s", exc)
         return _DEFAULTS
     if not isinstance(raw, dict):
         return _DEFAULTS
@@ -60,49 +54,48 @@ def load() -> ServicePorts:
             values[key] = value.strip()
     for key, allowed in _VALID_MODES.items():
         if values[key] not in allowed:
-            logger.warning("联网服务配置 %s=%r 非法，保持纯离线", key, values[key])
+            logger.warning("更新配置 %s=%r 非法，使用默认更新地址", key, values[key])
             return _DEFAULTS
     return ServicePorts(**values)
 
 
 def status() -> dict[str, object]:
-    """给桌面壳/未来设置页展示，不触发任何联网探测。"""
+    """返回桌面状态，不主动访问网络，也不读取任何历史授权数据。"""
     ports = load()
-    license_state = license_manager.load()
     return {
-        "license": {"mode": ports.license_mode, **license_state.to_dict()},
-        "updates": {"mode": ports.update_mode, "enabled": False},
-        "export": {"mode": ports.export_mode, "enabled": ports.export_mode == "local"},
+        "license": {
+            "mode": "open_source",
+            "enabled": False,
+            "enforced": False,
+            "summary": "GPL-3.0-or-later",
+        },
+        "updates": {
+            "mode": ports.update_mode,
+            "enabled": bool(ports.update_manifest_url),
+            "manifest_url_configured": bool(ports.update_manifest_url),
+        },
+        "export": {"mode": "local", "enabled": True},
+        "cloud": {"enabled": False},
     }
 
 
-def _require_local_export() -> None:
-    """所有导出能力共用同一许可证与服务模式门控。"""
-    ports = load()
-    if ports.export_mode != "local":
-        raise exporter.ExportError("当前版本尚未启用远程导出服务，请切回本地导出")
-    if license_manager.is_enforced() and not license_manager.export_allowed():
-        state = license_manager.load()
-        raise exporter.ExportError(
-            f"{state.summary}。请到“设置 → 软件授权”导入有效的 .qflicense 文件"
-        )
-
-
 def export_document(*args, **kwargs):
-    """统一试卷导出入口；许可证通过后再选择本地语义导出器。"""
-    _require_local_export()
-    if kwargs.get("fmt", "pdf") == "docx":
+    """导出题卷；全部本地格式免费开放，云 TeX 明确停用。"""
+    kwargs.pop("entitlement_feature", None)
+    tex_backend = kwargs.pop("tex_backend", "local")
+    fmt = kwargs.get("fmt", "pdf")
+    if fmt == "docx":
         return word_exporter.export(*args, **kwargs)
+    if fmt == "pdf" and tex_backend == "cloud":
+        raise exporter.ExportError("云 TeX 已停用，请安装本机 TeX 或导出 tex.zip")
     return exporter.export(*args, **kwargs)
 
 
 def export_handout_document(*args, **kwargs):
-    """讲义工作台导出入口，与既有导出共享许可证边界。"""
-    _require_local_export()
+    """讲义导出完全在本机完成。"""
     return handout_exporter.export(*args, **kwargs)
 
 
 def render_handout_question(*args, **kwargs):
-    """把单个讲义题卡编译为矢量预览，同样属于本地导出能力。"""
-    _require_local_export()
+    """讲义题卡的本地矢量预览。"""
     return handout_exporter.render_question(*args, **kwargs)

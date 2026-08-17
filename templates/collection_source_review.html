@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}调整识别原文 · QuizForge{% endblock %}
+{% block content %}
+<section class="app-page collection-source-page">
+  <header class="app-page-head">
+    <div>
+      <h1>调整识别原文</h1>
+      <p>{{ filename }}</p>
+    </div>
+    <div class="app-page-head-actions">
+      <a class="btn btn-ghost" href="{{ url_for('batch_dashboard', batch_id=batch_id) }}">返回看板</a>
+    </div>
+  </header>
+
+  <form method="post" class="collection-source-form">
+    <input type="hidden" name="revision" value="{{ snapshot['revision'] }}">
+
+    <section class="collection-source-section">
+      <div class="collection-source-labels" aria-hidden="true">
+        <span>题干原文件</span><span>题干 Markdown</span>
+      </div>
+      <div class="collection-source-workbench" id="collection-source-exam">
+        <div class="collection-source-preview" id="collection-source-exam-preview">
+          {% if source_kind == 'pdf' %}
+          <iframe src="{{ url_for('convert_file_view', job_id=job_id) }}" title="题干原文件"></iframe>
+          {% elif source_kind == 'image' %}
+          <img src="{{ url_for('convert_file_view', job_id=job_id) }}" alt="题干原文件">
+          {% else %}
+          <a class="btn" href="{{ url_for('convert_file_view', job_id=job_id) }}">打开题干原文件</a>
+          {% endif %}
+        </div>
+        <div class="split-resizer collection-source-resizer" role="separator" tabindex="0"
+             aria-label="调整原文件与 Markdown 宽度" aria-orientation="vertical"
+             title="拖动调整宽度，双击恢复"
+             data-split-resizer data-split-owner="#collection-source-exam"
+             data-split-panel="#collection-source-exam-preview"
+             data-split-property="--collection-source-preview-width"
+             data-split-side="left" data-split-min="260" data-split-max="920"
+             data-split-main-min="360" data-split-key="collection-source-exam"></div>
+        <textarea class="input collection-source-markdown" name="exam_markdown"
+                  spellcheck="false" aria-label="题干 Markdown">{{ snapshot['exam_markdown'] }}</textarea>
+      </div>
+    </section>
+
+    {% if has_solution %}
+    <section class="collection-source-section">
+      <div class="collection-source-labels" aria-hidden="true">
+        <span>解析原文件</span><span>解析 Markdown</span>
+      </div>
+      <div class="collection-source-workbench" id="collection-source-solution">
+        <div class="collection-source-preview" id="collection-source-solution-preview">
+          {% if solution_kind == 'pdf' %}
+          <iframe src="{{ url_for('convert_file_view', job_id=job_id, side='solution') }}" title="解析原文件"></iframe>
+          {% elif solution_kind == 'image' %}
+          <img src="{{ url_for('convert_file_view', job_id=job_id, side='solution') }}" alt="解析原文件">
+          {% else %}
+          <a class="btn" href="{{ url_for('convert_file_view', job_id=job_id, side='solution') }}">打开解析原文件</a>
+          {% endif %}
+        </div>
+        <div class="split-resizer collection-source-resizer" role="separator" tabindex="0"
+             aria-label="调整原文件与 Markdown 宽度" aria-orientation="vertical"
+             title="拖动调整宽度，双击恢复"
+             data-split-resizer data-split-owner="#collection-source-solution"
+             data-split-panel="#collection-source-solution-preview"
+             data-split-property="--collection-source-preview-width"
+             data-split-side="left" data-split-min="260" data-split-max="920"
+             data-split-main-min="360" data-split-key="collection-source-solution"></div>
+        <textarea class="input collection-source-markdown" name="solution_markdown"
+                  spellcheck="false" aria-label="解析 Markdown">{{ snapshot['solution_markdown'] }}</textarea>
+      </div>
+    </section>
+    {% endif %}
+
+    <div class="collection-source-actions">
+      <label>
+        <span>识别方式</span>
+        <select class="input" name="retry_mode">
+          <option value="single">整份作为一组</option>
+          <option value="collection">按标题拆成多组</option>
+        </select>
+      </label>
+      <button type="submit" class="btn btn-primary">尝试识别</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

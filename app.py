@@ -18,8 +18,7 @@ import importer
 import mechfix
 import exporter
 import service_ports
-import license_manager
-import device_identity
+import tex_installer
 import desktop_product
 import qrender
 import import_defaults
@@ -30,14 +29,15 @@ import qualcheck
 import crypto_utils
 import llm_client
 import providers
-import doc2x_store
 import mineru_store
+import doc2x_store
 import ui_prefs
 import tikz_redraw
 import task_store
 import cleanup_output
 import handouts
 import pdf_collection
+import update_client
 
 import os
 import hmac
@@ -52,9 +52,40 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlencode
 from PIL import Image
+from search_query import SearchQueryError, parse_search_query
 
 logger = logging.getLogger(__name__)
+
+_QUESTION_SCOPE_KEYS = (
+    "tag", "tags", "match", "type", "difficulty", "starred", "sort",
+    "collection", "all", "recursive", "q",
+)
+
+
+def _question_scope_pairs(args, *, exclude: set[str] | None = None):
+    """只转发题目视图认可的参数，保留重复标签且不夹带未知查询参数。"""
+    excluded = exclude or set()
+    return [
+        (key, value)
+        for key in _QUESTION_SCOPE_KEYS if key not in excluded
+        for value in args.getlist(key)
+        if value != ""
+    ]
+
+
+def _question_scope_url(pairs, *, set_values=None, remove=()):
+    replacements = set_values or {}
+    removed = set(remove) | set(replacements)
+    result = [(key, value) for key, value in pairs if key not in removed]
+    for key, value in replacements.items():
+        if value is None:
+            continue
+        values = value if isinstance(value, (list, tuple)) else [value]
+        result.extend((key, str(item)) for item in values if str(item) != "")
+    query = urlencode(result)
+    return url_for("index") + (f"?{query}" if query else "")
 
 app = Flask(__name__)
 app.secret_key = "quizbank-local-dev"  # 本地会话用，非安全敏感
@@ -292,6 +323,7 @@ def _inject_desktop_host():
     return {
         "desktop_host": os.environ.get("QUIZFORGE_DESKTOP") == "1",
         "desktop_version": desktop_product.PRODUCT_VERSION,
+        "sponsor_url": config.SPONSOR_URL,
     }
 
 
@@ -347,11 +379,26 @@ def healthz():
     })
 
 
+@app.route("/api/update/check")
+def update_check():
+    """按用户点击检查公开更新清单，不在启动或普通页面请求中联网。"""
+    try:
+        result = update_client.check(
+            desktop_product.PRODUCT_VERSION,
+            service_ports.load().update_manifest_url,
+        )
+    except update_client.UpdateCheckError as exc:
+        return jsonify(ok=False, error=str(exc)), 502
+    return jsonify(ok=True, **result)
+
+
 @app.route("/about")
 def about_page():
     """产品信息与本机环境诊断；只读且不会探测任何网络服务。"""
     return render_template(
         "about.html", report=desktop_product.environment_report(),
+        github_repository_url=config.GITHUB_REPOSITORY_URL,
+        github_releases_url=config.GITHUB_RELEASES_URL,
         welcome=False, demo_created=False,
     )
 
@@ -361,20 +408,25 @@ def welcome_page():
     """桌面初次启动落点；浏览器直接访问也保持只读。"""
     return render_template(
         "about.html", report=desktop_product.environment_report(),
+        github_repository_url=config.GITHUB_REPOSITORY_URL,
+        github_releases_url=config.GITHUB_RELEASES_URL,
         welcome=True, demo_created=request.args.get("demo") == "1",
     )
 
 
 @app.route("/workspace")
 def workspace_page():
-    """独立桌面版的常驻外壳；业务页面放进同源 iframe，资料库单独保活。"""
+    """独立桌面版常驻外壳；题库与资料库分别保活，其他页面共用第三个 iframe。"""
     initial_path = (request.args.get("path") or "/").strip()
     # 这里只接受本站绝对路径。禁止 //host 与递归嵌套 /workspace，避免本地外壳被
     # 当成任意站点 iframe 容器；业务接口仍由各自路由继续做完整参数校验。
     if (not initial_path.startswith("/") or initial_path.startswith("//")
             or initial_path.split("?", 1)[0] == "/workspace"):
         initial_path = "/"
-    return render_template("workspace.html", initial_path=initial_path)
+    # Flash 应由实际业务 iframe 消费。外壳也读取一次会在同一窗口叠出两条相同提示，
+    # 并且并发请求下还可能先把业务页需要的消息取走。
+    return render_template(
+        "workspace.html", initial_path=initial_path, suppress_flash=True)
 
 
 # ---------------------------------------------------------------------------
@@ -682,7 +734,7 @@ def handouts_preview():
 
 @app.route("/api/handouts/export", methods=["POST"])
 def handouts_export():
-    """导出 PDF、TeX 或包含图片的 tex.zip。"""
+    """导出 PDF、干净 Markdown、TeX 或包含图片的 tex.zip。"""
     try:
         metadata, body = _handout_export_payload()
         fmt = str((request.get_json(silent=True) or {}).get("fmt") or "pdf")
@@ -799,13 +851,23 @@ def index():
     sort = request.args.get("sort", "custom")
     collection_id = request.args.get("collection") or ""
     search = request.args.get("q", "").strip()
+    search_query = None
+    search_error = ""
+    if search:
+        try:
+            search_query = parse_search_query(
+                search, allowed_types=config.QUESTION_TYPES,
+                allowed_difficulties=config.DIFFICULTIES)
+        except SearchQueryError as exc:
+            search_error = str(exc)
 
-    # 默认首页不渲染整库题卡。题库大后，图片排版与公式渲染会让一次无目的打开
-    # 付出数秒成本；左侧「全部题目」显式带 all=1，筛选与文件夹入口照常查询。
-    show_all = request.args.get("all") in ("1", "true", "on")
     has_filter = bool(collection_id or tags or type_ or difficulty
                       or starred_only or search)
-    blank = not (show_all or has_filter)
+    # 默认首页直接展示首批题卡。这里只建立轻量路径快照并读取 30 道题，不会恢复
+    # 旧版一次解析整库 Markdown 的性能问题；空白欢迎页反而让已有题库看起来像丢题。
+    show_all = (request.args.get("all") in ("1", "true", "on")
+                or not has_filter)
+    blank = False
 
     # 父文件夹默认汇总所有后代题目和原卷。这里的“汇总”只递归建立轻量路径快照，
     # 首屏仍只读取 30 道题，后续随滚动按批加载，不能退回一次创建整年题卡的旧实现。
@@ -848,11 +910,11 @@ def index():
         else:
             records = (filestore.collection_records_snapshot(collection_id)
                        if collection_id else filestore.all_records_snapshot())
-            source = filestore.list_questions(
+            source = ([] if search_error else filestore.list_questions(
                 tags=tags, match=match, qtype=type_ or "", sort=sort,
-                collection=collection_id, search=search,
+                collection=collection_id, search=search_query or "",
                 difficulty=difficulty or "", starred=starred_only,
-                records=records)
+                records=records))
             question_total = len(source)
             questions = source[:_QUESTION_PAGE_SIZE]
             all_tags = filestore.all_tags(records)
@@ -870,6 +932,20 @@ def index():
     # 只会把 vault 根目录里一切非 md 文件都摆上去。
     folder_papers = (filestore.list_papers(collection_id)
                      if collection_id else [])
+    scope_pairs = _question_scope_pairs(request.args)
+    search_scope_fields = _question_scope_pairs(
+        request.args, exclude={"q"})
+    filter_context_fields = _question_scope_pairs(
+        request.args,
+        exclude={"tag", "tags", "match", "type", "difficulty", "starred"})
+    filter_reset_url = _question_scope_url(
+        scope_pairs,
+        remove={"tag", "tags", "match", "type", "difficulty", "starred"})
+
+    def folder_scope_url(target_collection):
+        return _question_scope_url(
+            scope_pairs, set_values={"collection": target_collection},
+            remove={"all", "recursive"})
 
     return render_template(
         "index.html",
@@ -898,6 +974,15 @@ def index():
         show_all=show_all,
         active_collection_name=(cur_col["name"] if cur_col else None),
         search=search,
+        search_error=search_error,
+        search_scope_fields=search_scope_fields,
+        search_clear_url=_question_scope_url(scope_pairs, remove={"q"}),
+        filter_context_fields=filter_context_fields,
+        filter_reset_url=filter_reset_url,
+        folder_scope_url=folder_scope_url,
+        all_questions_url=_question_scope_url(
+            scope_pairs, set_values={"all": "1"},
+            remove={"collection", "recursive"}),
     )
 
 
@@ -1567,6 +1652,16 @@ def select_all():
     type_ = request.form.get("type") or ""
     difficulty = request.form.get("difficulty") or ""
     search = request.form.get("q", "").strip()
+    try:
+        search_query = (parse_search_query(
+            search, allowed_types=config.QUESTION_TYPES,
+            allowed_difficulties=config.DIFFICULTIES) if search else "")
+    except SearchQueryError as exc:
+        message = str(exc)
+        if request.accept_mimetypes.best == "application/json":
+            return jsonify(ok=False, error=message), 400
+        flash(message, "err")
+        return redirect(request.referrer or url_for("index"))
     starred_only = request.form.get("starred") in ("1", "true", "on")
     collection_id = request.form.get("collection", "")
     explicit_all = request.form.get("all") in ("1", "true", "on")
@@ -1588,7 +1683,7 @@ def select_all():
     records = (filestore.collection_records_snapshot(collection_id)
                if collection_id else None)
     rows = filestore.list_questions(tags=tags, match=match, qtype=type_,
-                                    difficulty=difficulty, search=search,
+                                    difficulty=difficulty, search=search_query,
                                     starred=starred_only,
                                     collection=collection_id, records=records)
     filestore.select_ids([r["id"] for r in rows])
@@ -2904,9 +2999,11 @@ def convert_file_view(job_id):
     """
     with _jobs_lock:
         job = _jobs.get(job_id)
-    if not job or not job.get("path"):
+    side = "solution" if request.args.get("side") == "solution" else "exam"
+    path_key = "solution_path" if side == "solution" else "path"
+    if not job or not job.get(path_key):
         abort(404)
-    path = Path(job["path"]).resolve()
+    path = Path(job[path_key]).resolve()
     upload_root = config.UPLOAD_DIR.resolve()
     if upload_root not in path.parents or not path.is_file():
         abort(404)
@@ -3642,6 +3739,125 @@ def _find_group(batch_id: str, gid: int):
     return batch, g
 
 
+def _collection_source_editable(g: dict) -> bool:
+    """结构合集失败但 OCR 原文仍完整时，允许进入人工修订。"""
+    if (g.get("status") != "error"
+            or g.get("collection_strategy") != "ocr_structure"
+            or g.get("collection_unit")
+            or g.get("in_flight")):
+        return False
+    return converter.collection_cache_is_editable(
+        g.get("collection_cache_dirs") or [],
+        has_solution=bool(g.get("solution_path")))
+
+
+@app.route("/batch/<batch_id>/group/<int:gid>/source", methods=["GET", "POST"])
+def batch_group_source_review(batch_id, gid):
+    """对照原文件修订 OCR Markdown，再复用缓存重跑机械识别。"""
+    with _batch_jobs_lock:
+        batch, g = _find_group(batch_id, gid)
+        if not batch:
+            flash("批量任务已过期或不存在", "err")
+            return redirect(url_for("import_md"))
+        if not g:
+            abort(404)
+        if not _collection_source_editable(g):
+            flash("该组没有可调整的 OCR 原文", "err")
+            return redirect(url_for("batch_dashboard", batch_id=batch_id))
+        attempt = int(g.get("attempt") or 0)
+        cache_dirs = list(g.get("collection_cache_dirs") or [])
+        has_solution = bool(g.get("solution_path"))
+        job_id = g["job_id"]
+        filename = g.get("filename") or "识别任务"
+        source_path = g.get("file_path") or ""
+        solution_path = g.get("solution_path") or ""
+        ocr_backend = _parse_ocr_backend(g.get("ocr_backend", ""))
+
+    try:
+        snapshot = converter.collection_cache_snapshot(
+            cache_dirs, has_solution=has_solution)
+    except converter.ConvertError as exc:
+        flash(str(exc), "err")
+        return redirect(url_for("batch_dashboard", batch_id=batch_id))
+
+    if request.method == "POST":
+        retry_mode = request.form.get("retry_mode", "single")
+        if retry_mode not in ("single", "collection"):
+            return "retry_mode 只能是 single 或 collection", 400
+        try:
+            snapshot = converter.update_collection_cache_markdown(
+                cache_dirs, has_solution=has_solution,
+                exam_markdown=request.form.get("exam_markdown", ""),
+                solution_markdown=request.form.get("solution_markdown", ""),
+                expected_revision=request.form.get("revision", ""))
+            unit = None
+            if retry_mode == "single":
+                unit = converter.materialize_collection_cache_as_unit(
+                    cache_dirs, has_solution=has_solution,
+                    title=Path(filename).stem, ocr_backend=ocr_backend)
+        except converter.ConvertError as exc:
+            flash(str(exc), "err")
+            return redirect(url_for(
+                "batch_group_source_review", batch_id=batch_id, gid=gid))
+
+        with _batch_jobs_lock:
+            current, current_group = _find_group(batch_id, gid)
+            if (not current or current_group is not g
+                    or int(g.get("attempt") or 0) != attempt
+                    or g.get("in_flight")):
+                if unit:
+                    converter.cleanup_collection_workspace(
+                        unit["workspace_dir"])
+                flash("任务状态已经变化，请返回看板确认", "err")
+                return redirect(url_for("batch_dashboard", batch_id=batch_id))
+            g["attempt"] = attempt + 1
+            # 两种模式都交还整批 worker：它会在单组结束后统一结算 batch
+            # 状态。单份模式已标成 collection_unit，不会再进入整本 OCR。
+            g["status"] = "pending"
+            g["md"] = None
+            g["error"] = None
+            g["pending"] = None
+            g["note"] = ""
+            g["cancelled"] = False
+            g["reviewed"] = None
+            current["status"] = "converting"
+            if unit:
+                g["collection_unit"] = True
+                g["collection_raw_path"] = unit["raw_path"]
+                g["collection_ocr_meta"] = unit["ocr_meta"]
+                g["owns_collection_originals"] = True
+                g["collection_source_filename"] = filename
+                g["include_solution"] = unit["include_solution"]
+                g["cleanup_dirs"] = list(dict.fromkeys(
+                    [unit["workspace_dir"], *list(g.get("cleanup_dirs") or [])]))
+            _persist_batch(batch_id, current)
+
+        with _jobs_lock:
+            job = _jobs.get(job_id)
+            if job is not None:
+                job.update(status=g["status"], md=None, error=None)
+                _persist_job(job_id, job)
+
+        threading.Thread(
+            target=_convert_batch_worker, args=(batch_id,), daemon=True).start()
+        flash("已使用调整后的 Markdown 尝试识别，不会再次调用 OCR", "ok")
+        return redirect(url_for("batch_dashboard", batch_id=batch_id))
+
+    def _source_kind(path: str) -> str:
+        suffix = Path(path).suffix.lower()
+        if suffix == ".pdf":
+            return "pdf"
+        if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            return "image"
+        return "other"
+
+    return render_template(
+        "collection_source_review.html", batch_id=batch_id, gid=gid,
+        job_id=job_id, filename=filename, snapshot=snapshot,
+        has_solution=has_solution, source_kind=_source_kind(source_path),
+        solution_kind=_source_kind(solution_path) if has_solution else "")
+
+
 @app.route("/batch/<batch_id>/group/<int:gid>/blockimg/<path:name>")
 def batch_group_block_image(batch_id, gid, name):
     """审核页里的插图。图还在 MinerU 的 extract_dir/images/ 下（此时尚未拦截
@@ -3873,6 +4089,7 @@ def _empty_result(g) -> bool:
 def _group_view(g) -> dict:
     """看板与轮询共用显示口径，包含单组中止能力。"""
     empty = _empty_result(g)
+    source_editable = _collection_source_editable(g)
     cancellable = (not g.get("cancelled")
                    and g.get("reviewed") is None
                    and g.get("status") in ("pending", "converting",
@@ -3886,6 +4103,7 @@ def _group_view(g) -> dict:
         "reviewed": g.get("reviewed"),
         "cancelled": bool(g.get("cancelled")),
         "cancellable": cancellable,
+        "source_editable": source_editable,
         "requires_review": qualcheck.requires_manual_review(g.get("note") or ""),
         "imported_count": g.get("imported_count", 0),
     }
@@ -3982,8 +4200,29 @@ def _dedup_worker(job_id: str, threshold: float) -> None:
             job = _dedup_jobs.get(job_id)
             if not job:
                 return
-            job.update(status="scanning", total=len(rows), compared=0)
+            resume_event = job.get("resume_event")
+            if resume_event is None:
+                # 兼容升级前已在内存中的任务和直接调用 worker 的旧测试夹具。
+                resume_event = threading.Event()
+                if job.get("status") != "paused":
+                    resume_event.set()
+                job["resume_event"] = resume_event
+            job.update(total=len(rows), compared=0, resume_status="scanning")
+            if resume_event.is_set():
+                job["status"] = "scanning"
+
+        def wait_if_paused():
+            while True:
+                with _dedup_jobs_lock:
+                    current = _dedup_jobs.get(job_id)
+                    if not current:
+                        return
+                    resume_event = current["resume_event"]
+                if resume_event.wait(0.2):
+                    return
+
         def report_progress(done, _total):
+            wait_if_paused()
             with _dedup_jobs_lock:
                 job = _dedup_jobs.get(job_id)
                 if job:
@@ -3991,7 +4230,7 @@ def _dedup_worker(job_id: str, threshold: float) -> None:
         # 保留完整题目字段，结果卡可继续走 qbody 的结构化渲染。
         groups = dedup.find_duplicates(
             [dict(row) for row in rows], threshold=threshold,
-            progress=report_progress,
+            progress=report_progress, checkpoint=wait_if_paused,
         )
         with _dedup_jobs_lock:
             job = _dedup_jobs.get(job_id)
@@ -4024,7 +4263,7 @@ def dedup_start():
     with _dedup_jobs_lock:
         # 连续点击不重复制造两份 O(n²) 工作；完成任务只留最近八份。
         for existing_id, existing in _dedup_jobs.items():
-            if existing["status"] in {"loading", "scanning"}:
+            if existing["status"] in {"loading", "scanning", "paused"}:
                 return jsonify(ok=True, job_id=existing_id, reused=True)
         completed = sorted(
             ((job.get("finished_at", 0), key) for key, job in _dedup_jobs.items()),
@@ -4036,12 +4275,39 @@ def dedup_start():
         _dedup_jobs[job_id] = {
             "status": "loading", "threshold": threshold, "total": None,
             "groups": None, "error": "", "created_at": time.time(),
+            "resume_event": threading.Event(), "resume_status": "loading",
         }
+        _dedup_jobs[job_id]["resume_event"].set()
     threading.Thread(
         target=_dedup_worker, args=(job_id, threshold),
         name=f"dedup-{job_id}", daemon=True,
     ).start()
     return jsonify(ok=True, job_id=job_id)
+
+
+@app.route("/api/dedup/<job_id>/control", methods=["POST"])
+def dedup_control(job_id):
+    """协作式暂停/继续查重；不杀线程，也不丢弃已完成的候选比较。"""
+    action = str((request.get_json(silent=True) or {}).get("action") or "").strip()
+    if action not in {"pause", "resume"}:
+        return jsonify(ok=False, error="查重控制操作无效"), 400
+    with _dedup_jobs_lock:
+        job = _dedup_jobs.get(job_id)
+        if not job:
+            return jsonify(ok=False, error="查重任务不存在或已过期"), 404
+        if job["status"] in {"done", "error"}:
+            return jsonify(ok=False, error="查重任务已经结束"), 409
+        if action == "pause":
+            if job["status"] != "paused":
+                job["resume_status"] = job["status"]
+                job["resume_event"].clear()
+                job["status"] = "paused"
+        else:
+            job["resume_event"].set()
+            job["status"] = job.get("resume_status") or (
+                "scanning" if job.get("total") is not None else "loading")
+        status = job["status"]
+    return jsonify(ok=True, status=status)
 
 
 @app.route("/api/dedup/<job_id>")
@@ -4273,55 +4539,41 @@ def recycle_empty():
 
 @app.route("/settings")
 def settings_page():
-    """设置页：OCR 凭证 / 识别模型（LLM）/ 外观主题。"""
+    """设置页：更新、本地 OCR、导出、识别模型和外观主题。"""
     # list_llm_providers 自己就带 active_md / active_redraw / is_active 三位，
     # 别在这里再算一遍——多一处判定就多一处能跟存储对不上的真相。
     enriched = providers.list_llm_providers()
     prefs = ui_prefs.load()
-    license_enforced = license_manager.is_enforced()
-    # 未导入许可证时 load() 会直接返回 missing，不会创建设备身份；设置页必须主动
-    # 生成请求码，测试者才能把它发给发布者签发首份许可证。
-    device_state = device_identity.get_or_create() if license_enforced else None
-    expected_device_id = (
-        device_state.device_id if device_state is not None and device_state.valid else None
-    )
     return render_template(
         "settings.html", providers=enriched,
+        llm_presets=providers.LLM_PROVIDER_PRESETS,
         default_max_tokens=llm_client.MAX_TOKENS_DEFAULT,
         # has_mineru_token 而不是 token 本身：明文绝不进模板上下文，
         # 页面只显示「（已设置）」标记
         has_mineru_token=mineru_store.has_token(),
         # list_tokens 只给 id/备注/添加时间，密文与明文都不进模板
         mineru_tokens=mineru_store.list_tokens(),
-        has_doc2x_key=doc2x_store.has_key(),
         doc2x_keys=doc2x_store.list_keys(),
-        license_state=license_manager.load(
-            expected_device_id=expected_device_id, require_device=license_enforced
-        ),
-        license_enforced=license_enforced,
-        device_state=device_state,
+        sponsor_url=config.SPONSOR_URL,
+        github_repository_url=config.GITHUB_REPOSITORY_URL,
+        github_releases_url=config.GITHUB_RELEASES_URL,
+        tex_install=tex_installer.snapshot(),
         theme_mode=prefs["theme_mode"], theme_color=prefs["theme_color"],
         wallpaper=prefs["wallpaper"], swatches=ui_prefs.SWATCHES,
         wallpaper_is_video=ui_prefs.is_video_wallpaper(prefs["wallpaper"]))
 
+@app.route("/settings/tex/install", methods=["POST"])
+def settings_tex_install():
+    """启动固定版本 MiKTeX 安装；大文件下载和安装不占用请求线程。"""
+    try:
+        return jsonify(ok=True, install=tex_installer.start_install()), 202
+    except tex_installer.TexInstallError as exc:
+        return jsonify(ok=False, error=str(exc), install=tex_installer.snapshot()), 409
 
-@app.route("/settings/license", methods=["POST"])
-def settings_license():
-    """导入签名许可证；验签失败时保留当前许可证不动。"""
-    uploaded = request.files.get("license_file")
-    if uploaded is None or not uploaded.filename:
-        flash("请选择 .qflicense 许可证文件", "error")
-        return redirect(url_for("settings_page"))
-    if Path(uploaded.filename).suffix.lower() != ".qflicense":
-        flash("许可证文件扩展名必须是 .qflicense", "error")
-        return redirect(url_for("settings_page"))
-    raw = uploaded.stream.read(license_manager.MAX_LICENSE_BYTES + 1)
-    state = license_manager.install(raw)
-    if state.valid:
-        flash(f"许可证已导入：{state.licensee}", "ok")
-    else:
-        flash(f"{state.summary}：{state.detail}", "error")
-    return redirect(url_for("settings_page"))
+
+@app.route("/settings/tex/status")
+def settings_tex_status():
+    return jsonify(ok=True, install=tex_installer.snapshot())
 
 
 @app.route("/settings/mineru", methods=["POST"])
@@ -4335,14 +4587,14 @@ def settings_mineru():
     label = request.form.get("mineru_label", "").strip()[:40]
     if not token:
         flash("请填入要添加的 MinerU Token", "err")
-        return redirect(url_for("settings_page"))
+        return redirect(url_for("settings_page") + "#ocr")
     try:
         mineru_store.add_token(token, label)
     except crypto_utils.CryptoError as e:
         flash(str(e), "error")
-        return redirect(url_for("settings_page"))
+        return redirect(url_for("settings_page") + "#ocr")
     flash("MinerU Token 已添加", "ok")
-    return redirect(url_for("settings_page"))
+    return redirect(url_for("settings_page") + "#ocr")
 
 
 @app.route("/settings/mineru/delete", methods=["POST"])
@@ -4353,34 +4605,35 @@ def settings_mineru_delete():
         flash("已删除该 Token", "ok")
     else:
         flash("Token 不存在（可能已被删除）", "err")
-    return redirect(url_for("settings_page"))
+    return redirect(url_for("settings_page") + "#ocr")
 
 
 @app.route("/settings/doc2x", methods=["POST"])
 def settings_doc2x():
-    """追加一份 Doc2X API Key；页面从不回显明文。"""
+    """追加一份本地 Doc2X Key，运行时由 OCR 池按忙闲和轮转选择。"""
     key = request.form.get("doc2x_key", "").strip()
     label = request.form.get("doc2x_label", "").strip()[:40]
     if not key:
-        flash("请填入 Doc2X API Key", "err")
-        return redirect(url_for("settings_page"))
+        flash("请填入要添加的 Doc2X API Key", "err")
+        return redirect(url_for("settings_page") + "#ocr")
     try:
         doc2x_store.add_key(key, label)
-    except crypto_utils.CryptoError as e:
-        flash(str(e), "error")
-        return redirect(url_for("settings_page"))
+    except crypto_utils.CryptoError as exc:
+        flash(str(exc), "err")
+        return redirect(url_for("settings_page") + "#ocr")
     flash("Doc2X API Key 已添加", "ok")
-    return redirect(url_for("settings_page"))
+    return redirect(url_for("settings_page") + "#ocr")
 
 
 @app.route("/settings/doc2x/delete", methods=["POST"])
 def settings_doc2x_delete():
+    """按条目删除本地 Doc2X Key，不回显密文或明文。"""
     key_id = request.form.get("key_id", "").strip()
     if doc2x_store.remove_key(key_id):
-        flash("已删除该 Doc2X API Key", "ok")
+        flash("已删除该 Doc2X Key", "ok")
     else:
-        flash("Doc2X API Key 不存在（可能已被删除）", "err")
-    return redirect(url_for("settings_page"))
+        flash("Doc2X Key 不存在（可能已被删除）", "err")
+    return redirect(url_for("settings_page") + "#ocr")
 
 
 @app.route("/settings/theme", methods=["POST"])
@@ -5491,9 +5744,16 @@ def out_file(token):
         abort(404)
     as_attachment = request.args.get("dl") in ("1", "true", "on")
     # 题卡局部编译同样使用取件号，但返回 SVG；不能再把所有内联产物硬标成 PDF。
-    inline_types = {".pdf": "application/pdf", ".svg": "image/svg+xml"}
-    kwargs = {} if as_attachment else {
-        "mimetype": inline_types.get(path.suffix.lower(), "application/octet-stream")}
+    known_types = {
+        ".pdf": "application/pdf",
+        ".svg": "image/svg+xml",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    }
+    kwargs = {}
+    if path.suffix.lower() in known_types:
+        kwargs["mimetype"] = known_types[path.suffix.lower()]
+    elif not as_attachment:
+        kwargs["mimetype"] = "application/octet-stream"
     response = send_file(path, as_attachment=as_attachment,
                          download_name=item["name"], **kwargs)
     if path.suffix.lower() == ".svg":
@@ -5514,13 +5774,25 @@ def preview():
     if not questions:
         return jsonify(ok=False, error="没有可预览的题目"), 400
 
+    if request.form.get("preview_kind", "pdf") == "html":
+        config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        token = secrets.token_urlsafe(24)
+        path = config.OUTPUT_DIR / f"html-preview-{token}.html"
+        path.write_text(render_template(
+            "preview_html.html", title=p["title"], questions=questions,
+        ), encoding="utf-8")
+        _register_out_file(path, f"{p['title'] or '试卷'}-预览.html")
+        return jsonify(ok=True, url=url_for("out_file", token=token))
+
     try:
         out_path = service_ports.export_document(
             questions, title=p["title"], fmt="pdf", mode=p["mode"],
             keypoints=p["keypoints"], fullpage_ids=p["fullpage_ids"],
             header_footer=p["header_footer"], solution_mode=p["solution_mode"],
             std_opts=p["std_opts"], paper_tone=p["paper_tone"],
-            wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"])
+            wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
+            entitlement_feature="preview",
+            tex_backend=request.form.get("tex_backend", "local"))
     except exporter.ExportError as e:
         return jsonify(ok=False, error=f"预览生成失败：{e}"), 500
 
@@ -5537,7 +5809,9 @@ def export():
     Obsidian 里则把地址交给插件，由插件抓下来写进 vault（见 base.html 的桥）。
     """
     p = _read_export_params()
-    fmt = request.form.get("fmt", "pdf")             # pdf / tex / zip（仅导出有）
+    fmt = request.form.get("fmt", "pdf")             # pdf / tex / zip / docx
+    if fmt not in {"pdf", "tex", "zip", "docx"}:
+        return jsonify(ok=False, error="导出格式不支持"), 400
 
     questions = _collect_questions(p["scope"])
     if not questions:
@@ -5549,7 +5823,8 @@ def export():
             keypoints=p["keypoints"], fullpage_ids=p["fullpage_ids"],
             header_footer=p["header_footer"], solution_mode=p["solution_mode"],
             std_opts=p["std_opts"], paper_tone=p["paper_tone"],
-            wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"])
+            wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
+            tex_backend=request.form.get("tex_backend", "local"))
     except exporter.ExportError as e:
         return jsonify(ok=False, error=f"导出失败：{e}"), 500
 

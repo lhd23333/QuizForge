@@ -125,7 +125,7 @@ OCR 后端由 `ocr_backend` 选择：`mineru`（默认，兼容旧任务）或 `
 
 1. **`whole`**（project-alpha 整篇规范化）：老路径，一份卷子整个送 LLM
 2. **`block`**（逐块识别，**默认**）：机械切块 → LLM 逐块判类型 → 程序化配对。块数在切块那一步定死，LLM 不能增减
-3. **`no_ai`**：纯机械渲染，完全不送 LLM（不花额度）
+3. **`no_ai`**：纯机械渲染，完全不调用 LLM
 
 `block` 模式下还可选「先人工审核拆题结果」（`manual`），在送 AI 之前让人调整块的合并/拆分/顺序。
 
@@ -133,7 +133,7 @@ OCR 后端由 `ocr_backend` 选择：`mineru`（默认，兼容旧任务）或 `
 
 ### vendor/project_alpha
 
-MinerU 路径的 PDF/图片规范化引擎已整体 vendor 进 `vendor/project_alpha/`，不依赖任何外部路径。Doc2X 不进入 vendor，而由 `doc2x_client.py` 调官方 API，再把相同的 raw Markdown 交给现有下游。云端 OCR/LLM 都可能计费；不配置密钥时其余功能（手动导入、题库管理、组卷导出）正常工作。
+MinerU 路径的 PDF/图片规范化引擎已整体 vendor 进 `vendor/project_alpha/`，不依赖任何外部路径。Doc2X 不进入 vendor，而由 `doc2x_client.py` 调官方 API，再把相同的 raw Markdown 交给现有下游。MinerU、Doc2X 和 LLM 都使用用户在本机配置的凭据；不配置密钥时其余功能（手动导入、题库管理、组卷导出）正常工作。
 
 ### 数据目录
 
@@ -142,7 +142,9 @@ data/
   .enc_key           Fernet 密钥（不进 git，删掉=已存 key 永久解不开）
   providers.json     LLM 配置（API Key 存密文）
   mineru.json        MinerU Token（密文）
-  doc2x.json         Doc2X API Key（密文）
+  doc2x.json         旧 Doc2X Key 回退文件（只读）
+  doc2x_local.json   本机多份 Doc2X Key（密文）
+  activation.json     历史设备激活权益（开源版不读取，覆盖更新仍保留）
   ui_prefs.json      外观偏好
   corpus/            识别语料留档（_raw.md / _blocks.json / _normalized.md）
   uploads/           上传文件暂存
@@ -159,8 +161,8 @@ data/
 - 所有写请求必须带当前进程随机令牌（`static/js/csrf.js` 自动补）；后端重启后旧页需刷新
 - 试卷上传除大小/扩展名外还验 PDF/DOCX/图片真实内容，伪装格式不得落盘
 - API Key / MinerU Token / Doc2X Key 用 Fernet 加密存盘，明文只在内存中存在、永不回显；任务快照和语料元数据只记后端名，不记凭据
-- 独立桌面包通过 `QUIZFORGE_LICENSE_ENFORCED=1` 启用 Ed25519 离线许可证；只在 `service_ports.export_document()` 门控预览/导出，不限制本地题库阅读和整理。源码与 Obsidian 托管模式默认不强制，避免开发调试依赖发行许可证
-- `assets/license_public_key.pem` 可随包公开；签发私钥只允许由 `tools/license_signer.py` 在发行者侧读取，绝不能复制进项目资源、安装包、日志或测试夹具。正式收费前必须废弃当前无密码 beta 私钥并生成有密码、离线备份的新密钥
+- 核心功能按 `GPL-3.0-or-later` 免费开放，不读取邀请码、设备身份、离线许可证或云端账号权益；服务器联网仅用于用户主动触发的更新检查
+- 旧 `activation.json`、`device_identity.dat`、`license.qflicense` 与 `cloud_account.json` 仍属于升级保护数据，程序不读取但覆盖更新不得删除或改写
 - `llm_client.py` 的 SSRF 防护放行 loopback（本地推理 Ollama/LM Studio），但拒绝局域网和非 HTTPS 公网地址
 - TikZ 编译有三道沙箱闸：黑名单（`\write18`/`\input`/`\directlua` 等）、`-no-shell-escape`、`openin_any=p`/`openout_any=p`
 - 图片服务 `/assets/<name>` 只从全局 `ASSETS_DIR` 走 `send_from_directory`（内建 `safe_join`）；永久清理还必须跨全部登记题库 fail-closed 扫引用
@@ -227,12 +229,11 @@ data/
 - 新题不再从顶部独立栏目进入。`index.html` 的悬浮加号请求 `/question/inline-draft`，`_new_question_card.html` 与普通题卡共用 `_inline_question_editor.html`；预览走 `/question/inline-preview`，保存走 `/question/inline-create`。目标文件夹必须后端验证，取消草稿不落盘。
 - 无限滚动快照不含本轮新题，禁止直接递增 `data-total/data-loaded`；使用 `data-inline-created` 另计，并把后续快照卡插到本轮新题之前。文件夹片段替换时清零该计数。
 
-### 离线许可证与发行扫描
+### 开源许可与发行扫描
 
-- `license_manager.py` 只信任内置 Ed25519 公钥，对 `.qflicense` 的规范化 payload、签名、产品、日期和功能项做本地校验；无效导入不得覆盖已有有效许可证。许可证落在 `DATA_DIR/license.qflicense`，属于用户数据，不得进入发行包。
-- `service_ports.py` 的授权缺省值是 `offline_signed`，未来联网授权只能新增 `remote` 适配，不得把 HTTP 调用散进题库路由或 `exporter.py`。`updates_until` 当前是为未来更新授权预留的签名字段，现阶段没有自动更新器，也不据此联网。
-- `tools/license_signer.py` 和私钥不进入桌面包；每次构建由 `tools/verify_desktop_bundle.py` 扫描业务 `.py`、私钥标记、`.qflicense` 与运行数据。源码匹配必须按发行目录相对路径判断，不能只按 basename：pywebview 等第三方包内部也有 `app.py`，全局同名匹配会误报。
-- 修改普通功能不需要换密钥。只有私钥泄露或主动轮换时才替换公钥并重建应用；一旦换公钥，旧许可证全部失效，必须明确安排迁移。
+- 仓库根 `LICENSE` 是完整 GPLv3 文本，项目按 `GPL-3.0-or-later` 发布；安装器必须展示并把该文件复制到 `licenses/LICENSE`，第三方组件继续适用各自许可证。
+- `service_ports.py` 只读取更新配置并转发本地导出；旧 `service_ports.json` 中的授权和云导出字段必须忽略。更新 HTTP 请求集中在 `update_client.py`，不能把网络调用散进题库路由或 `exporter.py`。
+- 每次构建由 `tools/verify_desktop_bundle.py` 扫描私钥标记、`.qflicense` 与运行数据，禁止把真实用户数据或密钥混进发行目录。公开二进制发布还必须从同一下载位置清晰提供相应源代码。
 - Inno 覆盖中文或含空格目录时不能把裸 `/DIR=...` 交给 `Start-Process -ArgumentList`，它会重拼并可能截断到首个空格。应使用 `ProcessStartInfo.Arguments` 传入带内层双引号的 `/DIR="完整路径"`，并在安装后同时核对最新 Setup Log 的 `Dest filename`、EXE ProductVersion 和快捷方式目标；返回码 0 本身不能证明装到了预期目录。
 
 ## 相关文档

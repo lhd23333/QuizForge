@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import html
 import io
 import os
 import re
@@ -11,6 +12,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 from unittest import mock
 
@@ -291,6 +293,84 @@ class SecurityAndProviderTests(unittest.TestCase):
 
 
 class PageTests(unittest.TestCase):
+    def test_search_controls_preserve_current_logical_scope(self):
+        folder = app_module.filestore.get_or_create_collection(
+            "搜索范围保持", "")
+        app_module.filestore.create_question(
+            "范围保持样例", qtype="解答题", difficulty="3",
+            tags=["函数", "重点"], folder=folder)
+        response = app_module.app.test_client().get("/", query_string=[
+            ("collection", folder), ("tag", "函数"), ("tag", "重点"),
+            ("match", "and"), ("type", "解答题"), ("difficulty", "3"),
+            ("starred", "1"), ("sort", "difficulty"), ("q", "content:样例"),
+        ])
+
+        page = response.get_data(as_text=True)
+        search_form = page.split('class="search-bar"', 1)[1].split("</form>", 1)[0]
+        filter_form = page.split('id="filter-form"', 1)[1].split("</form>", 1)[0]
+        clear_href = html.unescape(re.search(
+            r'<a href="([^"]+)" class="btn btn-ghost" id="search-clear">',
+            page).group(1))
+        clear_args = parse_qs(urlsplit(clear_href).query)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(search_form.count('name="tag"'), 2)
+        self.assertIn(f'name="collection" value="{folder}"', search_form)
+        self.assertIn('name="difficulty" value="3"', search_form)
+        self.assertIn('name="q" value="content:样例"', filter_form)
+        self.assertNotIn("q", clear_args)
+        self.assertEqual(clear_args["collection"], [folder])
+        self.assertEqual(clear_args["tag"], ["函数", "重点"])
+        self.assertEqual(clear_args["difficulty"], ["3"])
+
+    def test_folder_links_keep_search_and_filters_while_changing_folder(self):
+        target = app_module.filestore.get_or_create_collection(
+            "搜索切换目标", "")
+        response = app_module.app.test_client().get("/", query_string=[
+            ("all", "1"), ("tag", "函数"), ("difficulty", "3"),
+            ("q", "source:期中"),
+        ])
+
+        page = response.get_data(as_text=True)
+        hrefs = [html.unescape(value) for value in re.findall(
+            r'class="folder-link"[^>]+href="([^"]+)"', page)]
+        target_href = next(
+            value for value in hrefs
+            if parse_qs(urlsplit(value).query).get("collection") == [target])
+        args = parse_qs(urlsplit(target_href).query)
+
+        self.assertEqual(args["q"], ["source:期中"])
+        self.assertEqual(args["tag"], ["函数"])
+        self.assertEqual(args["difficulty"], ["3"])
+        self.assertNotIn("all", args)
+
+    def test_invalid_search_is_shown_without_broadening_results(self):
+        marker = "非法搜索不得展示这道题"
+        app_module.filestore.create_question(marker, qtype="填空题")
+
+        response = app_module.app.test_client().get(
+            "/", query_string={"all": "1", "q": "starred:maybe"})
+        page = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("starred: 仅支持 true/false 或 1/0", page)
+        self.assertIn('value="starred:maybe"', page)
+        self.assertNotIn(marker, page)
+
+    def test_select_all_rejects_invalid_search(self):
+        response = app_module.app.test_client().post(
+            "/select_all",
+            data={"all": "1", "q": "starred:maybe"},
+            headers={
+                "X-CSRF-Token": app_module._WRITE_TOKEN,
+                "Accept": "application/json",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.get_json()["ok"])
+        self.assertIn("starred", response.get_json()["error"])
+
     def test_dedup_page_returns_without_scanning_bank(self):
         with mock.patch.object(
                 app_module.filestore, "list_questions",
@@ -1025,7 +1105,7 @@ class PageTests(unittest.TestCase):
         self.assertEqual(app_module._parse_block_mode("unknown"), "no_ai")
         html = app_module.app.test_client().get("/import").get_data(as_text=True)
         self.assertIn(
-            '<option value="no_ai" selected>全部不送入 AI，机械渲染（默认，不花额度）</option>',
+            '<option value="no_ai" selected>全部不送入 AI，机械渲染（默认）</option>',
             html,
         )
         self.assertNotIn('<option value="all_ai" selected>', html)
@@ -1036,19 +1116,19 @@ class PageTests(unittest.TestCase):
         self.assertEqual(data["pid"], os.getpid())
         self.assertEqual(Path(data["project"]), config.BASE_DIR)
 
-    def test_home_defaults_to_blank_and_all_is_explicit(self):
+    def test_home_defaults_to_first_question_page(self):
+        app_module.filestore.create_question(
+            "首页默认题卡回归", qtype="填空题", folder="首页回归")
         client = app_module.app.test_client()
-        blank = client.get("/")
-        self.assertEqual(blank.status_code, 200)
-        self.assertIn("从左侧选择一个题集".encode("utf-8"), blank.data)
-        self.assertIn("加载全部标签".encode("utf-8"), blank.data)
-        all_page = client.get("/?all=1")
-        self.assertEqual(all_page.status_code, 200)
-        self.assertIn(b'<option value="practice">', all_page.data)
-        self.assertIn(b'<select name="paper_tone">', all_page.data)
-        self.assertIn('米黄护眼'.encode("utf-8"), all_page.data)
+        page = client.get("/")
+        self.assertEqual(page.status_code, 200)
+        self.assertNotIn("从一个题集开始".encode("utf-8"), page.data)
+        self.assertRegex(page.get_data(as_text=True), r'data-total="[1-9]\d*"')
+        self.assertIn(b'<option value="practice">', page.data)
+        self.assertIn(b'<select name="paper_tone">', page.data)
+        self.assertIn('米黄护眼'.encode("utf-8"), page.data)
         self.assertIn('页眉 / 页脚设置（所有导出模式适用）'.encode("utf-8"),
-                      all_page.data)
+                      page.data)
 
     def test_home_renders_only_one_folder_move_select(self):
         tree = [{
@@ -1060,7 +1140,8 @@ class PageTests(unittest.TestCase):
                     "parent_id": "2026/全国卷", "cnt": 0, "depth": 2,
                     "children": [],
                 }],
-            }],
+                "children_loaded": False, "has_children": True,
+            }], "children_loaded": True, "has_children": True,
         }]
         flat = [tree[0], tree[0]["children"][0],
                 tree[0]["children"][0]["children"][0]]
@@ -1080,8 +1161,8 @@ class PageTests(unittest.TestCase):
         self.assertEqual(html.count('id="folder-move-select"'), 1)
         self.assertEqual(html.count('class="folder-move-select hidden"'), 1)
         self.assertIn('data-folder-id="2026"', html)
-        self.assertIn('data-parent-id="2026" data-loaded="0"', html)
-        self.assertNotIn('data-folder-id="2026/全国卷"', html)
+        self.assertIn('data-parent-id="2026" data-loaded="1"', html)
+        self.assertIn('data-folder-id="2026/全国卷"', html)
         self.assertNotIn('data-folder-id="2026/全国卷/分卷"', html)
         snapshot.assert_not_called()
         all_tags.assert_not_called()
@@ -1187,6 +1268,14 @@ class PageTests(unittest.TestCase):
         self.assertEqual(response.status_code, 410)
         self.assertFalse(response.get_json()["ok"])
 
+    def test_question_snapshot_failure_offers_explicit_reload_button(self):
+        template = (config.BASE_DIR / "templates" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn('id="question-scroll-retry" hidden', template)
+        self.assertIn("加载失败：${error.message}`, false, true", template)
+        self.assertIn("await loadFolderFragment(location.href, false)", template)
+        self.assertNotIn("（点击重试）", template)
+
     def test_export_paper_tone_accepts_only_white_or_cream(self):
         with app_module.app.test_request_context(
                 "/export", method="POST", data={"paper_tone": "cream"}):
@@ -1238,6 +1327,59 @@ class PageTests(unittest.TestCase):
             for call in export_mock.call_args_list
         ))
 
+    def test_homepage_exposes_docx_and_marks_pdf_only_controls(self):
+        page = app_module.app.test_client().get("/?all=1")
+
+        self.assertEqual(page.status_code, 200)
+        self.assertIn(b'<option value="docx">Word', page.data)
+        self.assertIn(b'id="export-format"', page.data)
+        self.assertIn(b'id="paper-tone-field"', page.data)
+        self.assertIn(b'id="wimath-logo-field"', page.data)
+        self.assertIn(b'id="word-export-hint"', page.data)
+
+    def test_docx_export_registers_office_filename_and_mime(self):
+        produced = config.OUTPUT_DIR / "mock.docx"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_bytes(b"docx-route-fixture")
+        question = {
+            "id": "q1", "body": "题干", "type": "填空题",
+            "difficulty": "3", "solution": "", "img_align": "",
+            "img_width": None, "img_split": None, "img_layouts": [],
+            "sol_img_split": None, "sol_img_layouts": [],
+        }
+        with (mock.patch.object(app_module, "_collect_questions",
+                                return_value=[question]),
+              mock.patch.object(app_module.service_ports, "export_document",
+                                return_value=produced) as export_mock):
+            response = app_module.app.test_client().post(
+                "/export", data={"fmt": "docx", "title": "月考"},
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["filename"], "月考.docx")
+        self.assertEqual(export_mock.call_args.kwargs["fmt"], "docx")
+        download = app_module.app.test_client().get(payload["url"])
+        self.assertEqual(
+            download.mimetype,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+        self.assertIn(".docx", download.headers["Content-Disposition"])
+        download.close()
+
+    def test_export_rejects_unknown_format_before_service_call(self):
+        with (mock.patch.object(app_module, "_collect_questions",
+                                return_value=[{"id": "q1"}]),
+              mock.patch.object(
+                  app_module.service_ports, "export_document") as export_mock):
+            response = app_module.app.test_client().post(
+                "/export", data={"fmt": "exe"},
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("导出格式", response.get_json()["error"])
+        self.assertFalse(export_mock.called)
+
     def test_export_collection_passes_question_difficulty(self):
         qid = app_module.filestore.create_question(
             "（1）第一问\n（2）第二问", qtype="解答题", difficulty="5")
@@ -1258,6 +1400,8 @@ class PageTests(unittest.TestCase):
             "/", query_string={"collection": folder})
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'class="paper-open-obsidian"', response.data)
+        self.assertIn(b'class="btn btn-ghost btn-sm paper-open-library"', response.data)
+        self.assertIn(b"open-library-file", response.data)
         self.assertIn(b"post('open-file'", response.data)
         self.assertIn(b"post('location'", response.data)
 
@@ -1485,7 +1629,8 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertIn("library-tabs.js", page.get_data(as_text=True))
         self.assertIn('id="library-panes"', page.get_data(as_text=True))
         self.assertIn('data-library-layout="vertical"', page.get_data(as_text=True))
-        self.assertIn("Markdown 可在源码模式直接编辑", page.get_data(as_text=True))
+        self.assertIn('data-help-title="资料库帮助"', page.get_data(as_text=True))
+        self.assertIn("Markdown 保存前会核对磁盘版本", page.get_data(as_text=True))
         listing = self.client.get(
             "/api/library/children", query_string={"path": "资料阅读测试"})
         self.assertEqual(listing.status_code, 200)
@@ -1772,9 +1917,20 @@ class HandoutStorageTests(unittest.TestCase):
         app_module.filestore.set_img_width(qid, 66)
         app_module.filestore.set_img_split(qid, "full", field="solution")
         app_module.filestore.toggle_selected(qid)
-        selected = self.client.get("/api/handouts/selected")
+        # 模拟桌面冷启动：没有题卡缓存时也只能扫描 frontmatter 头部，不得解析全库。
+        with app_module.filestore._scan_lock:
+            app_module.filestore._cache.clear()
+        app_module.filestore.invalidate_scan_cache()
+        with mock.patch.object(
+                app_module.filestore, "_scan",
+                side_effect=AssertionError("读取选题篮不应扫描全库")):
+            selected = self.client.get("/api/handouts/selected")
         self.assertEqual(selected.status_code, 200)
-        self.assertIn(qid, {row["id"] for row in selected.get_json()["questions"]})
+        selected_rows = selected.get_json()["questions"]
+        self.assertIn(qid, {row["id"] for row in selected_rows})
+        selected_row = next(row for row in selected_rows if row["id"] == qid)
+        self.assertIn('class="q-stem"', selected_row["body_html"])
+        self.assertIn("$x$", selected_row["body_html"])
         snapshot = self.client.get(f"/api/handouts/question/{qid}")
         self.assertEqual(snapshot.status_code, 200)
         data = snapshot.get_json()
@@ -1842,6 +1998,46 @@ class HandoutStorageTests(unittest.TestCase):
         self.assertEqual(markdown.count(r"\columnbreak"), 1)
         self.assertIn(r"\clearpage", markdown)
 
+    def test_portable_markdown_export_has_no_internal_or_tex_markers(self):
+        first = app_module.handouts.new_block_id()
+        second = app_module.handouts.new_block_id()
+        meta = app_module.handouts._default_metadata("可编辑讲义")
+        meta["solution_default"] = "appendix"
+        meta["question_blocks"][first] = {
+            "question_type": "填空题", "solution_placement": "inline",
+        }
+        meta["question_blocks"][second] = {
+            "question_type": "解答题", "number_override": "例1",
+            "solution_placement": "inherit",
+        }
+        body = "\n\n".join([
+            "## 知识点",
+            app_module.handouts.question_marker(
+                first, "第一题 $x$ ![[figure.png]]", "【解析】第一解"),
+            app_module.handouts.PAGE_BREAK_MARKER,
+            app_module.handouts.question_marker(second, "第二题", "第二解"),
+        ])
+
+        markdown, warnings = (
+            app_module.service_ports.handout_exporter.build_portable_markdown(
+                meta, body))
+        self.assertEqual(warnings, [])
+        self.assertTrue(markdown.startswith("# 可编辑讲义\n"))
+        self.assertIn("**1.**", markdown)
+        self.assertIn("**例1**", markdown)
+        self.assertIn("**解析**\n\n第一解", markdown)
+        self.assertIn("## 参考解析", markdown)
+        self.assertIn("![[figure.png]]", markdown)
+        self.assertIn("\n---\n", markdown)
+        self.assertNotIn("quizforge:", markdown)
+        self.assertNotIn(r"\qopen", markdown)
+        self.assertNotIn(r"\begin{samepage}", markdown)
+
+        exported = app_module.service_ports.handout_exporter.export(
+            meta, body, fmt="md")
+        self.assertEqual(exported.suffix, ".md")
+        self.assertEqual(exported.read_text(encoding="utf-8"), markdown)
+
     def test_handout_solution_prefix_is_stripped_and_slides_use_left_70_percent(self):
         block_id = app_module.handouts.new_block_id()
         meta = app_module.handouts._default_metadata(
@@ -1863,7 +2059,7 @@ class HandoutStorageTests(unittest.TestCase):
         self.assertNotIn("【解析】", markdown)
         self.assertIn(r"\qwrapclear", markdown)
         self.assertLess(markdown.index("body.png"), markdown.index("只显示这一段解析"))
-        self.assertLess(markdown.index("solution.png"), markdown.index("只显示这一段解析"))
+        self.assertLess(markdown.index("只显示这一段解析"), markdown.index("solution.png"))
         self.assertLess(markdown.index(r"\qclose\end{samepage}"),
                         markdown.index(r"\begin{wrapfigure}"))
         self.assertLess(markdown.index(r"\begin{wrapfigure}"),
@@ -1897,7 +2093,8 @@ class HandoutStorageTests(unittest.TestCase):
         inline_wrap = markdown.index(r"\begin{wrapfigure}")
         self.assertLess(markdown.index(r"\end{qpracticesolve}"), inline_wrap)
         self.assertLess(markdown.index(r"\qclose\end{samepage}"), inline_wrap)
-        self.assertIn("**2.**\n\n```{=latex}\n\\begin{wrapfigure}", markdown)
+        self.assertIn(
+            "**2.**\n\n文末解析\n\n```{=latex}\n\\begin{wrapfigure}", markdown)
         self.assertNotIn("**2.** ```{=latex}", markdown)
 
     def test_handout_preview_and_export_routes_use_service_port(self):
@@ -1992,6 +2189,13 @@ class HandoutStorageTests(unittest.TestCase):
         self.assertIn("QFIGSLOT", staged["body"])
         self.assertNotIn("outside", staged["body"])
 
+        first_fingerprint = app_module.service_ports.handout_exporter._question_image_fingerprints(
+            "![[safe.png]]")
+        safe.write_bytes(b"safe image replaced")
+        second_fingerprint = app_module.service_ports.handout_exporter._question_image_fingerprints(
+            "![[safe.png]]")
+        self.assertNotEqual(first_fingerprint, second_fingerprint)
+
         link = config.IMAGES_DIR / "linked"
         try:
             link.symlink_to(config.IMAGES_DIR.parent, target_is_directory=True)
@@ -2028,6 +2232,8 @@ class HandoutStorageTests(unittest.TestCase):
         (dist / "QuizForge.exe").write_bytes(b"MZ")
         problems = verify_desktop_bundle.scan(dist, Path(__file__).parent.parent)
         self.assertTrue(any("wimath-logo-latex-black.pdf" in item
+                            for item in problems))
+        self.assertTrue(any("word-reference.docx" in item
                             for item in problems))
 
 

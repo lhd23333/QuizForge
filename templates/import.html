@@ -3,16 +3,10 @@
 {% block content %}
 <section class="app-page import-page">
 <header class="app-page-head">
-  <div>
-    <h1>批量导入</h1>
-    <p>批量试卷转换、Markdown 校对与规范化文本导入，都在当前题库内完成。</p>
-  </div>
+  <h1>批量导入</h1>
 </header>
 
 {% if preview is none %}
-<p class="muted desktop-only">所有上传框都支持<strong>拖拽文件</strong>；题干 / 解析框还支持<strong>直接 Ctrl+V 粘贴截图</strong>。</p>
-<p class="muted mobile-only">点击上传框即可<strong>拍照</strong>或<strong>从相册 / 文件选择</strong>。</p>
-
 <div class="import-tabs">
   {# 方式一：批量试卷转换。置顶，因为它是主路径——一次能配多组，单份也只是「只
      加一组」的特例。原先还有一个「单份 PDF/图片」的入口，走的是同一条
@@ -20,17 +14,8 @@
      #picknum-* 控件；已删掉（线上版同样只有批量这一条入口）。后端
      /convert/start 与 /convert/status 保留不动：方式一每组仍是一个 job，
      「重新转换」也还在用同一套 _jobs 结构。 #}
-  <section class="import-box">
-    <h3>方式一：批量试卷转换（PDF / Word / 图片）</h3>
-    <p class="muted">每个任务对应<strong>一份试卷</strong>：题干区放 PDF、Word 或图片（多张图按顺序合成一份），
-      解析区可选放对应答案。单批最多 <strong>{{ upload_limits.max_groups }}</strong> 组，
-      转换在后台<strong>并发</strong>进行（同时最多 {{ batch_concurrency }} 组，其余排队），
-      转好一组即可<strong>进校对页人工审核入库</strong>；
-      勾了下面的「不审核直接入库」则转完即自动落库。
-      可随时离开，从导航栏「转换任务」回来。</p>
-    <p class="muted">「从文件夹导入」会递归扫整个目录：<strong>PDF、Word（.docx）与图片都收</strong>；
-      同一子目录下的图片按页码自然序合成一份卷子，文件名带「答案 / 解析」字样的自动配到解析区。
-      旧版 .doc 请先另存为 .docx。一本 PDF 中含多套试卷时，在对应任务卡勾选“多份试卷合集”。</p>
+  <section class="import-box import-primary">
+    <h3>试卷转换</h3>
 
     {# 上传边界由后端 config 注入（见 app._upload_limits）：JS 提交前要按这些数
        早报错，但数只该有一份定义——前端自己抄一份常量必然出现「改了后端忘了改
@@ -39,10 +24,9 @@
 
     <label class="conv-sol" style="display:block;margin:8px 0">PDF 解析服务（整批统一）
       <select id="batch-ocr-backend" class="input" style="width:auto;margin-left:6px">
-        <option value="mineru" selected>MinerU（原链路，可多账号轮转）</option>
-        <option value="doc2x">Doc2X v3（结构和公式保真更好）</option>
+        <option value="mineru" selected>MinerU</option>
+        <option value="doc2x">Doc2X</option>
       </select>
-      <span class="muted">凭证在“设置”页配置。</span>
     </label>
 
     {# 默认项必须与 app.py 的 _DEFAULT_ENGINE 一致（现在是 block），也与线上版
@@ -51,8 +35,8 @@
        卷子在两版里的产物就不一样（解答题小问之间空三行 vs 不空）。 #}
     <label class="conv-sol" style="display:block;margin:8px 0">拆题方式（整批统一）
       <select id="batch-engine" class="input" style="width:auto;margin-left:6px">
-        <option value="block" selected>逐题识别（默认，先按题号切块再逐块判定，题目更不易漏）</option>
-        <option value="whole">整篇识别（把全文一次交给 AI，题号写法特别古怪时可试）</option>
+        <option value="block" selected>逐题识别</option>
+        <option value="whole">整篇识别</option>
       </select>
     </label>
     {# 初始 display 跟着上面的默认项走（默认逐题识别，所以是显示）：写死 none 的话，
@@ -64,13 +48,12 @@
           {# 勾了下面的「不审核直接入库」时这一项会被 JS 禁掉：免审就是要求全自动，
              停下来等人自相矛盾，后端也会把它否决成 all_ai。 #}
           <option value="manual">切块后暂停，先人工审核拆题结果</option>
-          <option value="no_ai" selected>全部不送入 AI，机械渲染（默认，不花额度）</option>
+          <option value="no_ai" selected>全部不送入 AI，机械渲染（默认）</option>
         </select>
       </label>
       <label class="conv-sol">题号模板（可选）
         <input type="text" id="batch-num-template" class="input"
                style="width:200px;margin-left:6px" placeholder="留空=自动判定，如 第X题">
-        <span class="muted">用 x 或 X 代表题号数字（如 <code>x.</code>、<code>第X题</code>）。</span>
       </label>
     </div>
 
@@ -106,8 +89,8 @@
     </div>
 
     <div class="batch-actions">
-      <button type="button" class="btn" id="add-task">+ 添加任务组</button>
-      <button type="button" class="btn" id="import-folder">从文件夹导入并自动配对</button>
+      <button type="button" class="btn" id="add-task">添加任务组</button>
+      <button type="button" class="btn" id="import-folder">导入文件夹</button>
       {# webkitdirectory 会连整棵子树一起给过来，PDF / Word / 图片都收（图片按所在
          子目录归组，见 import-upload.js 的 folderKey）。这个 input 不写 accept：
          目录选择模式下浏览器不按 accept 过滤，真正的筛选在 JS 里做。 #}
@@ -124,7 +107,6 @@
       <button type="button" class="icon-btn" data-batch-folder-close
               aria-label="关闭" title="关闭">×</button>
     </div>
-    <p class="muted">目录按需展开，不会在打开批量导入时扫描整棵题库。</p>
     <div class="batch-folder-tree" id="batch-target-parent-tree" role="tree">
       <button type="button" class="batch-folder-row is-root is-selected"
               data-folder-id="" data-folder-name="题库根目录">
@@ -143,8 +125,7 @@
   <!-- 方式二 + 方式三：md 文件与粘贴，并排一行（都不经 AI，摆在批量转换之后） -->
   <div class="upload-grid">
     <section class="import-box">
-      <h3>方式二：批量上传 md 文件</h3>
-      <p class="muted">多个已规范化的 <code>.md</code> 文件，逐个进校对页导入（文件名默认作整批标签）。</p>
+      <h3>Markdown 文件</h3>
       <div class="dropzone" id="dz-md" tabindex="0">
         <div class="dz-hint desktop-only">把 .md / .markdown / .txt 拖到此处，或点击选择（可多选）</div>
         <div class="dz-hint mobile-only">点击选择 .md 文件（可多选）</div>
@@ -157,7 +138,7 @@
 
     <!-- 方式三：直接贴 md -->
     <form method="post" class="import-box">
-      <h3>方式三：粘贴规范化 Markdown</h3>
+      <h3>粘贴 Markdown</h3>
       <div class="field">
         <textarea name="md" id="paste-md" rows="10" class="input"
                   placeholder="- 第一题...&#10;&#10;- 第二题...（也可以把 .md 文件直接拖进这个框）">{{ raw or '' }}</textarea>

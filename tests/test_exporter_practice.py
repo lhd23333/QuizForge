@@ -155,7 +155,7 @@ class PracticeExportTests(unittest.TestCase):
         self.assertNotIn("【解析】", md)
 
     def test_solution_image_split_wraps_text_below_image(self):
-        source = "证明如下\nQFIGSLOT0"
+        source = "图片前保持整行\nQFIGSLOT0\n从这里开始环绕\n图片下恢复整行"
         files = ["answer.png"]
         layouts = [{"i": 0, "w": 35}]
 
@@ -169,8 +169,12 @@ class PracticeExportTests(unittest.TestCase):
         self.assertIn(r"\qwrapclear", split)
         self.assertNotIn(r"\begin{minipage}[t]{0.61\linewidth}", split)
         self.assertIn("answer.png", split)
-        self.assertLess(split.index(r"\begin{wrapfigure}"), split.index("证明如下"))
-        self.assertLess(split.index("证明如下"), split.index(r"\qwrapclear"))
+        self.assertLess(split.index("图片前保持整行"),
+                        split.index(r"\begin{wrapfigure}"))
+        self.assertLess(split.index(r"\begin{wrapfigure}"),
+                        split.index("从这里开始环绕"))
+        self.assertLess(split.index("图片下恢复整行"),
+                        split.index(r"\qwrapclear"))
 
     def test_solution_image_wrap_defaults_to_editor_width(self):
         split = exporter._solution_md(
@@ -198,8 +202,8 @@ class PracticeExportTests(unittest.TestCase):
         # wrapfig 不能位于 qopen/qclose 的 list 内，否则 TeX 会把图强制漂到解析末尾。
         self.assertLess(markdown.index(r"\qclose"),
                         markdown.index(r"\begin{wrapfigure}"))
-        self.assertLess(markdown.index(r"\begin{wrapfigure}"),
-                        markdown.index("解析正文"))
+        self.assertLess(markdown.index("解析正文"),
+                        markdown.index(r"\begin{wrapfigure}"))
 
     def test_practice_inline_solution_wrap_stays_outside_layout_wrappers(self):
         markdown = exporter._render_block({
@@ -225,7 +229,8 @@ class PracticeExportTests(unittest.TestCase):
             exporter._SOL_IMG_FILES_KEY: ["answer.png"],
         })
 
-        self.assertIn("**7.**\n\n```{=latex}\n\\begin{wrapfigure}", markdown)
+        self.assertIn(
+            "**7.**\n\n解析正文\n\n```{=latex}\n\\begin{wrapfigure}", markdown)
         self.assertNotIn("**7.** ```{=latex}", markdown)
 
         pandoc = Path(exporter.config.PANDOC)

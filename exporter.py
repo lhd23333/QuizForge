@@ -1460,12 +1460,14 @@ def _place_text_figure_split(markdown: str, ids: list[int],
 def _place_text_figure_wrap(markdown: str, ids: list[int],
                             marks: list[tuple[str, str]],
                             layouts: dict[int, dict], plan: dict,
-                            width=None) -> str:
-    """把解析的首个题末图片组放入 wrapfigure，图下恢复整行文字。
+                            width=None, before: str = "") -> str:
+    """从图片引用位置开始放置 wrapfigure，图下恢复整行文字。
 
     存储层仍用 ``sol_img_split='full'`` 兼容旧题；只替换显示/导出层的
     排版实现。图片组占比继续由用户设置的 ``w`` 决定；对齐为 left
     时浮在左侧，right 浮在右侧，历史的 center/缺省值沿用原右图语义。
+    ``before`` 是图片引用之前的整宽内容；``markdown`` 是引用之后才参与环绕的
+    内容。两者不能再颠倒，否则图片会固定漂到整段解析右上角。
     本题末尾用 ``\\qwrapclear`` 收口，防止下一道题继续绕上一题的图。
     """
     unit, rest_ids = _split_first_unit(ids, plan)
@@ -1481,8 +1483,42 @@ def _place_text_figure_wrap(markdown: str, ids: list[int],
             f"{figure}\\end{{wrapfigure}}")
     clear = _raw("\\qwrapclear").strip("\n")
     rest = _figs_latex_planned(rest_ids, marks, layouts, plan)
-    return (_raw(wrap).lstrip("\n") + "\n\n" + markdown
-            + "\n\n" + clear + rest)
+    parts = []
+    if before.strip():
+        parts.append(before.strip("\n"))
+    parts.append(_raw(wrap).strip("\n"))
+    if markdown.strip():
+        parts.append(markdown.strip("\n"))
+    parts.append(clear)
+    return "\n\n".join(parts) + rest
+
+
+def _split_at_figure_slot(text: str, unit: dict) -> tuple[str, str] | None:
+    """按视觉图片组的首个哨兵切开正文，并清掉同组其余哨兵。
+
+    返回值左侧保持整宽，右侧从图片引用所在行开始参与环绕。只认 plan_figs 已经
+    生成的数字哨兵，不做字符串猜测；找不到锚点时返回 None 让调用方安全回退。
+    """
+    ids = [int(item) for item in (unit.get("ids") or [])]
+    if not ids:
+        return None
+    first = ids[0]
+    anchor = next(
+        (match for match in _SLOT_RE.finditer(text)
+         if int(match.group(1)) == first),
+        None,
+    )
+    if anchor is None:
+        return None
+    before = text[:anchor.start()].rstrip()
+    after = text[anchor.end():]
+    extra = set(ids[1:])
+    if extra:
+        after = _SLOT_RE.sub(
+            lambda match: "" if int(match.group(1)) in extra else match.group(0),
+            after,
+        )
+    return before, after.lstrip()
 
 
 def _split_img_hcap(frac: float) -> float:
@@ -2151,16 +2187,31 @@ def _solution_body(text: str, files: list[str] = None,
         return _format_options(_drop_slots(text))
     plan = plan_figs(text, None, sol_img_layouts, sol_img_split)
     layouts = _parse_layouts(sol_img_layouts)
+    all_ids = [s["i"] for s in plan["slots"] if s["i"] < len(marks)]
     inline_ids = [s["i"] for s in plan["slots"] if s["pos"] == "stem"]
     tail_ids = [s["i"] for s in plan["slots"]
                 if s["i"] not in set(inline_ids) and s["i"] < len(marks)]
+    if sol_img_split == "full" and all_ids:
+        unit, rest_ids = _split_first_unit(all_ids, plan)
+        split = _split_at_figure_slot(text, unit)
+        if split is not None:
+            before_text, after_text = split
+            inline_set = set(inline_ids)
+            rest_inline = [item for item in rest_ids if item in inline_set]
+            rest_tail = [item for item in rest_ids if item not in inline_set]
+            if rest_inline:
+                after_text = _fill_slots(
+                    after_text, rest_inline, marks, layouts, plan)
+            before_md = _format_options(_drop_slots(before_text))
+            after_md = _format_options(_drop_slots(after_text))
+            wrapped = _place_text_figure_wrap(
+                after_md, unit.get("ids") or [], marks, layouts, plan,
+                width=_DEFAULT_IMG_FRAC, before=before_md)
+            return wrapped + _figs_latex_planned(
+                rest_tail, marks, layouts, plan)
     if inline_ids:
         text = _fill_slots(text, inline_ids, marks, layouts, plan)
     markdown = _format_options(_drop_slots(text))
-    if sol_img_split == "full" and tail_ids:
-        return _place_text_figure_wrap(
-            markdown, tail_ids, marks, layouts, plan,
-            width=_DEFAULT_IMG_FRAC)
     return markdown + _figs_latex_planned(tail_ids, marks, layouts, plan)
 
 

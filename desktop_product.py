@@ -10,11 +10,12 @@ import sys
 
 import config
 import filestore
-import license_manager
 import service_ports
+import mineru_store
+import doc2x_store
 
 
-PRODUCT_VERSION = "0.17.0-beta"
+PRODUCT_VERSION = "1.0.0"
 DEMO_FOLDER = "QuizForge 示例题库"
 
 
@@ -117,7 +118,6 @@ def _tool_check(name: str, configured: str, missing: str,
 
 def environment_report() -> dict[str, object]:
     """返回关于页所需的只读诊断，不发网络请求、不运行外部转换。"""
-    license_state = license_manager.load()
     checks = [
         _path_check("题库目录", config.BANK_DIR),
         _path_check("运行数据目录", config.DATA_DIR),
@@ -131,13 +131,24 @@ def environment_report() -> dict[str, object]:
             required=False,
         ),
     ]
-    if license_manager.is_enforced():
-        checks.insert(0, {
-            "name": "软件授权",
-            "status": "ok" if license_state.valid else "error",
-            "summary": license_state.summary,
-            "detail": license_state.detail,
-        })
+    checks.insert(0, {
+        "name": "运行模式",
+        "status": "ok",
+        "summary": "开源本地",
+        "detail": "核心功能直接使用；联网仅在用户主动检查更新时使用。",
+    })
+    checks.append({
+        "name": "MinerU Token",
+        "status": "ok" if mineru_store.has_token() else "warn",
+        "summary": "已配置" if mineru_store.has_token() else "未配置",
+        "detail": "未配置时仍可手动导入 Markdown；需要 OCR 时在设置页添加自己的 Token。",
+    })
+    checks.append({
+        "name": "Doc2X API Key",
+        "status": "ok" if doc2x_store.has_key() else "warn",
+        "summary": "已配置" if doc2x_store.has_key() else "未配置",
+        "detail": "多份 Key 会按忙闲和轮转使用；未配置时不影响题库编辑和本地导出。",
+    })
     try:
         free_gib = shutil.disk_usage(config.DATA_DIR).free / (1024 ** 3)
         checks.append({
@@ -161,6 +172,5 @@ def environment_report() -> dict[str, object]:
         "log_dir": str(config.DATA_DIR / "logs"),
         "checks": checks,
         "ready": all(row["status"] != "error" for row in checks),
-        "license": license_state.to_dict(),
         "services": services,
     }

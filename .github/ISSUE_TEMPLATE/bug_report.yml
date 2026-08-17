@@ -1,0 +1,43 @@
+name: Bug 报告
+description: 报告可复现的软件问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传真实 API Key、私密题库或未公开漏洞细节。
+  - type: input
+    id: version
+    attributes:
+      label: QuizForge 版本
+      placeholder: 例如 0.17.0-beta
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 说明实际结果与预期结果。
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: 请使用可公开的最小样例。
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: Windows 版本、安装版或源码运行、相关 OCR/TeX 环境。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未找到相同问题。
+          required: true
+        - label: 我已移除 API Key、个人资料和私密题库内容。
+          required: true

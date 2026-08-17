@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -96,6 +97,25 @@ class WordOoxmlTests(unittest.TestCase):
         self.assertTrue(config.WORD_REFERENCE_DOCX.is_file())
         self.assertTrue(zipfile.is_zipfile(config.WORD_REFERENCE_DOCX))
 
+    def test_atomic_replace_retries_a_transient_windows_lock(self):
+        error = PermissionError(13, "文件暂时被占用")
+        with mock.patch.object(word_ooxml.os, "replace",
+                               side_effect=[error, None]) as replace, \
+                mock.patch.object(word_ooxml.time, "sleep") as sleep:
+            word_ooxml._replace_with_retry(Path("source"), Path("target"))
+        self.assertEqual(replace.call_count, 2)
+        sleep.assert_called_once_with(0.02)
+
+    def test_atomic_replace_stops_after_bounded_retries(self):
+        error = PermissionError(13, "文件持续被占用")
+        with mock.patch.object(word_ooxml.os, "replace",
+                               side_effect=error) as replace, \
+                mock.patch.object(word_ooxml.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                word_ooxml._replace_with_retry(Path("source"), Path("target"))
+        self.assertEqual(replace.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+
     def test_patch_adds_practice_columns_page_fields_and_fixed_tables(self):
         path = build_minimal_docx(self.temp_dir / "minimal.docx")
 
@@ -117,12 +137,18 @@ class WordOoxmlTests(unittest.TestCase):
         column_counts = [node.get(f"{{{W}}}num", "1")
                          for node in document.findall(".//w:sectPr/w:cols", NS)]
         self.assertIn("2", column_counts)
+        sections = document.findall(".//w:sectPr", NS)
+        self.assertIsNone(sections[0].find("w:type", NS))
+        self.assertEqual(
+            sections[-1].find("w:type", NS).get(f"{{{W}}}val"),
+            "continuous",
+        )
         table_width = document.find(".//w:tbl/w:tblPr/w:tblW", NS)
         self.assertEqual(table_width.get(f"{{{W}}}type"), "dxa")
-        self.assertEqual(table_width.get(f"{{{W}}}w"), "9746")
+        self.assertEqual(table_width.get(f"{{{W}}}w"), "4300")
         grid_widths = [int(node.get(f"{{{W}}}w"))
                        for node in document.findall(".//w:tblGrid/w:gridCol", NS)]
-        self.assertEqual(sum(grid_widths), 9746)
+        self.assertEqual(sum(grid_widths), 4300)
 
         footer = ET.fromstring(read_part(path, "word/footer1.xml"))
         instructions = [node.get(f"{{{W}}}instr")

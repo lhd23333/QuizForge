@@ -53,6 +53,7 @@
 
   function reviewUrl(gid) { return '/batch/' + batchId + '/group/' + gid; }
   function blocksUrl(gid) { return reviewUrl(gid) + '/blocks'; }
+  function sourceUrl(gid) { return reviewUrl(gid) + '/source'; }
   function reconvertUrl(gid) { return reviewUrl(gid) + '/reconvert'; }
   function skipUrl(gid) { return reviewUrl(gid) + '/skip'; }
   function cancelUrl(gid) { return reviewUrl(gid) + '/cancel'; }
@@ -116,7 +117,8 @@
         actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + blocksUrl(g.gid) + '">审核拆题 →</a>';
       } else if (g.status === 'error') {
         failed++;
-        stateEl.innerHTML = '<span class="bp-st bp-err-st">转换失败</span>';
+        stateEl.innerHTML = '<span class="bp-st bp-err-st">' +
+          (g.source_editable ? '需要调整 Markdown' : '转换失败') + '</span>';
         if (g.error) {
           // OCR 标题属于外部文档内容，绝不能拼进 innerHTML；否则标题里的
           // HTML 会在本机看板执行，并拿到页面写令牌。
@@ -128,7 +130,9 @@
         // 失败组原来只显示一句错误、没有任何按钮，等于死路：重转入口本在校对页，
         // 而校对页正因为这组有问题打不开。所以把「重新转换」「跳过」直接放到这里，
         // 原文件在整批审核结束前都还留在磁盘上，重转不需要用户重新上传。
-        actEl.innerHTML =
+        actEl.innerHTML = (g.source_editable
+          ? '<a class="btn btn-primary btn-sm" href="' + sourceUrl(g.gid) + '">调整 Markdown</a> '
+          : '') +
           '<form method="post" style="display:inline" action="' + reconvertUrl(g.gid) + '">' +
           '<button type="submit" class="btn btn-sm">重新转换</button></form> ' +
           '<form method="post" style="display:inline" action="' + skipUrl(g.gid) + '">' +

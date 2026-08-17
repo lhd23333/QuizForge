@@ -1,0 +1,59 @@
+{% set endpoint = request.endpoint or '' %}
+{% if endpoint == 'index' %}
+  {% set help_title = '题库帮助' %}
+{% elif endpoint.startswith('handouts') %}
+  {% set help_title = '讲义帮助' %}
+{% elif endpoint.startswith('library') %}
+  {% set help_title = '资料库帮助' %}
+{% elif endpoint.startswith('import') or endpoint.startswith('block_') %}
+  {% set help_title = '导入帮助' %}
+{% elif 'batch' in endpoint %}
+  {% set help_title = '转换任务帮助' %}
+{% elif endpoint == 'dedup_page' %}
+  {% set help_title = '查重帮助' %}
+{% elif endpoint == 'recycle_bin' %}
+  {% set help_title = '回收站帮助' %}
+{% elif endpoint.startswith('settings') %}
+  {% set help_title = '设置帮助' %}
+{% elif endpoint in ['about_page', 'welcome_page'] %}
+  {% set help_title = 'QuizForge 帮助' %}
+{% else %}
+  {% set help_title = '当前页面帮助' %}
+{% endif %}
+<template id="page-help-content" data-help-title="{{ help_title }}">
+  {% if endpoint == 'index' %}
+    <h3>题目范围</h3><p>左侧可按文件夹、标签、题型和难度筛选。搜索支持普通文本与结构化条件。</p>
+    <h3>组卷</h3><p>勾选题目后打开选题篮，调整顺序与版式，再选择 HTML 近似预览、本机 PDF 或 TeX ZIP。</p>
+    <h3>本地文件</h3><p>每道题都是题库目录中的 Markdown 文件。移动、重命名和编辑会直接写入当前题库。</p>
+  {% elif endpoint.startswith('handouts') %}
+    <h3>编辑讲义</h3><p>新建或打开讲义后，从选题篮插入题目，并在右侧检查器调整标题、编号和内容。</p>
+    <h3>保存与导出</h3><p>讲义保存在当前题库的 <code>_handouts</code> 目录。导出前先保存，外部修改冲突时页面会保留当前草稿。</p>
+  {% elif endpoint.startswith('library') %}
+    <h3>浏览资料</h3><p>左侧按需展开题库文件。Markdown、PDF 和图片会在右侧以标签页打开。</p>
+    <h3>分栏与编辑</h3><p>可切换单栏、左右分栏或上下分栏。Markdown 保存前会核对磁盘版本，避免覆盖 Obsidian 的外部修改。</p>
+  {% elif endpoint.startswith('import') or endpoint.startswith('block_') %}
+    <h3>选择文件</h3><p>每个任务对应一份试卷。题干和解析可上传 PDF、DOCX 或按顺序排列的图片。</p>
+    <h3>识别方式</h3><p>OCR 可选 MinerU 或 Doc2X；拆题可选逐题识别、整篇识别或不使用 AI。凭据在设置页加密保存在本机。</p>
+    <h3>入库</h3><p>转换完成后先审核题目，再选择目标文件夹入库。中止任务不会自动重放已经发出的付费请求。</p>
+  {% elif 'batch' in endpoint %}
+    <h3>任务状态</h3><p>各组独立转换，完成一组即可审核一组，不必等待整批结束。</p>
+    <h3>中止</h3><p>未开始的组会跳过；已发给外部服务的组会跑完但结果作废，避免重复计费。</p>
+  {% elif endpoint == 'dedup_page' %}
+    <h3>题目查重</h3><p>调整相似度后扫描当前范围，确认内容后再决定保留或删除。</p>
+    <h3>图片体检</h3><p>系统会跨全部登记题库、回收站、讲义和安全备份核对引用。任一目录不可访问时会拒绝删除图片。</p>
+  {% elif endpoint == 'recycle_bin' %}
+    <h3>恢复</h3><p>题目和题集可恢复到原位置；原父题集不存在时会恢复到题库根目录。</p>
+    <h3>永久删除</h3><p>清空回收站不可撤销。题目引用的图片只有在所有登记题库中均未使用时才会删除。</p>
+  {% elif endpoint.startswith('settings') %}
+    <h3>本地 OCR</h3><p>MinerU Token 和 Doc2X Key 都由你自己提供，支持多份 Key 按忙闲和轮转使用。凭据只保存在本机。</p>
+    <h3>本机密钥</h3><p>MinerU、Doc2X 和模型 API Key 使用 <code>data/.enc_key</code> 加密。删除或更换该文件后，已保存密钥无法恢复。</p>
+    <h3>模型</h3><p>导入识别需要长上下文文本模型；配图重绘需要支持图片输入。Base URL 会自动补全 <code>/v1</code>。</p>
+    <h3>TeX</h3><p>本机 PDF 需要 XeLaTeX；没有本机环境时可导出 <code>.tex.zip</code> 到 Overleaf，或使用 HTML/KaTeX 近似预览。</p>
+  {% elif endpoint in ['about_page', 'welcome_page'] %}
+    <h3>工作方式</h3><p>QuizForge 将题目保存为普通 Markdown 文件，并把图片放在共享图片目录。题库可直接作为 Obsidian vault 使用。</p>
+    <h3>遇到问题</h3><p>先在关于页检查本机环境和更新状态。具体页面的操作说明可随时从左下角帮助打开。</p>
+  {% else %}
+    <h3>当前操作</h3><p>完成页面中的必要字段后提交。危险或不可撤销操作会在执行前再次确认。</p>
+    <h3>返回</h3><p>可从左侧导航随时回到题库、导入或转换任务，未提交的表单内容不会自动保存。</p>
+  {% endif %}
+</template>

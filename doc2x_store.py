@@ -2,6 +2,7 @@
 
 import json
 import logging
+from pathlib import Path
 import threading
 import uuid
 from datetime import datetime
@@ -13,44 +14,81 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 
 
-def _load() -> dict:
-    if not config.DOC2X_KEY_PATH.exists():
+def _path():
+    """新添加的 Key 只写入独立文件，避免覆盖升级前的配置。"""
+    return getattr(config, "DOC2X_LOCAL_KEY_PATH", config.DOC2X_KEY_PATH)
+
+
+def _legacy_path():
+    """返回升级前的配置文件；与新路径相同时不重复读取。"""
+    path = getattr(config, "DOC2X_KEY_PATH", None)
+    if path is None:
+        return None
+    path = Path(path)
+    return None if path == Path(_path()) else path
+
+
+def _load(path) -> dict:
+    if not path.exists():
         return {}
     try:
-        data = json.loads(config.DOC2X_KEY_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
-        logger.warning("doc2x.json 解析失败，视为未配置")
+        logger.warning("Doc2X 配置解析失败，已跳过：%s", path)
         return {}
 
 
 def _save(data: dict) -> None:
-    config.DOC2X_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    config.DOC2X_KEY_PATH.write_text(
+    path = _path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def has_key() -> bool:
     """只判断密文是否存在；不在页面请求里解密。"""
-    return bool(_entries())
+    return bool(_all_entries())
 
 
-def _entries() -> list[dict]:
-    data = _load()
+def _entries_from(path, source: str) -> list[dict]:
+    if path is None:
+        return []
+    data = _load(path)
     items = data.get("keys")
     if isinstance(items, list):
-        return [item for item in items
+        return [{**item, "source": source} for item in items
                 if isinstance(item, dict) and item.get("key_enc")]
     encrypted = (data.get("key_enc") or "").strip()
     if encrypted:
-        return [{"id": "legacy", "label": "", "key_enc": encrypted, "added": ""}]
+        return [{"id": "single", "label": "", "key_enc": encrypted,
+                 "added": "", "source": source}]
     return []
+
+
+def _local_entries() -> list[dict]:
+    return _entries_from(_path(), "local")
+
+
+def _all_entries() -> list[dict]:
+    """合并新旧配置；相同密文只保留一份，旧文件始终只读。"""
+    result = []
+    seen = set()
+    for item in [*_local_entries(), *_entries_from(_legacy_path(), "legacy")]:
+        encrypted = str(item.get("key_enc") or "")
+        if not encrypted or encrypted in seen:
+            continue
+        seen.add(encrypted)
+        result.append(item)
+    return result
 
 
 def list_keys() -> list[dict]:
     """设置页只取非敏感元数据。"""
     return [{"id": item.get("id") or "", "label": item.get("label") or "",
-             "added": item.get("added") or ""} for item in _entries()]
+             "added": item.get("added") or "",
+             "legacy": item.get("source") == "legacy"}
+            for item in _all_entries()]
 
 
 def add_key(plain: str, label: str = "") -> bool:
@@ -59,7 +97,7 @@ def add_key(plain: str, label: str = "") -> bool:
         return False
     encrypted = crypto_utils.encrypt_token(plain)
     with _lock:
-        items = _entries()
+        items = _local_entries()
         items.append({"id": uuid.uuid4().hex, "label": label.strip(),
                       "key_enc": encrypted,
                       "added": datetime.now().isoformat(timespec="seconds")})
@@ -85,7 +123,7 @@ def clear_key() -> None:
 
 def remove_key(key_id: str) -> bool:
     with _lock:
-        items = _entries()
+        items = _local_entries()
         kept = [item for item in items if (item.get("id") or "") != key_id]
         if len(kept) == len(items):
             return False
@@ -96,7 +134,7 @@ def remove_key(key_id: str) -> bool:
 def resolve_all() -> list[str]:
     out = []
     seen = set()
-    for item in _entries():
+    for item in _all_entries():
         try:
             value = crypto_utils.decrypt_token(item["key_enc"])
         except crypto_utils.CryptoError:

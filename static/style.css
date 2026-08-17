@@ -1,13 +1,12 @@
 /* ============================================================
-   QuizForge 设计系统 · 清爽现代（蓝/靛主色）
+   QuizForge 设计系统 · 中性工作台
    —— 全站共用 token，改主题只改这一处 :root 变量
    ============================================================ */
 :root {
-  /* 主色：天蓝 */
-  --primary:        #0ea5e9;
-  --primary-hover:  #0284c7;
-  --primary-soft:   #e0f2fe;
-  --primary-ring:   #0ea5e933;
+  --primary:        #2563eb;
+  --primary-hover:  #1d4ed8;
+  --primary-soft:   #eff6ff;
+  --primary-ring:   #2563eb2e;
 
   /* 语义色 */
   --success:        #16a34a;
@@ -21,22 +20,23 @@
   --info-soft:      #e0f2fe;
 
   /* 中性 */
-  --bg:      #f4f5fb;
+  --bg:      #f7f7f8;
   --surface: #ffffff;
-  --surface-2: #f8fafc;
-  --border:  #e5e7eb;
-  --border-strong: #d1d5db;
-  --text:    #1e2430;
-  --text-2:  #4b5563;
-  --muted:   #667085;
+  --surface-2: #f4f4f5;
+  --border:  #e4e4e7;
+  --border-strong: #d4d4d8;
+  --text:    #18181b;
+  --text-2:  #52525b;
+  --muted:   #71717a;
 
   /* 形状与阴影 */
-  --radius:    12px;
-  --radius-sm: 8px;
-  --radius-lg: 16px;
-  --shadow-sm: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.05);
-  --shadow-md: 0 4px 12px rgba(16,24,40,.08);
-  --shadow-lg: 0 12px 32px rgba(16,24,40,.16);
+  --radius:    8px;
+  --radius-sm: 6px;
+  --radius-lg: 8px;
+  --shadow-sm: 0 1px 2px rgba(24,24,27,.05);
+  --shadow-md: 0 4px 12px rgba(24,24,27,.08);
+  --shadow-lg: 0 18px 42px rgba(24,24,27,.18);
+  --app-nav-width: 216px;
 
   /* 间距刻度 */
   --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
@@ -48,15 +48,15 @@
    style 覆盖，比这里的类选择器优先级高，所以两者不冲突）。
    插件场景下这一档是必需的：iframe 里是独立文档，不继承 Obsidian 的主题。 */
 html[data-theme="dark"] {
-  --bg:      #0f1420;
-  --surface: #1a2130;
-  --surface-2: #222c3d;
-  --border:  #2c3547;
-  --border-strong: #3a4658;
-  --text:    #e5e9f0;
-  --text-2:  #aab3c2;
-  --muted:   #8b96a8;
-  --primary-soft: color-mix(in srgb, var(--primary) 26%, #1a2130);
+  --bg:      #18181b;
+  --surface: #202023;
+  --surface-2: #29292d;
+  --border:  #35353a;
+  --border-strong: #48484f;
+  --text:    #f4f4f5;
+  --text-2:  #c4c4cc;
+  --muted:   #a1a1aa;
+  --primary-soft: color-mix(in srgb, var(--primary) 24%, #202023);
   --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
   --shadow-md: 0 4px 12px rgba(0,0,0,.45);
   --shadow-lg: 0 12px 32px rgba(0,0,0,.55);
@@ -69,8 +69,9 @@ body {
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
   color: var(--text); background: var(--bg); line-height: 1.6;
   -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
 }
-h2 { font-size: 20px; font-weight: 700; letter-spacing: -.01em; }
+h2 { font-size: 20px; font-weight: 700; letter-spacing: 0; }
 h3 { font-weight: 600; }
 
 /* ---------- 独立桌面窗口框架 ----------
@@ -158,11 +159,11 @@ h3 { font-weight: 600; }
 .desktop-app-mark, .brand-mark {
   display: inline-flex; align-items: center; justify-content: center;
   flex: none; width: 24px; height: 24px; border-radius: 7px;
-  background: linear-gradient(145deg, #2563eb, #0ea5e9);
+  background: var(--primary);
   color: #fff; font-size: 10px; line-height: 1; font-weight: 800;
-  letter-spacing: -.04em; box-shadow: 0 2px 6px rgba(14, 116, 217, .24);
+  letter-spacing: 0; box-shadow: 0 2px 6px rgba(14, 116, 217, .24);
 }
-.desktop-app-name { font-size: 13px; font-weight: 700; letter-spacing: -.01em; }
+.desktop-app-name { font-size: 13px; font-weight: 700; letter-spacing: 0; }
 .desktop-app-caption { font-size: 11px; color: var(--muted); }
 .desktop-app-version { font-size: 10px; color: var(--muted); margin-left: 2px; }
 .desktop-window-controls { display: flex; margin-left: auto; }
@@ -175,6 +176,13 @@ h3 { font-weight: 600; }
 .desktop-window-controls .desktop-window-close:hover { background: #e81123; color: #fff; }
 .window-maximize-icon {
   display: inline-block; width: 10px; height: 10px; border: 1.4px solid currentColor;
+}
+.desktop-titlebar[hidden] { display: none !important; }
+@media (max-width: 480px) {
+  .desktop-titlebar-brand { min-width: 0; padding-inline: 10px 6px; gap: 7px; }
+  .desktop-app-caption, .desktop-app-version { display: none; }
+  .desktop-titlebar-drag { min-width: 0; }
+  .desktop-window-controls button { width: 42px; }
 }
 html.desktop-maximized .window-maximize-icon { position: relative; transform: translate(-1px, 1px); }
 html.desktop-maximized .window-maximize-icon::after {
@@ -249,42 +257,81 @@ a { color: var(--primary); }
   outline: 2px solid var(--primary); outline-offset: 2px;
 }
 
-/* ---------- 顶栏 ---------- */
-body > header {
-  background: linear-gradient(90deg, #0369a1 0%, #0ea5e9 100%);
-  color: #fff; padding: 0 var(--sp-5);
-  box-shadow: var(--shadow-md); position: sticky; top: 0; z-index: 40;
+/* ---------- 全局左侧导航 ---------- */
+.ui-icon { width: 18px; height: 18px; flex: none; }
+.app-sidebar {
+  position: fixed; inset: 0 auto 0 0; z-index: 40; width: var(--app-nav-width);
+  padding: 10px 10px 12px; border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 96%, var(--bg)); color: var(--text);
 }
-nav { display: flex; gap: var(--sp-1); align-items: center; height: 58px; }
-nav a {
-  color: #dfe1f5; text-decoration: none; font-size: 14px;
-  padding: 6px 12px; border-radius: 8px; transition: background .15s, color .15s;
+.split-resizer {
+  position: relative; z-index: 25; min-width: 6px; min-height: 0;
+  cursor: col-resize; touch-action: none; user-select: none;
 }
-nav a:hover { color: #fff; background: rgba(255,255,255,.12); }
-.nav-spacer { flex: 1; }
-.nav-separator { width: 1px; height: 20px; margin: 0 5px; background: rgba(255,255,255,.26); }
-.nav-link.active { color: #fff; background: rgba(255,255,255,.16); }
+.split-resizer::after {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 1px;
+  background: var(--border); transform: translateX(-50%); transition: background .12s, width .12s;
+}
+.split-resizer:hover::after, .split-resizer.is-dragging::after { width: 3px; background: var(--primary); }
+html.is-resizing-pane, html.is-resizing-pane * { cursor: col-resize !important; user-select: none !important; }
+.app-nav-resizer { position: absolute; top: 0; right: -4px; bottom: 0; width: 8px; }
+.app-nav-resizer::after { top: 8px; bottom: 8px; }
+html.desktop-host .app-sidebar { top: 40px; }
+.app-sidebar nav { display: flex; flex-direction: column; gap: 2px; height: 100%; min-height: 0; }
+.app-sidebar nav a, .app-sidebar nav button {
+  width: 100%; min-height: 36px; display: flex; align-items: center; gap: 10px;
+  padding: 7px 9px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-2); text-decoration: none; text-align: left; font: 500 13px/1.35 inherit;
+  cursor: pointer; transition: background .12s, color .12s;
+}
+.app-sidebar nav a:hover, .app-sidebar nav button:hover { color: var(--text); background: var(--surface-2); }
+.app-sidebar .nav-link.active { color: var(--text); background: var(--primary-soft); font-weight: 650; }
+.app-sidebar .nav-link.active .ui-icon { color: var(--primary); }
+.nav-group { display: grid; gap: 2px; }
+.nav-tools { margin-top: 18px; }
+.nav-group-label {
+  padding: 0 9px 5px; color: var(--muted); font-size: 10px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: 0;
+}
+.nav-spacer { flex: 1; min-height: 12px; }
 .desktop-nav-button {
-  margin-left: auto; border: 1px solid rgba(255,255,255,.35);
-  border-radius: 8px; padding: 5px 11px; color: #fff;
-  background: rgba(255,255,255,.1); font: inherit; font-size: 13px;
-  cursor: pointer; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.desktop-nav-button:hover { background: rgba(255,255,255,.2); }
 /* 「转换任务」后的未处理批次数：任务只在内存里，没这个提示很容易忘掉还有没审的批 */
 .nav-badge {
-  display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px;
+  display: inline-grid; place-items: center; min-width: 17px; height: 17px; padding: 0 4px; margin-left: auto;
   border-radius: 999px; background: var(--danger); color: #fff;
-  font-size: 11px; line-height: 16px; text-align: center; vertical-align: 1px;
+  font-size: 10px; line-height: 1; text-align: center;
 }
-nav .brand {
-  font-weight: 700; color: #fff; font-size: 17px; margin-right: var(--sp-3);
-  padding-left: 0;
+.app-sidebar nav .brand {
+  min-height: 42px; margin-bottom: 14px; padding: 6px 8px; color: var(--text);
+  font-size: 14px; font-weight: 700;
 }
-nav .brand:hover { background: transparent; }
-.brand-mark { display: none; margin-right: 7px; vertical-align: -6px; }
+.app-sidebar nav .brand:hover { background: transparent; }
+.brand-mark { display: inline-flex; margin: 0; vertical-align: 0; }
+.brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-main { max-width: 1240px; margin: var(--sp-6) auto; padding: 0 var(--sp-5); }
+body > main {
+  width: calc(100% - var(--app-nav-width)); max-width: none;
+  margin: 0 0 0 var(--app-nav-width); padding: var(--sp-6) var(--sp-5) 36px;
+}
+
+.page-help-dialog {
+  width: min(420px, calc(100vw - 24px)); height: 100vh; max-height: none;
+  margin: 0 0 0 auto; padding: 0; border: 0; border-left: 1px solid var(--border);
+  border-radius: 0; background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg);
+}
+.page-help-dialog::backdrop { background: rgba(24,24,27,.28); }
+.page-help-head {
+  height: 58px; display: flex; align-items: center; justify-content: space-between;
+  padding: 0 18px; border-bottom: 1px solid var(--border);
+}
+.page-help-head h2 { margin: 0; font-size: 16px; }
+.page-help-head .icon-btn { display: inline-grid; place-items: center; width: 32px; height: 32px; }
+.page-help-body { height: calc(100vh - 58px); overflow-y: auto; padding: 18px 20px 36px; }
+.page-help-body h3 { margin: 22px 0 6px; font-size: 13px; }
+.page-help-body h3:first-child { margin-top: 0; }
+.page-help-body p { margin: 0; color: var(--text-2); font-size: 13px; line-height: 1.7; }
 
 /* 工具类页面统一成桌面软件的“标题栏 + 有界工作面”，避免表单块像网页流式内容一样
    横向铺满整个窗口。题库/讲义/资料库各有专属工作区，不套这一层。 */
@@ -295,7 +342,7 @@ main { max-width: 1240px; margin: var(--sp-6) auto; padding: 0 var(--sp-5); }
   padding: 3px 2px 14px; margin-bottom: var(--sp-4);
   border-bottom: 1px solid var(--border);
 }
-.app-page-head h1 { margin: 0; font-size: 22px; line-height: 1.25; letter-spacing: -.02em; }
+.app-page-head h1 { margin: 0; font-size: 22px; line-height: 1.25; letter-spacing: 0; }
 .app-page-head p { margin: 5px 0 0; color: var(--text-2); font-size: 13px; line-height: 1.55; }
 .app-page-head-actions { align-items: flex-end; }
 .app-surface {
@@ -319,48 +366,39 @@ html.desktop-host {
   --shadow-sm: none;
   --shadow-md: 0 3px 10px rgba(16,24,40,.08);
 }
-html.desktop-host body > header {
-  top: 40px; padding: 0 10px; color: var(--text);
-  background: color-mix(in srgb, var(--surface) 98%, var(--primary) 2%);
-  border-bottom: 1px solid var(--border); box-shadow: none;
-}
-html.desktop-host nav { height: 44px; gap: 1px; }
-html.desktop-host nav .brand { display: none; }
-html.desktop-host nav a {
-  color: var(--text-2); padding: 5px 9px; border-radius: 6px;
-  font-size: 13px; font-weight: 500;
-}
-html.desktop-host nav a:hover { color: var(--text); background: var(--surface-2); }
-html.desktop-host nav .nav-link.active {
-  color: var(--primary); background: var(--primary-soft); font-weight: 650;
-}
-html.desktop-host .nav-separator { background: var(--border); }
-html.desktop-host .desktop-nav-button {
-  margin-left: 6px; color: var(--text-2); background: var(--surface);
-  border-color: var(--border); padding: 4px 9px; font-size: 12px;
-}
-html.desktop-host .desktop-nav-button:hover { color: var(--primary); background: var(--primary-soft); }
 html.desktop-host main,
 html.desktop-host main.bulk-active-page {
-  max-width: none; margin: 10px auto; padding: 0 12px 14px;
+  width: calc(100% - var(--app-nav-width)); max-width: none;
+  margin: 0 0 0 var(--app-nav-width); padding: 10px 12px 14px;
 }
-/* 桌面常驻外壳本身占满标题栏和导航栏以下区域；业务 iframe 内不再重复显示两层栏。 */
-html.desktop-host main:has(.workspace-shell) { height: calc(100vh - 84px); margin: 0; padding: 0; overflow: hidden; }
+/* 常驻外壳占满视口；桌面宿主再扣掉 40px 原生替代标题栏。 */
+body > main:has(.workspace-shell) {
+  width: calc(100% - var(--app-nav-width)); height: 100vh;
+  margin: 0 0 0 var(--app-nav-width); padding: 0; overflow: hidden;
+}
+html.desktop-host main:has(.workspace-shell) { height: calc(100vh - 40px); }
 .workspace-shell { width: 100%; height: 100%; position: relative; overflow: hidden; background: var(--bg); }
 .workspace-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: var(--bg); }
 .workspace-frame[hidden] { display: none !important; }
 html.embedded-view .desktop-titlebar,
 html.embedded-view .desktop-resize-handle,
-html.embedded-view body > header { display: none !important; }
+html.embedded-view .app-sidebar { display: none !important; }
 html.embedded-view main,
-html.embedded-view main.bulk-active-page { max-width: none; margin: 10px auto; padding: 0 12px 14px; }
+html.embedded-view main.bulk-active-page {
+  width: 100%; max-width: none; margin: 0; padding: 10px 12px 14px;
+}
 html.embedded-view main:has(.library-shell) { height: 100vh; margin: 0; padding: 0; overflow: hidden; }
 html.desktop-host.embedded-view .library-shell,
 html.embedded-view .library-shell { height: 100vh; min-height: 0; border: 0; border-radius: 0; }
-html.desktop-host .layout { grid-template-columns: 240px minmax(0, 1fr); gap: 10px; }
-html.desktop-host .layout.bulk-active { grid-template-columns: 232px minmax(0, 1fr) 220px; }
+html.desktop-host .layout {
+  --question-sidebar-width: 240px; --question-bulk-width: 220px;
+  grid-template-columns: var(--question-sidebar-width) 6px minmax(0, 1fr); gap: 2px;
+}
+html.desktop-host .layout.bulk-active {
+  grid-template-columns: var(--question-sidebar-width) 6px minmax(0, 1fr) 6px var(--question-bulk-width);
+}
 html.desktop-host .sidebar {
-  top: 94px; height: calc(100vh - 106px); max-height: calc(100vh - 106px);
+  top: 10px; height: calc(100vh - 20px); max-height: calc(100vh - 20px);
   padding: 8px; border-radius: 8px; box-shadow: none; overflow: hidden;
   display: flex; flex-direction: column;
 }
@@ -368,7 +406,7 @@ html.desktop-host .sidebar h3 {
   font-size: 13px; text-transform: none; letter-spacing: 0; color: var(--text);
 }
 html.desktop-host .toolbar {
-  top: 94px; border-radius: 8px; padding: 7px 10px; margin-bottom: 8px;
+  top: 10px; border-radius: 8px; padding: 7px 10px; margin-bottom: 8px;
   box-shadow: none;
 }
 html.desktop-host .search-bar .input { max-width: none; }
@@ -386,9 +424,29 @@ html.desktop-host.embedded-view .sidebar {
 }
 html.desktop-host.embedded-view .toolbar { top: 10px; }
 
+@media (max-width: 760px) {
+  :root { --app-nav-width: 62px !important; }
+  .app-nav-resizer { display: none; }
+  .app-sidebar { padding-inline: 7px; }
+  .app-sidebar nav .brand { justify-content: center; padding-inline: 0; }
+  .brand-name, .nav-group-label, .app-sidebar .nav-link > span:not(.nav-badge),
+  .desktop-nav-button > span { display: none; }
+  .app-sidebar nav a, .app-sidebar nav button { justify-content: center; padding-inline: 0; }
+  .app-sidebar .nav-badge { position: absolute; margin: -19px 0 0 24px; }
+  body > main, html.desktop-host main, html.desktop-host main.bulk-active-page {
+    width: calc(100% - var(--app-nav-width)); margin-left: var(--app-nav-width);
+    padding-inline: 12px;
+  }
+  html.desktop-host main:has(.workspace-shell) {
+    width: calc(100% - var(--app-nav-width)); margin-left: var(--app-nav-width); padding: 0;
+  }
+  .page-help-dialog { width: min(390px, calc(100vw - 12px)); }
+}
+
 @media (max-width: 1200px) {
-  html.desktop-host .layout { grid-template-columns: 224px minmax(0, 1fr); }
-  html.desktop-host .layout.bulk-active { grid-template-columns: 214px minmax(0, 1fr) 204px; }
+  html.desktop-host .layout {
+    --question-sidebar-width: 214px; --question-bulk-width: 204px;
+  }
 }
 
 /* ---------- Flash 提示 ---------- */
@@ -400,13 +458,22 @@ html.desktop-host.embedded-view .toolbar { top: 10px; }
 .flash-err { background: var(--danger-soft);  color: var(--danger);        border-color: #fecaca; }
 
 /* ---------- 双栏布局 ---------- */
-.layout { display: grid; grid-template-columns: 260px 1fr; gap: var(--sp-5); align-items: start; }
+.layout {
+  --question-sidebar-width: 260px; --question-bulk-width: 240px;
+  display: grid; grid-template-columns: var(--question-sidebar-width) 6px minmax(0, 1fr);
+  gap: 4px; align-items: start;
+}
+.layout > .sidebar { grid-column: 1; }
+.layout > .question-sidebar-resizer { grid-column: 2; align-self: stretch; }
+.layout > .content { grid-column: 3; }
+.layout > .question-bulk-resizer { display: none; grid-column: 4; align-self: stretch; }
+.layout > .bulkbar { grid-column: 5; }
 .sidebar {
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-5); box-shadow: var(--shadow-sm);
   position: sticky; top: 78px; max-height: calc(100vh - 96px); overflow-y: auto;
 }
-.sidebar h3 { margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); }
+.sidebar h3 { margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0; color: var(--text-2); }
 .sidebar-tabs { display: none; }
 .sidebar-panel { min-width: 0; }
 html.desktop-host .sidebar-tabs {
@@ -448,7 +515,7 @@ html.desktop-host .sidebar-filter-panel .tag-cloud { max-height: none; }
   display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: 10px 16px; margin-bottom: var(--sp-4); font-size: 14px; box-shadow: var(--shadow-sm);
-  position: sticky; top: 78px; z-index: 20;
+  position: sticky; top: 12px; z-index: 20;
 }
 .spacer { flex: 1; }
 
@@ -544,7 +611,10 @@ select option { background: var(--surface); color: var(--text); }
 
 /* ---------- 已选题目操作栏（桌面端位于题目列表右侧） ---------- */
 main.bulk-active-page { max-width: 1500px; }
-.layout.bulk-active { grid-template-columns: 260px minmax(0, 1fr) 240px; }
+.layout.bulk-active {
+  grid-template-columns: var(--question-sidebar-width) 6px minmax(0, 1fr) 6px var(--question-bulk-width);
+}
+.layout.bulk-active > .question-bulk-resizer { display: block; }
 .bulkbar {
   display: none; position: sticky; top: 78px; align-self: start;
   max-height: calc(100vh - 96px); overflow-y: auto;
@@ -557,7 +627,7 @@ main.bulk-active-page { max-width: 1500px; }
 .bulkbar-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .bulkbar-head h3 {
   margin: 0; color: var(--text-2); font-size: 14px;
-  text-transform: uppercase; letter-spacing: .04em;
+  text-transform: uppercase; letter-spacing: 0;
 }
 .bulkbar .bulk-count {
   padding: 3px 9px; border-radius: 999px;
@@ -591,10 +661,7 @@ main.bulk-active-page { max-width: 1500px; }
    插件把页面嵌在 Obsidian 窗格里，这一档比独立浏览器更常触发。 */
 @media (min-width: 901px) and (max-width: 1540px) {
   main.bulk-active-page { max-width: none; }
-  .layout.bulk-active {
-    grid-template-columns: 200px minmax(0, 1fr) 220px;
-    gap: var(--sp-4);
-  }
+  .layout.bulk-active { --question-sidebar-width: 200px; --question-bulk-width: 220px; }
 }
 
 /* ---------- 页眉页脚 DIY ---------- */
@@ -626,7 +693,7 @@ main.bulk-active-page { max-width: 1500px; }
 .preview-frame { flex: 1; width: 100%; border: none; background: #525659; }
 
 /* ---------- 题集侧栏：文件夹树 ---------- */
-.coll-title { font-size: 14px; margin: 0; padding-top: 0; border-top: none; text-transform: uppercase; letter-spacing: .04em; color: var(--text-2); }
+.coll-title { font-size: 14px; margin: 0; padding-top: 0; border-top: none; text-transform: uppercase; letter-spacing: 0; color: var(--text-2); }
 .coll-new { display: flex; gap: 6px; margin-top: var(--sp-2); }
 .coll-new .input { flex: 1; padding: 6px 9px; font-size: 12px; }
 .add-coll-sel { padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-size: 13px; background: var(--surface); }
@@ -827,6 +894,9 @@ html.desktop-host .papers-upload .input { padding: 5px 8px; }
 .dedup-spinner { width: 18px; height: 18px; flex: none; border: 2px solid var(--border-strong);
   border-top-color: var(--primary); border-radius: 50%; }
 .dedup-progress[data-state="running"] .dedup-spinner { animation: q-scroll-spin .8s linear infinite; }
+.dedup-progress[data-state="paused"] .dedup-spinner {
+  border-color: var(--warn); border-left-color: transparent; background: var(--warn-soft);
+}
 .dedup-progress[data-state="done"] .dedup-spinner { border-color: var(--success); background: var(--success-soft); }
 .dedup-progress[data-state="error"] { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
 .dedup-progress[data-state="error"] .dedup-spinner { border-color: var(--danger); background: var(--danger-soft); }
@@ -869,6 +939,7 @@ html.desktop-host .papers-upload .input { padding: 5px 8px; }
 .import-tabs { display: flex; flex-direction: column; gap: var(--sp-4); margin-bottom: var(--sp-4); }
 .import-box { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--sp-5); box-shadow: var(--shadow-sm); }
 .import-box h3 { margin-top: 0; font-size: 15px; }
+.import-primary { padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
 html.desktop-host .import-tabs { gap: 10px; }
 html.desktop-host .import-box { padding: 14px; border-radius: 8px; box-shadow: none; }
 #conv-status { margin-left: var(--sp-3); }
@@ -1218,8 +1289,8 @@ html.desktop-host .desktop-card-more { display: inline-flex; }
 .empty-state-mark {
   width: 54px; height: 54px; display: grid; place-items: center;
   border-radius: 16px; margin-bottom: 15px;
-  background: linear-gradient(145deg, color-mix(in srgb, var(--primary) 88%, #2563eb), var(--primary));
-  color: #fff; font-weight: 800; letter-spacing: -.04em;
+  background: var(--primary);
+  color: #fff; font-weight: 800; letter-spacing: 0;
   box-shadow: 0 10px 24px var(--primary-ring);
 }
 .empty-state h2 { margin: 0; font-size: 19px; }
@@ -1241,7 +1312,7 @@ html.desktop-host .empty-state-mark { width: 44px; height: 44px; margin-bottom: 
 }
 .new-question-fab:active { transform: translateY(0) scale(.96); }
 .question-scroll-sentinel {
-  display: flex; align-items: center; justify-content: center; gap: 9px;
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 9px;
   min-height: 58px; margin: var(--sp-3) 0; color: var(--muted); cursor: pointer;
 }
 .question-scroll-sentinel[hidden] { display: none; }
@@ -1250,7 +1321,10 @@ html.desktop-host .empty-state-mark { width: 44px; height: 44px; margin-bottom: 
   border-top-color: var(--primary); border-radius: 50%; opacity: .55;
 }
 .question-scroll-sentinel.loading .question-scroll-spinner { animation: q-scroll-spin .8s linear infinite; opacity: 1; }
-.question-scroll-sentinel.error { color: var(--danger); }
+.question-scroll-sentinel.error { color: var(--danger); cursor: default; }
+.question-scroll-sentinel.error .question-scroll-spinner { display: none; }
+.question-scroll-retry { color: var(--text); background: var(--surface); }
+.question-scroll-retry .ui-icon { width: 14px; height: 14px; }
 @keyframes q-scroll-spin { to { transform: rotate(360deg); } }
 
 /* 设置页的配置列表（目前只有识别模型那张表用） */
@@ -1403,6 +1477,48 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 /* 「只看预览」把源码框整列收起来（按钮在页顶工具条） */
 .br-hide-src .br-text { display: none; }
 
+/* ---------- OCR 原文调整页 ---------- */
+.collection-source-page { width: 100%; }
+.collection-source-form { display: grid; gap: var(--sp-4); }
+.collection-source-section { min-width: 0; }
+.collection-source-labels {
+  display: grid; grid-template-columns: minmax(260px, 46%) minmax(360px, 1fr);
+  gap: 14px; margin-bottom: 7px; color: var(--text-2); font-size: 12px;
+}
+.collection-source-labels span:last-child { grid-column: 2; }
+.collection-source-workbench {
+  --collection-source-preview-width: 46%;
+  display: grid;
+  grid-template-columns: var(--collection-source-preview-width) 6px minmax(360px, 1fr);
+  min-width: 0; height: min(72vh, 860px); min-height: 520px;
+}
+.collection-source-preview {
+  min-width: 0; overflow: hidden; border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); background: var(--surface-2);
+}
+.collection-source-preview iframe {
+  display: block; width: 100%; height: 100%; border: 0; background: white;
+}
+.collection-source-preview img {
+  display: block; width: 100%; height: 100%; object-fit: contain;
+}
+.collection-source-preview > .btn { margin: 16px; }
+.collection-source-resizer { align-self: stretch; }
+.collection-source-markdown.input {
+  width: 100%; height: 100%; min-width: 0; resize: none; padding: 14px;
+  border-radius: var(--radius-sm); font: 13px/1.65 Consolas, "Cascadia Mono", monospace;
+  tab-size: 2; white-space: pre; overflow: auto;
+}
+.collection-source-actions {
+  position: sticky; bottom: 0; z-index: 3; display: flex; align-items: end;
+  justify-content: flex-end; gap: var(--sp-2); padding: 10px 0;
+  background: var(--bg);
+}
+.collection-source-actions label {
+  display: grid; gap: 4px; color: var(--text-2); font-size: 12px;
+}
+.collection-source-actions .input { min-width: 180px; }
+
 /* 危险文字按钮（删除/中止等），复用 .btn 外形但字色为 danger */
 .btn-danger-text { color: var(--danger); }
 .btn-danger-text:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
@@ -1412,11 +1528,26 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
   /* 插件把页面嵌在 Obsidian 窄窗格里，这两档比独立浏览器更常触发 */
   .br-split { flex-direction: column; }
   .br-pane-src { position: static; flex: 1 1 auto; width: 100%; }
+  .collection-source-labels { display: none; }
+  .collection-source-workbench {
+    grid-template-columns: minmax(0, 1fr); height: auto; min-height: 0; gap: 10px;
+  }
+  .collection-source-preview { height: 48vh; min-height: 320px; }
+  .collection-source-resizer { display: none; }
+  .collection-source-markdown.input { height: 48vh; min-height: 320px; }
+  /* 窄屏已把原文件与 Markdown 改为上下排列，操作栏也必须回到文档流；
+     继续 sticky 会覆盖编辑框底部，用户看不见也点不到最后几行。 */
+  .collection-source-actions { position: static; }
 }
 @media (max-width: 900px) {
-  .layout { grid-template-columns: 1fr; }
-  .layout.bulk-active { grid-template-columns: 1fr; }
-  .sidebar { position: static; max-height: none; }
+  html:not(.desktop-host) .layout,
+  html:not(.desktop-host) .layout.bulk-active { grid-template-columns: 1fr; }
+  html:not(.desktop-host) .layout > .sidebar,
+  html:not(.desktop-host) .layout > .content,
+  html:not(.desktop-host) .layout > .bulkbar { grid-column: 1; }
+  html:not(.desktop-host) .question-sidebar-resizer,
+  html:not(.desktop-host) .question-bulk-resizer { display: none !important; }
+  html:not(.desktop-host) .sidebar { position: static; max-height: none; }
   .prev-layout { flex-direction: column; }
   .prev-pdf { position: static; flex: 1 1 auto; width: 100%; }
   .toolbar, .dedup-bar { position: static; }
@@ -1431,13 +1562,91 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
   /* 桌面/手机专属显隐互换：触屏没有拖放，只留「点击选择」的提示 */
   .desktop-only { display: none; }
   .mobile-only { display: block; }
+  .collection-source-actions { flex-direction: column; align-items: stretch; }
+  .collection-source-actions label,
+  .collection-source-actions .input,
+  .collection-source-actions .btn { width: 100%; min-width: 0; }
 }
 
-/* ---------- 设置页版式（.panel-grid / 页标题 / 行内表单） ---------- */
-/* 两列面板网格，跨列面板加 .col-full。窄屏（含 Obsidian 窄窗格）落回一列。 */
-.panel-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-6); margin-top: var(--sp-4); }
-.panel-grid .col-full { grid-column: 1 / -1; }
-@media (max-width: 760px) { .panel-grid { grid-template-columns: 1fr; gap: var(--sp-4); } }
+/* ---------- 设置页 ---------- */
+.settings-page { width: min(1080px, 100%); }
+.settings-page .app-page-head { min-height: 52px; margin-bottom: 16px; }
+.settings-layout { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 28px; align-items: start; }
+.settings-section-nav {
+  position: sticky; top: 12px; display: grid; gap: 3px; padding: 0;
+}
+.settings-section-nav button {
+  width: 100%; min-height: 38px; display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--text-2); font: 500 13px/1.3 inherit; text-align: left; cursor: pointer;
+}
+.settings-section-nav button:hover { color: var(--text); background: var(--surface-2); }
+.settings-section-nav button.is-active { color: var(--text); background: var(--primary-soft); font-weight: 650; }
+.settings-section-nav button.is-active .ui-icon { color: var(--primary); }
+.settings-panels { min-width: 0; }
+.settings-category[hidden] { display: none !important; }
+.settings-section { padding: 0 0 26px; margin-bottom: 26px; border-bottom: 1px solid var(--border); }
+.settings-section:last-child { margin-bottom: 0; border-bottom: 0; }
+.settings-section h2 { margin: 0 0 16px; font-size: 16px; }
+.settings-section h3 { margin: 18px 0 10px; font-size: 13px; }
+.settings-section-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-section-title h2 { margin-bottom: 3px; }
+.settings-value { color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
+.settings-note { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.settings-form-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 13px 14px;
+  align-items: end; margin-top: 14px;
+}
+.settings-form-grid > label { display: grid; gap: 5px; color: var(--text-2); font-size: 12px; }
+.settings-form-grid .field { min-width: 0; margin: 0; }
+.settings-form-grid .field label { margin-bottom: 5px; font-size: 12px; }
+.settings-form-grid .btn { justify-self: start; }
+.settings-form-actions { grid-column: 1 / -1; display: flex; gap: 8px; flex-wrap: wrap; }
+.settings-form-actions.field { display: flex; }
+.settings-form-compact { grid-template-columns: repeat(3, minmax(150px, 1fr)); }
+.settings-disclosure { border-top: 1px solid var(--border); }
+.settings-disclosure:last-child { border-bottom: 1px solid var(--border); }
+.settings-disclosure summary {
+  position: relative; padding: 12px 26px 12px 1px; list-style: none;
+  color: var(--text); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.settings-disclosure summary::-webkit-details-marker { display: none; }
+.settings-disclosure summary::after {
+  content: "+"; position: absolute; right: 4px; top: 9px; color: var(--muted); font-size: 18px; font-weight: 400;
+}
+.settings-disclosure[open] summary::after { content: "−"; }
+.settings-disclosure form { padding: 0 0 16px; }
+.settings-choice-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.settings-choice-row label {
+  display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 7px 10px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface); font-size: 13px;
+}
+.redeem-form { display: flex; align-items: center; gap: 7px; margin: 0; }
+.redeem-form .input { width: min(220px, 40vw); }
+.account-details { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px 14px; margin: 0 0 18px; font-size: 13px; }
+.account-details dt { color: var(--muted); }
+.account-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.settings-table-scroll { max-width: 100%; margin-top: 15px; overflow-x: auto; border: 1px solid var(--border); border-radius: 6px; }
+.settings-table-scroll .data-table th:first-child, .settings-table-scroll .data-table td:first-child { padding-left: 12px; }
+.settings-table-scroll .data-table tr:last-child td { border-bottom: 0; }
+.model-table { min-width: 570px; }
+.model-table details { position: relative; }
+.model-edit-form {
+  position: absolute; z-index: 12; right: 0; width: 320px; display: grid; gap: 8px;
+  margin-top: 7px; padding: 13px; border: 1px solid var(--border-strong); border-radius: 6px;
+  background: var(--surface); box-shadow: var(--shadow-lg);
+}
+.model-edit-form label { display: grid; gap: 4px; color: var(--text-2); font-size: 11px; }
+.model-current-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+.model-current-grid > div {
+  min-width: 0; display: grid; gap: 2px; padding: 12px; border: 1px solid var(--border); border-radius: 6px;
+}
+.model-current-grid span, .model-current-grid small { color: var(--muted); font-size: 11px; }
+.model-current-grid strong, .model-current-grid small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.model-current-grid strong { font-size: 13px; }
+.model-add-form { margin-top: 22px; padding-top: 4px; }
+.model-purpose-row { display: flex; gap: 16px; margin-top: 12px; flex-wrap: wrap; }
+.model-preset-hint { min-height: 18px; margin: 9px 0 0; color: var(--muted); font-size: 12px; }
 /* 已存的 MinerU Token 列表（只显示备注名，永不回显 token） */
 .token-list { list-style: none; padding: 0; margin: var(--sp-3) 0; }
 .token-list li { display: flex; align-items: center; gap: var(--sp-2);
@@ -1445,7 +1654,7 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .token-list .token-label { font-weight: 500; }
 
 /* 页面主标题统一节奏 */
-.page-title { font-size: 22px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 var(--sp-1); display: flex; align-items: center; gap: 8px; }
+.page-title { font-size: 22px; font-weight: 700; letter-spacing: 0; margin: 0 0 var(--sp-1); display: flex; align-items: center; gap: 8px; }
 .page-sub { color: var(--text-2); font-size: 14px; margin: 0 0 var(--sp-5); }
 
 /* 行内表单（一行排布多个输入框 + 提交按钮，如添加 LLM 配置） */
@@ -1459,8 +1668,10 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .cell-muted { color: var(--muted); }
 
 /* ---------- 外观主题控件 ---------- */
-.theme-mode-pick { display: flex; gap: 16px; }
-.theme-mode-pick label { cursor: pointer; }
+.theme-mode-pick { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
+.theme-mode-pick label { min-width: 74px; padding: 5px 10px; border-radius: 5px; cursor: pointer; text-align: center; }
+.theme-mode-pick label:has(input:checked) { background: var(--surface); color: var(--text); box-shadow: var(--shadow-sm); }
+.theme-mode-pick input { margin-right: 5px; }
 .color-swatches { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .color-swatches .swatch {
   width: 28px; height: 28px; border-radius: 50%; border: 2px solid transparent;
@@ -1477,49 +1688,46 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
   display: block; max-width: 260px; margin-top: 5px;
   color: var(--muted); line-height: 1.45;
 }
-.product-page { width: min(1050px, calc(100% - 40px)); margin: 34px auto 64px; }
-.product-hero { display: flex; align-items: center; gap: 22px; margin-bottom: 24px; }
+.product-page { width: min(960px, 100%); margin: 6px auto 44px; }
+.product-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
 .product-mark {
-  width: 82px; height: 82px; border-radius: 22px; display: grid; place-items: center;
-  color: #fff; font-size: 29px; font-weight: 800; letter-spacing: -2px;
-  background: linear-gradient(145deg, #4f46e5, #2563eb 72%, #0ea5e9);
-  box-shadow: 0 16px 34px rgba(37, 99, 235, .25);
+  width: 52px; height: 52px; border-radius: 8px; display: grid; place-items: center;
+  color: #fff; font-size: 18px; font-weight: 800; letter-spacing: 0;
+  background: var(--primary);
 }
 .product-eyebrow {
-  margin: 0 0 5px; color: var(--primary); font-size: 12px;
-  font-weight: 800; letter-spacing: .12em;
+  margin: 2px 0 0; color: var(--muted); font-size: 11px;
+  font-weight: 600; letter-spacing: 0;
 }
-.product-hero h1 { margin: 0 0 6px; font-size: 30px; }
+.product-hero h1 { margin: 0; font-size: 25px; }
 .product-hero p:last-child { margin: 0; color: var(--muted); }
-.product-callout, .diagnostic-summary, .diagnostic-card, .product-panel {
-  border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
-}
 .product-callout {
-  margin-bottom: 16px; padding: 15px 18px; line-height: 1.65;
+  margin-bottom: 16px; padding: 12px 14px; line-height: 1.65; border: 1px solid var(--border); border-radius: 6px;
   border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
   background: color-mix(in srgb, var(--primary) 7%, var(--surface));
 }
 .diagnostic-summary {
-  display: flex; align-items: center; gap: 13px; padding: 16px 18px; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 13px; padding: 12px 2px 16px; margin-bottom: 0;
+  border-bottom: 1px solid var(--border);
 }
-.diagnostic-summary b { font-size: 17px; }
+.diagnostic-summary b { font-size: 15px; }
 .diagnostic-summary p { margin: 3px 0 0; color: var(--muted); }
 .diagnostic-dot { width: 12px; height: 12px; border-radius: 50%; flex: 0 0 auto; }
 .diagnostic-summary.is-ready .diagnostic-dot { background: #16a34a; box-shadow: 0 0 0 5px rgba(22,163,74,.12); }
 .diagnostic-summary.has-error .diagnostic-dot { background: #dc2626; box-shadow: 0 0 0 5px rgba(220,38,38,.12); }
 .diagnostic-grid, .product-columns {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 24px;
 }
-.diagnostic-card { padding: 14px 16px; border-left-width: 4px; }
-.diagnostic-card p { margin: 7px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+.diagnostic-card { padding: 14px 2px 14px 12px; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; }
+.diagnostic-card p { margin: 5px 0 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .diagnostic-card-head { display: flex; justify-content: space-between; gap: 14px; }
 .diagnostic-card-head span { font-weight: 700; }
 .diagnostic-ok { border-left-color: #16a34a; }
 .diagnostic-warn { border-left-color: #d97706; }
 .diagnostic-error { border-left-color: #dc2626; }
-.product-columns { margin-top: 14px; }
-.product-panel { padding: 18px; }
-.product-panel h2 { margin: 0 0 14px; font-size: 18px; }
+.product-columns { margin-top: 24px; }
+.product-panel { padding: 16px 2px; border-top: 1px solid var(--border); }
+.product-panel h2 { margin: 0 0 14px; font-size: 15px; }
 .product-paths { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 10px; margin: 0; }
 .product-paths dt { color: var(--muted); }
 .product-paths dd { margin: 0; overflow-wrap: anywhere; }
@@ -1535,13 +1743,17 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .license-panel-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
 }
-.license-panel-head h3 { margin-bottom: 6px; }
+.license-panel-head h2 { margin-bottom: 16px; }
 .license-badge {
   flex: 0 0 auto; padding: 6px 10px; border-radius: 999px;
   font-size: 12px; font-weight: 800;
 }
 .license-badge.is-valid { color: #166534; background: rgba(22, 163, 74, .13); }
 .license-badge.is-invalid { color: #991b1b; background: rgba(220, 38, 38, .12); }
+.license-badge.is-missing { color: #92400e; background: rgba(245, 158, 11, .16); }
+.activation-device-row { margin: 14px 0; }
+.activation-device-row > label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; }
+.activation-device-row .settings-form-grid { grid-template-columns: minmax(0, 1fr) auto; }
 .license-details {
   display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 7px 12px;
   margin: 15px 0 0;
@@ -1561,7 +1773,7 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .device-request-row { display: flex; align-items: center; gap: 8px; }
 .device-request-row .input {
   width: min(610px, 100%); font: 12px/1.4 Consolas, "SFMono-Regular", monospace;
-  letter-spacing: .02em;
+  letter-spacing: 0;
 }
 .device-request-box .muted { margin: 7px 0 0; font-size: 12px; }
 .license-device-error { color: #b91c1c; }
@@ -1641,15 +1853,17 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 /* ---------- 资料库：文件树 + 多标签阅读器 ---------- */
 html.desktop-host main:has(.library-shell) { padding-bottom: 0; }
 .library-shell {
-  display: grid; grid-template-columns: 260px minmax(0, 1fr); height: calc(100vh - 130px);
+  --library-sidebar-width: 260px;
+  display: grid; grid-template-columns: var(--library-sidebar-width) 6px minmax(0, 1fr); height: calc(100vh - 130px);
   min-height: 480px; overflow: hidden; border: 1px solid var(--border);
   border-radius: 11px; background: var(--surface); box-shadow: var(--shadow-sm);
 }
 html.desktop-host .library-shell { height: calc(100vh - 130px); }
 .library-sidebar {
   min-width: 0; display: flex; flex-direction: column; overflow: hidden;
-  border-right: 1px solid var(--border); background: var(--surface-2);
+  background: var(--surface-2);
 }
+.library-sidebar-resizer { align-self: stretch; }
 .library-sidebar-head {
   display: flex; align-items: center; justify-content: space-between;
   padding: 14px 14px 10px; border-bottom: 1px solid var(--border);
@@ -1669,6 +1883,7 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-tree-entry:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
 .library-tree-entry.is-active { color: var(--primary); background: var(--primary-soft); }
+.library-tree-entry.is-revealed { outline: 2px solid var(--primary); outline-offset: -2px; }
 .library-tree-twist { width: 11px; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .12s; }
 .library-tree-entry.is-open .library-tree-twist { transform: rotate(90deg); }
 .library-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1742,7 +1957,7 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-empty-mark {
   width: 58px; height: 58px; display: grid; place-items: center; border-radius: 15px;
-  color: var(--primary); background: var(--primary-soft); font-weight: 800; letter-spacing: -.05em;
+  color: var(--primary); background: var(--primary-soft); font-weight: 800; letter-spacing: 0;
 }
 .library-empty h2 { margin: 14px 0 3px; color: var(--text); font-size: 18px; }
 .library-empty p { max-width: 470px; margin: 0; font-size: 13px; }
@@ -1821,7 +2036,7 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
   .inline-meta-wide { grid-column: 1 / -1; }
 }
 @media (max-width: 760px) {
-  .library-shell { grid-template-columns: 210px minmax(0, 1fr); }
+  .library-shell { --library-sidebar-width: 210px; }
   .inline-editor-meta { grid-template-columns: 1fr; }
   .inline-meta-wide { grid-column: auto; }
 }
@@ -1833,14 +2048,22 @@ html.desktop-host main:has(.handout-shell) {
 }
 .handout-shell {
   --handout-bar-height: 52px;
-  display: grid; grid-template-columns: 290px minmax(0, 1fr); width: 100%; height: 100%;
+  --handout-rail-width: 290px; --handout-inspector-width: 330px;
+  display: grid; grid-template-columns: var(--handout-rail-width) 6px minmax(0, 1fr); width: 100%; height: 100%;
   min-height: 650px; overflow: hidden; background: var(--bg);
 }
-.handout-shell.has-inspector { grid-template-columns: 290px minmax(0, 1fr) 330px; }
+.handout-shell.has-inspector {
+  grid-template-columns: var(--handout-rail-width) 6px minmax(0, 1fr) 6px var(--handout-inspector-width);
+}
 .handout-rail {
   display: grid; grid-template-rows: minmax(150px, 36%) minmax(250px, 64%); min-height: 0;
-  border-right: 1px solid var(--border); background: var(--surface);
+  background: var(--surface);
 }
+.handout-rail-resizer { grid-column: 2; align-self: stretch; }
+.handout-workspace { grid-column: 3; }
+.handout-inspector-resizer { display: none; grid-column: 4; align-self: stretch; }
+.handout-shell.has-inspector .handout-inspector-resizer { display: block; }
+.handout-inspector { grid-column: 5; }
 .handout-rail-section { min-height: 0; display: flex; flex-direction: column; padding: 14px 12px; }
 .handout-documents-section { border-bottom: 1px solid var(--border); }
 .handout-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
@@ -1866,14 +2089,23 @@ html.desktop-host main:has(.handout-shell) {
 .handout-document-delete:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 .handout-source-question {
   padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-2);
+  content-visibility: auto; contain-intrinsic-size: auto 220px;
   cursor: grab; transition: border-color .14s, transform .14s;
 }
 .handout-source-question:hover { border-color: color-mix(in srgb, var(--primary) 45%, var(--border)); transform: translateY(-1px); }
 .handout-source-question:active { cursor: grabbing; }
-.handout-source-question > div { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.handout-source-question span { color: var(--primary); font-size: 11px; font-weight: 700; }
-.handout-source-question small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
-.handout-source-question p { display: -webkit-box; overflow: hidden; margin: 7px 0; color: var(--text-2); font-size: 12px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.handout-source-meta { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.handout-source-meta span { color: var(--primary); font-size: 11px; font-weight: 700; }
+.handout-source-meta small { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.handout-source-body {
+  min-width: 0; margin: 8px 0; padding: 9px; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 6px; background: var(--surface); color: var(--text);
+  font-size: 12px; line-height: 1.6;
+}
+.handout-source-body .q-body { font-size: inherit; line-height: inherit; }
+.handout-source-body .q-opts { gap: 4px 10px; }
+.handout-source-body .q-img { max-height: 150px; object-fit: contain; }
 .handout-source-question button { width: 100%; padding: 4px 7px; border: 0; border-radius: 5px; background: var(--surface); color: var(--primary); cursor: pointer; font-size: 11px; }
 
 .handout-workspace { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto auto auto minmax(0, 1fr); }
@@ -1881,7 +2113,7 @@ html.desktop-host main:has(.handout-shell) {
   display: flex; align-items: center; gap: 8px; min-width: 0; padding: 8px 12px;
   border-bottom: 1px solid var(--border); background: var(--surface);
 }
-.handout-document-bar { min-height: var(--handout-bar-height); }
+.handout-document-bar { min-height: var(--handout-bar-height); flex-wrap: wrap; }
 .handout-document-bar label { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .handout-document-bar .handout-logo-option { gap: 4px; color: var(--text-2); }
 .handout-logo-option input { margin: 0; accent-color: var(--primary); }
@@ -1975,7 +2207,10 @@ html[data-theme="dark"] .handout-conflict, html[data-theme="dark"] .handout-warn
   cursor: pointer; font-family: inherit;
 }
 .handout-question-node.is-pending { outline-style: dashed; }
-.handout-question-node.is-rendering { opacity: .78; }
+.handout-question-node.is-rendering { outline-color: color-mix(in srgb, var(--primary) 55%, #2f6fb3); }
+.handout-canvas-scroll.is-reordering .handout-question-node,
+.handout-canvas-scroll.is-reordering .handout-question-node * { transition: none !important; }
+.handout-question-node.is-dragging { outline-style: solid; outline-color: var(--primary); }
 .handout-question-node.is-render-error { outline-color: var(--danger); }
 .handout-question-handle {
   position: absolute; z-index: 3; top: -2px; left: -28px; width: 25px; height: 28px; padding: 0;
@@ -1998,7 +2233,7 @@ html[data-theme="dark"] .handout-conflict, html[data-theme="dark"] .handout-warn
 
 .handout-inspector {
   min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
-  border-left: 1px solid var(--border); background: var(--surface);
+  background: var(--surface);
 }
 .handout-inspector[hidden] { display: none; }
 .handout-inspector-head { display: flex; align-items: flex-start; gap: 8px; padding: 14px 12px; border-bottom: 1px solid var(--border); }
@@ -2023,9 +2258,100 @@ html[data-theme="dark"] .handout-conflict, html[data-theme="dark"] .handout-warn
 .handout-preview-dialog iframe { display: block; width: 100%; height: calc(100% - 45px); border: 0; background: #525659; }
 
 @media (max-width: 1050px) {
-  .handout-shell { grid-template-columns: 235px minmax(0, 1fr); }
-  .handout-shell.has-inspector { grid-template-columns: 210px minmax(0, 1fr) 300px; }
+  .handout-shell { --handout-rail-width: 210px; --handout-inspector-width: 300px; }
   .handout-document-bar label { display: none; }
   .handout-page-settings { display: none; }
   .handout-canvas-scroll { padding-inline: 18px; }
+}
+.wallet-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  gap: 8px;
+  margin: 0 0 18px;
+}
+.wallet-grid > div {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 11px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wallet-grid strong { color: var(--muted); font-size: 11px; font-weight: 600; }
+.wallet-grid span { font-size: 1.2rem; font-variant-numeric: tabular-nums; }
+.settings-action-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.settings-action-row form { margin: 0; }
+.tex-install-state { display: grid; gap: 7px; margin: 12px 0; }
+.tex-install-state progress { width: 100%; height: 9px; accent-color: var(--primary); }
+.tex-install-state progress[hidden] { display: none; }
+.update-state { display: grid; gap: 8px; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
+.update-state progress { width: 100%; height: 9px; accent-color: var(--primary); }
+.update-state progress[hidden] { display: none; }
+.update-actions [data-update-progress] { flex: 1 0 100%; width: 100%; height: 9px; accent-color: var(--primary); }
+.update-actions [data-update-progress][hidden] { display: none; }
+.tex-install-state > span { overflow-wrap: anywhere; }
+.account-forms { display: grid; margin-top: 2px; }
+.settings-sms-status { grid-column: 1 / -1; margin: 0; color: var(--success); font-size: 12px; }
+.settings-sms-status.is-error { color: var(--danger); }
+.html-preview-page { background: #f1f3f5; margin: 0; }
+.html-preview-document { max-width: 900px; margin: 0 auto; padding: 36px 24px 60px; background: #fff; min-height: 100vh; }
+.html-preview-question { border-bottom: 1px solid #d8dce1; padding: 16px 0; }
+.html-preview-question h2 { font-size: 1rem; margin: 0 0 10px; }
+.html-preview-question details { margin-top: 12px; }
+@media (max-width: 700px) {
+  .settings-layout { grid-template-columns: 1fr; gap: 18px; }
+  .settings-section-nav { position: static; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 3px; }
+  .settings-section-nav button { justify-content: center; gap: 5px; padding-inline: 5px; }
+  .settings-form-grid, .settings-form-compact { grid-template-columns: 1fr; }
+  .model-current-grid { grid-template-columns: 1fr; }
+  .wallet-grid { grid-template-columns: 1fr; }
+  .account-forms .input { width: 100%; }
+  .redeem-form { width: 100%; }
+  .redeem-form .input { width: 100%; }
+}
+
+/* 极窄桌面窗格仍保留文件导航，但右侧操作栏改成抽屉。三个固定最小宽度继续
+   同排会把中间题卡或讲义画布压成几像素，看起来像控件互相覆盖。 */
+@media (max-width: 600px) {
+  html.desktop-host .layout,
+  html.desktop-host .layout.bulk-active,
+  .layout,
+  .layout.bulk-active {
+    grid-template-columns: min(var(--question-sidebar-width), 42vw) 6px minmax(0, 1fr);
+    gap: 2px;
+  }
+  .layout.bulk-active > .question-bulk-resizer { display: none !important; }
+  .layout > .bulkbar { grid-column: auto; }
+  .bulkbar.show {
+    position: fixed; z-index: 70; top: 10px; right: 10px; bottom: 10px;
+    width: min(270px, calc(100vw - 28px)); max-height: none;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .library-shell {
+    grid-template-columns: min(var(--library-sidebar-width), 42vw) 6px minmax(0, 1fr);
+  }
+
+  .handout-shell,
+  .handout-shell.has-inspector {
+    position: relative;
+    grid-template-columns: min(var(--handout-rail-width), 42vw) 6px minmax(0, 1fr);
+  }
+  .handout-shell.has-inspector .handout-inspector-resizer { display: none !important; }
+  .handout-inspector {
+    position: absolute; z-index: 70; inset: 0 0 0 auto;
+    width: min(320px, calc(100% - 18px));
+    box-shadow: var(--shadow-lg);
+  }
+  .handout-page-settings-popover { width: min(340px, calc(100vw - 18px)); }
+}
+
+@media (max-width: 760px) {
+  /* 父工作区已经保留了 62px 图标导航；业务 iframe 自己隐藏了导航，不能再扣一次。 */
+  html.desktop-host.embedded-view main,
+  html.desktop-host.embedded-view main.bulk-active-page,
+  html.embedded-view main,
+  html.embedded-view main.bulk-active-page {
+    width: 100%; margin-left: 0;
+  }
 }

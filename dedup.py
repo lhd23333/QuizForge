@@ -56,7 +56,7 @@ def similarity(a: str, b: str) -> float:
 
 
 def find_duplicates(items: list[dict], threshold: float = 0.85,
-                    progress=None) -> list[dict]:
+                    progress=None, checkpoint=None) -> list[dict]:
     """在题目列表里找重复。
 
     items: [{"id":.., "body":.., "fingerprint": 可选}, ...]
@@ -74,7 +74,9 @@ def find_duplicates(items: list[dict], threshold: float = 0.85,
 
     # 1. 完全重复：按指纹分组
     by_fp: dict[str, list[dict]] = {}
-    for it in items:
+    for index, it in enumerate(items):
+        if checkpoint and index % 64 == 0:
+            checkpoint()
         fp = it.get("fingerprint") or fingerprint(it["body"])
         by_fp.setdefault(fp, []).append(it)
     exact_ids = set()
@@ -87,7 +89,9 @@ def find_duplicates(items: list[dict], threshold: float = 0.85,
     rest = [it for it in items if it["id"] not in exact_ids]
     # 按归一化长度升序排，让长度剪枝能 break 而不只是 continue（见下）
     prepared = []
-    for it in rest:
+    for index, it in enumerate(rest):
+        if checkpoint and index % 64 == 0:
+            checkpoint()
         n = normalize(it["body"])
         prepared.append((len(n), n, Counter(n), it))
     prepared.sort(key=lambda x: x[0])
@@ -112,6 +116,8 @@ def find_duplicates(items: list[dict], threshold: float = 0.85,
     if progress:
         progress(0, len(prepared))
     for i in range(len(prepared)):
+        if checkpoint:
+            checkpoint()
         la, na, ca, a = prepared[i]
         if progress and (i % 64 == 0 or i + 1 == len(prepared)):
             progress(i + 1, len(prepared))
@@ -130,6 +136,8 @@ def find_duplicates(items: list[dict], threshold: float = 0.85,
         for char in anchors:
             candidates.update(postings[char])
         for j in sorted(candidates):
+            if checkpoint and j % 64 == 0:
+                checkpoint()
             if j <= i:
                 continue
             lb, nb, cb, b = prepared[j]

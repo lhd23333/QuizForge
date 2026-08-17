@@ -1,6 +1,7 @@
 """查重候选剪枝与后台页面回归；不访问真实题库。"""
 
 import random
+import threading
 import unittest
 from collections import Counter
 from difflib import SequenceMatcher
@@ -60,6 +61,62 @@ class DedupCandidateTests(unittest.TestCase):
                 for group in dedup.find_duplicates(items, threshold)
             ]
             self.assertEqual(actual, expected)
+
+    def test_checkpoint_is_called_without_changing_results(self):
+        calls = []
+        items = [
+            {"id": "a", "body": "已知函数求最大值"},
+            {"id": "b", "body": "已知函数求最大值是多少"},
+        ]
+        result = dedup.find_duplicates(
+            items, threshold=0.5, checkpoint=lambda: calls.append(1))
+        self.assertTrue(calls)
+        self.assertEqual(result[0]["kind"], "similar")
+
+
+class DedupRouteTests(unittest.TestCase):
+    def setUp(self):
+        import app
+        self.app_module = app
+        with app._dedup_jobs_lock:
+            app._dedup_jobs.clear()
+
+    def tearDown(self):
+        with self.app_module._dedup_jobs_lock:
+            self.app_module._dedup_jobs.clear()
+
+    def test_page_does_not_start_scan_automatically(self):
+        response = self.app_module.app.test_client().get("/dedup")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"data-auto-start", response.data)
+        self.assertIn("开始扫描".encode("utf-8"), response.data)
+
+    def test_running_job_can_pause_and_resume(self):
+        gate = threading.Event()
+        gate.set()
+        with self.app_module._dedup_jobs_lock:
+            self.app_module._dedup_jobs["test-job"] = {
+                "status": "scanning", "threshold": 0.85, "total": 10,
+                "compared": 3, "groups": None, "error": "",
+                "created_at": 0, "resume_event": gate,
+                "resume_status": "scanning",
+            }
+        headers = {"X-CSRF-Token": self.app_module._WRITE_TOKEN}
+        client = self.app_module.app.test_client()
+
+        paused = client.post(
+            "/api/dedup/test-job/control", json={"action": "pause"},
+            headers=headers)
+        self.assertEqual(paused.status_code, 200)
+        self.assertEqual(paused.get_json()["status"], "paused")
+        self.assertFalse(gate.is_set())
+
+        resumed = client.post(
+            "/api/dedup/test-job/control", json={"action": "resume"},
+            headers=headers)
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(resumed.get_json()["status"], "scanning")
+        self.assertTrue(gate.is_set())
 
 
 if __name__ == "__main__":

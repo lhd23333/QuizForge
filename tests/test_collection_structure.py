@@ -28,6 +28,26 @@ def _ordinary_exam(title: str | None, numbers) -> str:
 
 
 class CollectionStructureTests(unittest.TestCase):
+    def test_trailing_arabic_topic_ordinals_split_short_consecutive_units(self):
+        raw = (
+            "# 重难专题 16 位置关系\n\n"
+            + "\n\n".join(f"{number}. 专题十六第 {number} 题" for number in range(1, 11))
+            + "\n\n## 重难专题 17 范围问题\n\n"
+            + "\n\n".join(f"{number}. 专题十七第 {number} 题" for number in range(1, 4))
+            + "\n\n## 重难专题 18 定点问题\n\n"
+            + "\n\n".join(f"{number}. 专题十八第 {number} 题" for number in range(1, 5))
+            + "\n\n## 重难专题 19 存在性问题\n\n"
+            + "\n\n".join(f"{number}. 专题十九第 {number} 题" for number in range(1, 3))
+        )
+
+        units = collection_structure.split_markdown_units(raw)
+
+        self.assertEqual([16, 17, 18, 19], [unit.ordinal for unit in units])
+        self.assertEqual(
+            [(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), (1, 2, 3),
+             (1, 2, 3, 4), (1, 2)],
+            [unit.question_numbers for unit in units])
+
     def test_number_resets_split_exam_without_chinese_ordinal_titles(self):
         raw = (_ordinary_exam("模拟卷甲", range(1, 20))
                + _ordinary_exam("模拟卷乙", range(1, 20)))
@@ -634,6 +654,48 @@ class CollectionStructureTests(unittest.TestCase):
 
 
 class CollectionConverterTests(unittest.TestCase):
+    def test_manual_cache_edit_materializes_single_unit_without_ocr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_root = root / "raw"
+            with mock.patch.object(converter, "_RAW_MD_ROOT", raw_root):
+                cache_dirs = converter.allocate_collection_cache_dirs(False)
+                workspace = Path(cache_dirs[0])
+                images = workspace / "images"
+                images.mkdir(parents=True)
+                (images / "graph.png").write_bytes(b"image")
+                converter._write_collection_cache(
+                    workspace,
+                    "# 初稿\n\n1．原题\n\n![](images/graph.png)",
+                    {"provider": "doc2x"})
+
+                before = converter.collection_cache_snapshot(
+                    cache_dirs, has_solution=False)
+                edited = "# 调整后\n\n1．第一题\n\n2．第二题\n\n![](images/graph.png)"
+                after = converter.update_collection_cache_markdown(
+                    cache_dirs, has_solution=False,
+                    exam_markdown=edited,
+                    expected_revision=before["revision"])
+                unit = converter.materialize_collection_cache_as_unit(
+                    cache_dirs, has_solution=False, title="整份试卷",
+                    ocr_backend="doc2x")
+
+                self.assertNotEqual(before["revision"], after["revision"])
+                self.assertEqual(
+                    edited,
+                    Path(unit["raw_path"]).read_text(encoding="utf-8"))
+                self.assertTrue(
+                    (Path(unit["workspace_dir"]) / "images" / "graph.png").is_file())
+                self.assertEqual("doc2x", unit["ocr_backend"])
+                with self.assertRaisesRegex(converter.ConvertError, "其他窗口"):
+                    converter.update_collection_cache_markdown(
+                        cache_dirs, has_solution=False,
+                        exam_markdown=edited + "\n\n3．第三题",
+                        expected_revision=before["revision"])
+
+                converter.cleanup_collection_workspace(unit["workspace_dir"])
+                converter.cleanup_collection_workspace(cache_dirs[0])
+
     def test_collection_unit_blocksplit_reads_raw_without_ocr(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw_path = Path(tmp) / "collection_unit_demo_raw.md"

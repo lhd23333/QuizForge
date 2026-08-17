@@ -654,12 +654,20 @@ def render_solution(text: str, sol_img_layouts=None,
     if not figs:
         return Markup(f'<div class="q-stem">{_drop_slots(_render_text(body))}</div>')
     plan = exporter.plan_figs(body, None, sol_img_layouts, sol_img_split)
+    all_ids = [s["i"] for s in plan["slots"] if s["i"] < len(figs)]
     inline_ids = [s["i"] for s in plan["slots"] if s["pos"] == "stem"]
     tail_ids = [s["i"] for s in plan["slots"]
                 if s["i"] not in set(inline_ids) and s["i"] < len(figs)]
-    text_html = _stem_html(body, inline_ids, figs, layouts, plan)
-    if sol_img_split == "full" and tail_ids:
-        unit, rest = exporter._split_first_unit(tail_ids, plan)
+    if sol_img_split == "full" and all_ids:
+        unit, rest = exporter._split_first_unit(all_ids, plan)
+        split = exporter._split_at_figure_slot(body, unit)
+        if split is None:
+            return Markup(_stem_html(body, inline_ids, figs, layouts, plan)
+                          + _figs_html(figs, layouts, tail_ids, plan))
+        before_body, after_body = split
+        inline_set = set(inline_ids)
+        rest_inline = [item for item in rest if item in inline_set]
+        rest_tail = [item for item in rest if item not in inline_set]
         ids = unit.get("ids") or []
         first = ids[0]
         width = exporter._split_unit_width(unit, layouts)
@@ -678,10 +686,14 @@ def render_solution(text: str, sol_img_layouts=None,
                 f'<div class="q-solution-flow-img" data-split-lead="{first}" '
                 f'data-unit-count="{len(ids)}" '
                 f'style="width:{img_frac * 100:.1f}%">{image}</div>'
-                f'{text_html}</div>')
-        return Markup(flow
-                      + _figs_html(figs, layouts, rest, plan))
-    return Markup(text_html + _figs_html(figs, layouts, tail_ids, plan))
+                f'{_stem_html(after_body, rest_inline, figs, layouts, plan)}</div>')
+        before_html = (
+            _stem_html(before_body, [], figs, layouts, plan)
+            if before_body.strip() else "")
+        return Markup(before_html + flow
+                      + _figs_html(figs, layouts, rest_tail, plan))
+    return Markup(_stem_html(body, inline_ids, figs, layouts, plan)
+                  + _figs_html(figs, layouts, tail_ids, plan))
 
 
 def _solve_split_html(stem_html: str, subs_html: str,

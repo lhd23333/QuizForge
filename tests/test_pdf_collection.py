@@ -429,6 +429,88 @@ class PdfCollectionTests(unittest.TestCase):
             quiz_app._batch_jobs.pop(batch_id, None)
             quiz_app._jobs.pop(job_id, None)
 
+    def test_failed_collection_can_edit_cached_markdown_and_retry_as_single(self):
+        import app as quiz_app
+
+        batch_id = "batch-source-review"
+        job_id = "source-review-job"
+        parent = {
+            "gid": 0, "job_id": job_id,
+            "file_path": "exam.pdf", "solution_path": None,
+            "include_solution": False, "only_numbers": None,
+            "filename": "专题练习.pdf", "engine": "block",
+            "ocr_backend": "doc2x", "block_mode": "no_ai",
+            "num_template": "", "cleanup_paths": [],
+            "cleanup_dirs": ["cache-exam"],
+            "collection_cache_dirs": ["cache-exam"],
+            "collection_mode": True,
+            "collection_strategy": "ocr_structure", "collection_unit": False,
+            "status": "error", "md": None, "error": "结构未确认",
+            "pending": None, "note": "", "reviewed": None,
+            "imported_count": 0, "attempt": 0, "in_flight": False,
+            "cancelled": False,
+        }
+        quiz_app._batch_jobs[batch_id] = {
+            "status": "done", "groups": [parent], "running": 0,
+            "cancelled": False, "files_cleaned": False,
+        }
+        quiz_app._jobs[job_id] = {
+            "status": "error", "md": None, "error": "结构未确认",
+            "path": "exam.pdf", "solution_path": None,
+        }
+        snapshot = {
+            "exam_markdown": "1．初稿", "solution_markdown": "",
+            "ocr_meta": {"exam": {}, "solution": None},
+            "revision": "a" * 64,
+        }
+        unit = {
+            "raw_path": "unit/raw.md", "workspace_dir": "unit",
+            "ocr_meta": snapshot["ocr_meta"], "include_solution": False,
+        }
+        try:
+            with mock.patch.object(
+                    quiz_app.converter, "collection_cache_is_editable",
+                    return_value=True), \
+                    mock.patch.object(
+                        quiz_app.converter, "collection_cache_snapshot",
+                        return_value=snapshot), \
+                    mock.patch.object(
+                        quiz_app.converter, "update_collection_cache_markdown",
+                        return_value=snapshot) as update, \
+                    mock.patch.object(
+                        quiz_app.converter, "materialize_collection_cache_as_unit",
+                        return_value=unit), \
+                    mock.patch.object(quiz_app, "_persist_job"), \
+                    mock.patch.object(quiz_app, "_persist_batch"), \
+                    mock.patch.object(quiz_app.threading, "Thread") as thread_cls:
+                client = quiz_app.app.test_client()
+                page = client.get(
+                    f"/batch/{batch_id}/group/0/source")
+                response = client.post(
+                    f"/batch/{batch_id}/group/0/source",
+                    data={
+                        "exam_markdown": "1．调整后",
+                        "revision": snapshot["revision"],
+                        "retry_mode": "single",
+                    },
+                    headers={"X-CSRF-Token": quiz_app._WRITE_TOKEN})
+
+            self.assertEqual(200, page.status_code)
+            self.assertIn("调整识别原文", page.get_data(as_text=True))
+            self.assertEqual(302, response.status_code)
+            update.assert_called_once()
+            self.assertTrue(parent["collection_unit"])
+            self.assertEqual("unit/raw.md", parent["collection_raw_path"])
+            self.assertEqual("pending", parent["status"])
+            self.assertEqual(1, parent["attempt"])
+            self.assertIs(
+                quiz_app._convert_batch_worker,
+                thread_cls.call_args.kwargs["target"])
+            thread_cls.return_value.start.assert_called_once()
+        finally:
+            quiz_app._batch_jobs.pop(batch_id, None)
+            quiz_app._jobs.pop(job_id, None)
+
     def test_ocr_parent_never_falls_into_normal_two_file_conversion(self):
         import app as quiz_app
 

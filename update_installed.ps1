@@ -25,6 +25,25 @@ $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $installedExe = Join-Path $InstallDir "QuizForge.exe"
 $uninstaller = Join-Path $InstallDir "unins000.exe"
 
+# These files are current or historical user state, never release files. Old
+# activation/account files stay protected even though the open-source build no
+# longer reads them.
+$protectedRootNames = @(
+    ".enc_key",
+    "license.qflicense",
+    "device_identity.dat",
+    "cloud_account.json",
+    "activation.json",
+    "mineru.json",
+    "doc2x.json",
+    "doc2x_local.json",
+    "providers.json",
+    "service_ports.json",
+    "ui_prefs.json"
+)
+$protectedStateNames = @("conversion_tasks.json", "selections.json")
+$protectedResumePatterns = @(".mineru_task_*.json", ".mineru_result_*.zip.part")
+
 function Assert-LastExitCode([string]$Step) {
     if ($LASTEXITCODE -ne 0) {
         throw "$Step failed with exit code $LASTEXITCODE"
@@ -68,10 +87,7 @@ function Get-RelativeKey([string]$Prefix, [System.IO.DirectoryInfo]$Root,
 
 function Get-CredentialSnapshot([string]$AppDataDir) {
     $snapshot = @{}
-    foreach ($name in @(
-        ".enc_key", "license.qflicense", "device_identity.dat", "mineru.json",
-        "doc2x.json", "providers.json", "service_ports.json", "ui_prefs.json"
-    )) {
+    foreach ($name in $protectedRootNames) {
         $path = Join-Path $AppDataDir $name
         $key = "appdata|$name"
         if (Test-Path -LiteralPath $path -PathType Leaf) {
@@ -89,16 +105,7 @@ function Get-ProtectedSnapshot([string]$AppDataDir, [string]$ProgramDir,
     $snapshot = @{}
     $appRoot = Get-Item -LiteralPath $AppDataDir
     $programRoot = Get-Item -LiteralPath $ProgramDir
-    $names = @(
-        ".enc_key",
-        "license.qflicense",
-        "device_identity.dat",
-        "mineru.json",
-        "doc2x.json",
-        "providers.json",
-        "service_ports.json",
-        "ui_prefs.json"
-    )
+    $names = @($protectedRootNames)
     if ($IncludeDesktopConfig) {
         $names += "desktop.json"
     }
@@ -112,8 +119,7 @@ function Get-ProtectedSnapshot([string]$AppDataDir, [string]$ProgramDir,
         }
     }
 
-    $stateNames = @("conversion_tasks.json", "selections.json")
-    foreach ($name in $stateNames) {
+    foreach ($name in $protectedStateNames) {
         foreach ($file in @(Get-ChildItem -LiteralPath $AppDataDir -Recurse -Force -File `
                             -Filter $name -ErrorAction SilentlyContinue)) {
             $key = Get-RelativeKey "appdata" $appRoot $file
@@ -126,7 +132,7 @@ function Get-ProtectedSnapshot([string]$AppDataDir, [string]$ProgramDir,
         $resumeRoots += @{ Prefix = "program"; Root = $programRoot }
     }
     foreach ($rootInfo in $resumeRoots) {
-        foreach ($pattern in @(".mineru_task_*.json", ".mineru_result_*.zip.part")) {
+        foreach ($pattern in $protectedResumePatterns) {
             foreach ($file in @(Get-ChildItem -LiteralPath $rootInfo.Root.FullName -Recurse `
                                 -Force -File -Filter $pattern `
                                 -ErrorAction SilentlyContinue)) {
@@ -255,9 +261,13 @@ try {
     $versionTuple = "($major, $minor, $patch, 0)"
 
     Assert-TextContains (Join-Path $projectRoot "build_desktop.ps1") `
-        "--file-version=$fileVersion" "Nuitka file version"
+        ('[string]$Version = "' + $productVersion + '"') "Desktop product version"
     Assert-TextContains (Join-Path $projectRoot "build_desktop.ps1") `
-        "--product-version=$fileVersion" "Nuitka product version"
+        ('[string]$FileVersion = "' + $fileVersion + '"') "Desktop file version"
+    Assert-TextContains (Join-Path $projectRoot "build_desktop.ps1") `
+        '--file-version=$FileVersion' "Nuitka file version argument"
+    Assert-TextContains (Join-Path $projectRoot "build_desktop.ps1") `
+        '--product-version=$FileVersion' "Nuitka product version argument"
     Assert-TextContains (Join-Path $projectRoot "build_installer.ps1") `
         ('[string]$Version = "' + $productVersion + '"') "Installer product version"
     Assert-TextContains (Join-Path $projectRoot "build_installer.ps1") `
@@ -283,7 +293,8 @@ try {
     } catch {
         throw "Installed or target file version is invalid: installed=$installedFileVersion target=$fileVersion"
     }
-    if ($targetNumeric -le $installedNumeric) {
+    if ($targetNumeric -lt $installedNumeric -or
+            ($targetNumeric -eq $installedNumeric -and -not $DirectBundle)) {
         throw "Target $productVersion ($fileVersion) is not newer than installed $([string]$installedInfo.ProductVersion) ($installedFileVersion). Bump PRODUCT_VERSION before updating."
     }
 
@@ -291,13 +302,15 @@ try {
 
     $compileFiles = @(
         "app.py", "desktop.py", "desktop_product.py", "service_ports.py",
+        "tex_installer.py",
+        "search_query.py", "word_exporter.py", "word_ooxml.py",
         "license_manager.py", "device_identity.py", "filestore.py", "exporter.py",
         "converter.py", "pdf_collection.py", "collection_structure.py",
         "collection_recovery.py", "ocr_pool.py",
         "mineru_store.py", "doc2x_client.py", "doc2x_store.py", "imgorder.py",
         "blockpipe.py", "blocksplit.py", "blocknorm.py", "mechfix.py", "importer.py",
         "dedup.py", "llm_client.py", "providers.py", "qrender.py", "task_store.py",
-        "cleanup_output.py", "corpus.py", "tools\eval_doc2x.py",
+        "cleanup_output.py", "corpus.py", "update_client.py", "tools\eval_doc2x.py",
         "vendor\project_alpha\src\mineru_client.py"
     )
     & $python -m py_compile @compileFiles
@@ -322,7 +335,7 @@ try {
 
     if ($DirectBundle) {
         if (-not $SkipBuild) {
-            & $buildDesktop
+            & $buildDesktop -Version $productVersion -FileVersion $fileVersion
             if ($LASTEXITCODE -ne 0) {
                 throw "Desktop bundle build failed with exit code $LASTEXITCODE"
             }
@@ -454,7 +467,7 @@ try {
 
     $stableAfterHealth = Get-ProtectedSnapshot $appDataDir $InstallDir $false $true
     Assert-SnapshotEqual $stableBefore $stableAfterHealth "Post-start"
-    Write-Output "[9/9] Credentials, license, task state, and MinerU resume files remain unchanged"
+    Write-Output "[9/9] Credentials, cloud account, license, task state, and MinerU resume files remain unchanged"
     Write-Output "[OK] QuizForge was updated in place to $productVersion"
     if (-not $DirectBundle) {
         Write-Output "[OK] Installer log: $setupLog"

@@ -187,3 +187,17 @@ def matches(expected: str, current: str) -> bool:
     except ValueError:
         return False
     return hmac.compare_digest(left, right)
+
+
+def protect_for_current_user(value: bytes) -> bytes:
+    """用 Windows DPAPI 当前用户范围加密账号刷新令牌。"""
+    if not isinstance(value, bytes) or not value:
+        raise DeviceIdentityError("待加密内容为空")
+    return _protect(value)
+
+
+def unprotect_for_current_user(value: bytes) -> bytes:
+    """解密由 :func:`protect_for_current_user` 保存的内容。"""
+    if not isinstance(value, bytes) or not value:
+        raise DeviceIdentityError("待解密内容为空")
+    return _unprotect(value)

@@ -31,6 +31,7 @@ from pathlib import Path, PurePosixPath
 from ruamel.yaml import YAML
 
 import config
+from search_query import SearchQuery, matches_search, parse_search_query
 
 logger = logging.getLogger(__name__)
 
@@ -611,6 +612,119 @@ def records_from_paths(paths: list[str]) -> list[dict]:
     return records
 
 
+_FRONTMATTER_PEEK_CHARS = 128 * 1024
+
+
+def _peek_question_id(path: Path) -> tuple[str | None, bool]:
+    """只读 frontmatter 头部取得题目 id，不解析正文和完整 YAML。
+
+    返回 ``(id, True)`` 表示结果确定；遇到超长或带复杂 YAML 标记的 id 时返回
+    ``(None, False)``，让调用方回退现有完整扫描。QuizForge 自己写出的 id 都是简单
+    标量，这条快路径主要用于冷启动时从上万份文件里定位少量已选题。
+    """
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            first = handle.readline()
+            if first.rstrip("\r\n") != "---":
+                return path.stem, True
+            consumed = len(first)
+            found = None
+            for line in handle:
+                consumed += len(line)
+                if consumed > _FRONTMATTER_PEEK_CHARS:
+                    return None, False
+                stripped = line.rstrip("\r\n")
+                if stripped == "---":
+                    return (found or path.stem), True
+                if not stripped.startswith("id:"):
+                    continue
+                raw = stripped[3:].strip()
+                if not raw or raw in {"null", "Null", "NULL", "~", "''", '""'}:
+                    found = path.stem
+                elif raw[0] in {"'", '"'}:
+                    if len(raw) < 2 or raw[-1] != raw[0]:
+                        return None, False
+                    found = raw[1:-1]
+                else:
+                    comment = re.search(r"\s+#", raw)
+                    value = raw[:comment.start()].rstrip() if comment else raw
+                    if not value or any(char.isspace() for char in value):
+                        return None, False
+                    found = value
+            # 缺少结束分隔线时 _parse_raw_text 也会按无 frontmatter 处理。
+            return path.stem, True
+    except (OSError, UnicodeError):
+        # 完整扫描同样会跳过读不出的文件，不应让一个坏文件拖慢整个选题篮。
+        return None, True
+
+
+def records_from_ids(ids: list[str]) -> list[dict]:
+    """按少量题目 id 读取记录，冷启动不解析整座题库。
+
+    已展示题目优先命中 ``_cache``；其余只扫描 Markdown 的 frontmatter 头部来找
+    路径，再复用 ``records_from_paths`` 完整解析命中的文件。只有遇到无法安全判断
+    的复杂旧 frontmatter 时才回退 ``_all_records``，保持旧数据兼容。
+    """
+    ordered = list(dict.fromkeys(str(qid) for qid in ids if qid))
+    if not ordered:
+        return []
+    wanted = set(ordered)
+    cached_paths = {}
+    with _scan_lock:
+        for key, record in _cache.items():
+            qid = str(record.get("id") or "")
+            if qid in wanted and Path(key).is_file():
+                cached_paths[qid] = Path(key)
+
+    records_by_id = {}
+    cached_rel = []
+    for qid in ordered:
+        path = cached_paths.get(qid)
+        if path is None:
+            continue
+        try:
+            cached_rel.append(path.resolve().relative_to(
+                config.BANK_DIR.resolve()).as_posix())
+        except ValueError:
+            continue
+    for record in records_from_paths(cached_rel):
+        qid = str(record.get("id") or "")
+        if qid in wanted:
+            records_by_id[qid] = record
+
+    unresolved = wanted - set(records_by_id)
+    uncertain = False
+    found_paths = {}
+    if unresolved:
+        for path in config.BANK_DIR.rglob("*.md"):
+            try:
+                rel = path.relative_to(config.BANK_DIR)
+            except ValueError:
+                continue
+            if _skip_rel(rel):
+                continue
+            qid, certain = _peek_question_id(path)
+            uncertain = uncertain or not certain
+            if qid in unresolved:
+                found_paths[qid] = rel.as_posix()
+                unresolved.remove(qid)
+                if not unresolved:
+                    break
+        for record in records_from_paths([
+                found_paths[qid] for qid in ordered if qid in found_paths]):
+            qid = str(record.get("id") or "")
+            if qid in wanted:
+                records_by_id[qid] = record
+
+    unresolved = wanted - set(records_by_id)
+    if unresolved and uncertain:
+        for record in _all_records():
+            qid = str(record.get("id") or "")
+            if qid in unresolved:
+                records_by_id[qid] = record
+    return [records_by_id[qid] for qid in ordered if qid in records_by_id]
+
+
 def refresh_selected(records: list[dict]) -> None:
     """把长列表快照里的勾选态刷新为当前内存状态。"""
     with _selected_lock:
@@ -737,11 +851,11 @@ def list_collections_tree(records: list[dict] | None = None) -> list[dict]:
 
 
 def list_navigation_tree(active_id: str = "") -> list[dict]:
-    """返回侧栏所需的浅树，只预载当前路径。
+    """返回侧栏所需的浅树，预载第一层和当前路径。
 
     完整树主要用于导入页和“移动到”选项；首页每次切换试卷都递归扫描 642 个
-    目录没有必要。这里始终显示顶层；首次进入题库时子级全部折叠并按需读取，
-    只有深链接或刷新某个题集时才预载当前路径，保证选中项仍然可见。
+    目录没有必要。这里让顶层文件夹直接显示一级子目录，形成可读的层级树；更深层
+    仍按需读取。深链接或刷新某个题集时继续预载当前路径，保证选中项可见。
     其余节点保留 ``has_children``，交给 ``/collections/children`` 点击后加载。
     """
     root = config.BANK_DIR.resolve()
@@ -769,7 +883,7 @@ def list_navigation_tree(active_id: str = "") -> list[dict]:
         for directory in subdirs(path):
             rel = directory.relative_to(root).as_posix()
             on_active_path = active_id == rel or active_id.startswith(rel + "/")
-            expanded = on_active_path
+            expanded = depth == 0 or on_active_path
             children = build(directory, rel, depth + 1) if expanded else []
             nodes.append({
                 "id": rel,
@@ -2423,7 +2537,7 @@ def _folder_subtree_ids(folder_id: str) -> set[str]:
 def list_questions(tags: list[str] | None = None, match: str = "and",
                     qtype: str = "", difficulty: str = "",
                     starred: bool = False, sort: str = "custom",
-                    collection: str = "", search: str = "",
+                    collection: str = "", search: str | SearchQuery = "",
                     selected_only: bool = False,
                     records: list[dict] | None = None) -> list[dict]:
     recs = list(records) if records is not None else _all_records()
@@ -2447,14 +2561,11 @@ def list_questions(tags: list[str] | None = None, match: str = "and",
     if starred:
         recs = [r for r in recs if r["starred"]]
     if search:
-        needle = search.strip().lower()
-        if needle:
-            recs = [
-                r for r in recs
-                if needle in r["body"].lower()
-                or needle in r["solution"].lower()
-                or any(needle in t.lower() for t in r["tags"])
-            ]
+        query = (parse_search_query(
+            search, allowed_types=config.QUESTION_TYPES,
+            allowed_difficulties=config.DIFFICULTIES)
+                 if isinstance(search, str) else search)
+        recs = [r for r in recs if matches_search(r, query)]
 
     key = _SORT_KEYS.get(sort, _SORT_KEYS["custom"])
     recs = sorted(recs, key=key, reverse=_SORT_REVERSE.get(sort, False))

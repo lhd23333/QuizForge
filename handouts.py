@@ -20,6 +20,7 @@ from ruamel.yaml import YAML
 
 import config
 import filestore
+import qrender
 
 
 SCHEMA_VERSION = 1
@@ -393,7 +394,11 @@ def question_snapshot(qid: str) -> dict:
 
 
 def selected_question_summaries() -> list[dict]:
-    records = filestore.list_questions(selected_only=True, sort="custom")
+    # 选题篮通常只有少量题：热缓存直接取，冷启动只扫 frontmatter 头部定位路径，
+    # 不能为了十几道题解析上万份完整 Markdown。
+    records = filestore.records_from_ids(filestore.selected_ids())
+    records = filestore.list_questions(
+        selected_only=True, sort="custom", records=records)
     rows = []
     for record in records:
         plain = re.sub(r"!\[\[[^\]]+\]\]", "[图片]", record.get("body") or "")
@@ -404,6 +409,15 @@ def selected_question_summaries() -> list[dict]:
             "source": record.get("source") or "未记录题源",
             "excerpt": plain[:180],
             "path": record.get("path") or "",
+            # qrender 与题库正式题卡、PDF 共用选项和图片布局规则；它会先转义外来
+            # 文本，再只放行自己生成的结构标签，因此可作为受信任 HTML 交给前端。
+            "body_html": str(qrender.render_body(
+                record.get("body") or "", record.get("type"),
+                img_layouts=record.get("img_layouts"),
+                img_width=record.get("img_width"),
+                img_align=record.get("img_align"),
+                img_split=record.get("img_split"),
+            )),
         })
     return rows
 

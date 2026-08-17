@@ -8,6 +8,7 @@ from pathlib import Path, PurePosixPath
 import posixpath
 import re
 import tempfile
+import time
 from typing import Mapping, Sequence
 import xml.etree.ElementTree as ET
 import zipfile
@@ -227,7 +228,15 @@ def _replace_layout_markers(document: ET.Element,
                 old = properties.find("w:sectPr", NS)
                 if old is not None:
                     properties.remove(old)
-                break_type = "continuous" if spec.start == "continuous" else "nextPage"
+                # w:type 描述“当前分节如何开始”，不是下一个分节如何开始。
+                # 默认首节没有开始类型；否则练习册的 continuous 会落到标题节，
+                # 而真正的双栏节仍按默认 nextPage 开始，形成一整页空白标题页。
+                break_type = None
+                if current.marker != "QF_DEFAULT":
+                    break_type = (
+                        "continuous" if current.start == "continuous"
+                        else "nextPage"
+                    )
                 properties.append(_section_xml(current, final_section, break_type))
             current = spec
             continue
@@ -238,7 +247,11 @@ def _replace_layout_markers(document: ET.Element,
         if re.fullmatch(r"QF-Q-\d+", node.text or ""):
             node.text = ""
 
-    replacement = _section_xml(current, final_section)
+    final_break_type = None
+    if current.marker != "QF_DEFAULT":
+        final_break_type = (
+            "continuous" if current.start == "continuous" else "nextPage")
+    replacement = _section_xml(current, final_section, final_break_type)
     index = list(body).index(final_section)
     body.remove(final_section)
     body.insert(index, replacement)
@@ -350,6 +363,19 @@ def _enable_field_updates(parts: dict[str, bytes]) -> None:
     parts["word/settings.xml"] = _serialize(root)
 
 
+def _replace_with_retry(source: Path, target: Path) -> None:
+    delays = (0.02, 0.05, 0.1, 0.2, 0.4)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == len(delays):
+                raise
+            # Windows 杀毒软件可能短暂扫描刚写完的 ZIP；保留原子替换并有界等待。
+            time.sleep(delays[attempt])
+
+
 def _write_package_atomic(path: Path, parts: Mapping[str, bytes]) -> None:
     handle, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".part", dir=path.parent)
@@ -359,7 +385,7 @@ def _write_package_atomic(path: Path, parts: Mapping[str, bytes]) -> None:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
             for name in sorted(parts):
                 archive.writestr(name, parts[name])
-        os.replace(temporary, path)
+        _replace_with_retry(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -371,7 +397,10 @@ def patch_docx(path: Path, *, title: str, sections: Sequence[SectionSpec],
     parts = _read_package(path)
     document = _xml(parts, "word/document.xml")
     _replace_layout_markers(document, sections)
-    _fix_table_geometry(document)
+    # 双栏的单栏可用宽度约为 4500 dxa；整页宽表会让 Word 的分页器长时间
+    # 反复重排，实际表现为文档打开卡住。留出栏间距后统一限制为 4300 dxa。
+    table_width = 4300 if any(section.columns > 1 for section in sections) else 9746
+    _fix_table_geometry(document, table_width)
     parts["word/document.xml"] = _serialize(document)
 
     _patch_header_footer(parts, header_footer)

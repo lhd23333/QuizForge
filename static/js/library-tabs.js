@@ -18,6 +18,7 @@
   let splitRatio = 50;
   let tabSerial = 0;
   let splitter = null;
+  let initialTreePromise = Promise.resolve();
 
   function kindFromPath(path) {
     if (String(path || '').replace(/\\/g, '/').startsWith('_handouts/')) return 'handout';
@@ -568,13 +569,56 @@
       }
       host.dataset.loaded = '1';
       markActiveTree();
+      return data;
     } catch (error) {
       host.replaceChildren();
       const message = document.createElement('div');
       message.className = 'library-tree-error';
       message.textContent = error.message;
       host.append(message);
+      return null;
     }
+  }
+
+  async function revealFile(rawPath) {
+    const path = validPath(rawPath);
+    if (!path) return false;
+    await initialTreePromise;
+    const parts = path.split('/');
+    let parent = '';
+    let host = tree;
+    let entry = null;
+    for (let index = 0; index < parts.length; index += 1) {
+      const current = parent ? `${parent}/${parts[index]}` : parts[index];
+      entry = [...host.querySelectorAll(':scope > .library-tree-node > .library-tree-entry')]
+        .find(node => node.dataset.path === current) || null;
+      while (!entry) {
+        const more = host.querySelector(':scope > .library-tree-more');
+        if (!more) break;
+        const offset = Number(more.dataset.offset || 0);
+        more.remove();
+        await loadChildren(host, parent, offset);
+        entry = [...host.querySelectorAll(':scope > .library-tree-node > .library-tree-entry')]
+          .find(node => node.dataset.path === current) || null;
+      }
+      if (!entry) return false;
+      if (index === parts.length - 1) break;
+      if (entry.dataset.kind !== 'folder') return false;
+      const node = entry.closest('.library-tree-node');
+      const children = node.querySelector(':scope > .library-tree-children');
+      children.hidden = false;
+      entry.classList.add('is-open');
+      if (children.dataset.loaded !== '1') await loadChildren(children, current, 0);
+      host = children;
+      parent = current;
+    }
+    if (!entry) return false;
+    openDocument({path, kind: entry.dataset.kind,
+                  name: entry.querySelector('.library-tree-label')?.textContent});
+    entry.classList.add('is-revealed');
+    entry.scrollIntoView?.({block: 'center'});
+    window.setTimeout(() => entry.classList.remove('is-revealed'), 1200);
+    return true;
   }
 
   tree.addEventListener('click', event => {
@@ -598,6 +642,13 @@
       openDocument({path: entry.dataset.path, kind: entry.dataset.kind,
                     name: entry.querySelector('.library-tree-label')?.textContent});
     }
+  });
+
+  window.addEventListener('message', event => {
+    if (event.origin !== window.location.origin || event.source !== window.parent
+        || event.data?.source !== 'quizforge'
+        || event.data?.type !== 'open-library-file') return;
+    revealFile(event.data.path).catch(() => {});
   });
 
   panesHost.addEventListener('click', event => {
@@ -701,7 +752,11 @@
   setLayout(layout, {restore: true});
   renderAll();
   setFocusedPane(focusedPaneId);
-  loadChildren(tree, '', 0);
+  initialTreePromise = loadChildren(tree, '', 0);
+  if (window.parent !== window) window.parent.postMessage(
+    {source: 'quizforge', type: 'library-ready'}, window.location.origin);
+  const initialOpen = new URLSearchParams(window.location.search).get('open');
+  if (initialOpen) revealFile(initialOpen).catch(() => {});
   window.addEventListener('beforeunload', event => {
     if (![...tabs.values()].some(tab => tab.dirty)) return;
     event.preventDefault();

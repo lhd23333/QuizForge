@@ -85,28 +85,53 @@
     <div class="desktop-resize-handle desktop-resize-{{ edge }}"
          data-resize-edge="{{ edge }}" aria-hidden="true"></div>
   {% endfor %}
-  <header>
+  {% from "_icons.html" import icon %}
+  <aside class="app-sidebar" aria-label="全局导航">
     <nav>
       {% set endpoint = request.endpoint or '' %}
-      <a href="{{ url_for('index') }}" class="brand"><span class="brand-mark">QF</span>QuizForge</a>
-      <a href="{{ url_for('index') }}" class="nav-link{% if endpoint == 'index' %} active{% endif %}">题库</a>
-      <a href="{{ url_for('handouts_page') }}" class="nav-link{% if endpoint.startswith('handouts') %} active{% endif %}">讲义</a>
-      <a href="{{ url_for('library_page') }}" class="nav-link{% if endpoint.startswith('library') %} active{% endif %}">资料库</a>
-      <a href="{{ url_for('import_md') }}" class="nav-link{% if endpoint.startswith('import') or endpoint.startswith('block_') %} active{% endif %}">批量导入</a>
+      <a href="{{ url_for('index') }}" class="brand" aria-label="QuizForge 题库">
+        <span class="brand-mark">QF</span><span class="brand-name">QuizForge</span>
+      </a>
+      <div class="nav-group">
+      <a href="{{ url_for('index') }}" title="题库" class="nav-link{% if endpoint == 'index' %} active{% endif %}">{{ icon('book-open') }}<span>题库</span></a>
+      <a href="{{ url_for('handouts_page') }}" title="讲义" class="nav-link{% if endpoint.startswith('handouts') %} active{% endif %}">{{ icon('notebook') }}<span>讲义</span></a>
+      <a href="{{ url_for('library_page') }}" title="资料库" class="nav-link{% if endpoint.startswith('library') %} active{% endif %}">{{ icon('folder') }}<span>资料库</span></a>
+      <a href="{{ url_for('import_md') }}" title="批量导入" class="nav-link{% if endpoint.startswith('import') or endpoint.startswith('block_') %} active{% endif %}">{{ icon('upload') }}<span>批量导入</span></a>
       {# 转换任务：batch_id 只在内存里，离开看板页就找不回来了，得有个总入口 #}
-      <a href="{{ url_for('batches_overview') }}" class="nav-link{% if 'batch' in endpoint %} active{% endif %}">转换任务{% if nav_batch_count %}
+      <a href="{{ url_for('batches_overview') }}" title="转换任务" class="nav-link{% if 'batch' in endpoint %} active{% endif %}">{{ icon('clock') }}<span>转换任务</span>{% if nav_batch_count %}
         <span class="nav-badge">{{ nav_batch_count }}</span>{% endif %}</a>
-      <span class="nav-spacer"></span>
-      <span class="nav-separator" aria-hidden="true"></span>
-      <a href="{{ url_for('dedup_page') }}" class="nav-link nav-link-utility{% if endpoint == 'dedup_page' %} active{% endif %}">查重</a>
-      <a href="{{ url_for('recycle_bin') }}" class="nav-link nav-link-utility{% if endpoint == 'recycle_bin' %} active{% endif %}">回收站</a>
-      <a href="{{ url_for('settings_page') }}" class="nav-link nav-link-utility{% if endpoint.startswith('settings') %} active{% endif %}">设置</a>
-      <a href="{{ url_for('about_page') }}" class="nav-link nav-link-utility{% if endpoint in ['about_page', 'welcome_page'] %} active{% endif %}">关于</a>
+      </div>
+      <div class="nav-group nav-tools">
+      <span class="nav-group-label">工具</span>
+      <a href="{{ url_for('dedup_page') }}" title="查重" class="nav-link nav-link-utility{% if endpoint == 'dedup_page' %} active{% endif %}">{{ icon('search') }}<span>查重</span></a>
+      <a href="{{ url_for('recycle_bin') }}" title="回收站" class="nav-link nav-link-utility{% if endpoint == 'recycle_bin' %} active{% endif %}">{{ icon('trash') }}<span>回收站</span></a>
+      </div>
+      <div class="nav-spacer"></div>
       {# 仅独立桌面壳注入 window.pywebview 后显示；浏览器/Obsidian 中保持隐藏。 #}
       <button type="button" id="desktop-bank-button" class="desktop-nav-button"
-              title="管理本机题库"{% if not desktop_host %} hidden{% endif %}>题库</button>
+              title="管理本机题库"{% if not desktop_host %} hidden{% endif %}>{{ icon('database') }}<span>题库管理</span></button>
+      {% if sponsor_url %}<a href="{{ sponsor_url }}" class="nav-link nav-link-utility sponsor-link" title="赞助" target="_blank" rel="noopener">{{ icon('heart') }}<span>赞助</span></a>{% endif %}
+      <a href="{{ url_for('settings_page') }}" title="设置" class="nav-link nav-link-utility{% if endpoint.startswith('settings') %} active{% endif %}">{{ icon('settings') }}<span>设置</span></a>
+      <button type="button" class="nav-link nav-action" data-help-open title="帮助">{{ icon('help') }}<span>帮助</span></button>
+      <a href="{{ url_for('about_page') }}" title="关于" class="nav-link nav-link-utility{% if endpoint in ['about_page', 'welcome_page'] %} active{% endif %}">{{ icon('info') }}<span>关于</span></a>
     </nav>
-  </header>
+    <div class="split-resizer app-nav-resizer" role="separator" tabindex="0"
+         aria-label="调整导航栏宽度" aria-orientation="vertical"
+         title="拖动调整宽度，双击恢复"
+         data-split-resizer data-split-owner="root" data-split-panel=".app-sidebar"
+         data-split-property="--app-nav-width" data-split-side="left"
+         data-split-min="170" data-split-max="320" data-split-main-min="620"
+         data-split-key="app-nav"></div>
+  </aside>
+
+  <dialog class="page-help-dialog" id="page-help-dialog" aria-labelledby="page-help-title">
+    <div class="page-help-head">
+      <h2 id="page-help-title">当前页面帮助</h2>
+      <button type="button" class="icon-btn" data-help-close aria-label="关闭帮助" title="关闭">{{ icon('x') }}</button>
+    </div>
+    <div class="page-help-body" id="page-help-body"></div>
+  </dialog>
+  {% include "_page_help.html" %}
 
   <dialog class="desktop-bank-dialog" id="desktop-bank-dialog">
     <div class="desktop-bank-dialog-head">
@@ -197,6 +222,7 @@
   </dialog>
 
   <main>
+    {% if not suppress_flash|default(false) %}
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         {% for category, msg in messages %}
@@ -204,12 +230,15 @@
         {% endfor %}
       {% endif %}
     {% endwith %}
+    {% endif %}
 
     {% block content %}{% endblock %}
   </main>
 
   <script src="{{ static_v('js/csrf.js') }}"></script>
   <script src="{{ static_v('js/text-preview.js') }}"></script>
+  <script src="{{ static_v('js/app-shell.js') }}" defer></script>
+  <script src="{{ static_v('js/split-panes.js') }}" defer></script>
   {% block scripts %}{% endblock %}
 
   <!-- 独立桌面壳桥：联网服务初版关闭，只负责本机目录与进程操作。 -->
@@ -775,7 +804,18 @@
       var paper = ev.target.closest('a.paper-open-obsidian[data-path]');
       if (paper) {
         ev.preventDefault();
-        post('open-file', {path: paper.dataset.path});
+        post('open-file', {path: paper.dataset.path, fallbackUrl: paper.href});
+        return;
+      }
+      var libraryPaper = ev.target.closest('button.paper-open-library[data-library-path]');
+      if (libraryPaper) {
+        ev.preventDefault();
+        var path = libraryPaper.dataset.libraryPath;
+        if (window.parent === window) {
+          window.location.href = '/library?open=' + encodeURIComponent(path);
+        } else {
+          post('open-library-file', {path: path});
+        }
         return;
       }
       // .img-layout-bar 一并排除：那条控制条上的对齐/大小/分栏/重绘全是 <span>，

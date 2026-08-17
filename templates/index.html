@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {# 递归渲染文件夹树。node 含 id/name/parent_id/cnt/children/depth（软件版无内置文件夹概念）。 #}
 {% macro render_folder_tree(nodes, active) %}
@@ -17,7 +18,7 @@
           <span class="folder-twist folder-twist-empty"></span>
         {% endif %}
         <span class="folder-ico" aria-hidden="true">▰</span>
-        <a class="folder-link" data-ajax="1" href="{{ url_for('index', collection=n['id']) }}" title="{{ n['name'] }}">
+        <a class="folder-link" data-ajax="1" href="{{ folder_scope_url(n['id']) }}" title="{{ n['name'] }}">
           {{ n['name'] }}
         </a>
         <span class="folder-actions">
@@ -43,7 +44,7 @@
 {% endmacro %}
 
 {% block content %}
-<div class="layout">
+<div class="layout" id="question-layout">
 
   <!-- 浏览器/Obsidian 仍按“筛选在上、题集在下”连续显示；独立桌面端把两区
        变成页签，文件树不再被筛选表单挤出最小窗口首屏。 -->
@@ -64,10 +65,12 @@
              role="tabpanel" aria-labelledby="sidebar-tab-filters" data-sidebar-panel="filters">
       <h3>标签筛选</h3>
       <form method="get" action="{{ url_for('index') }}" id="filter-form">
+      {% for name, value in filter_context_fields %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {% endfor %}
       <div class="tag-cloud" id="tag-cloud">
         {% if tags_deferred %}
           <button type="button" class="btn btn-ghost" id="load-tags-btn">加载全部标签</button>
-          <p class="muted">题库较大，按需加载可避免首页扫描全部试卷。</p>
         {% else %}
           {% for t in all_tags %}
           <div class="tag-row">
@@ -132,7 +135,7 @@
       </div>
 
       <button type="submit" class="btn">筛选</button>
-      <a href="{{ url_for('index') }}" class="btn btn-ghost">重置</a>
+      <a href="{{ filter_reset_url }}" class="btn btn-ghost" id="filter-reset">重置</a>
       </form>
     </section>
 
@@ -148,7 +151,7 @@
           <div class="folder-row">
             <span class="folder-twist folder-twist-empty"></span>
             <span class="folder-ico" aria-hidden="true">☷</span>
-            <a class="folder-link" data-ajax="1" href="{{ url_for('index', all=1) }}">全部题目</a>
+            <a class="folder-link" data-ajax="1" href="{{ all_questions_url }}">全部题目</a>
           </div>
         </li>
         {% if folder_tree %}
@@ -173,31 +176,46 @@
     {# 文件夹右键菜单（默认隐藏，由脚本定位显示）。每一项都只是去点那一行上
        对应的按钮，逻辑不重复一遍，见本模板底部的绑定。 #}
     <ul class="folder-ctx" id="folder-ctx" hidden>
-      <li data-act="new-question">📄 新增题目</li>
-      <li data-act="new-folder">📁 新建子文件夹</li>
+      <li data-act="new-question">新增题目</li>
+      <li data-act="new-folder">新建子文件夹</li>
       <li data-act="rename">✎ 重命名</li>
       <li data-act="move">⇄ 移动到…</li>
-      <li data-act="delete" class="ctx-danger">🗑 删除文件夹</li>
+      <li data-act="delete" class="ctx-danger">删除文件夹</li>
     </ul>
   </aside>
 
+  <div class="split-resizer question-sidebar-resizer" role="separator" tabindex="0"
+       aria-label="调整题集栏宽度" aria-orientation="vertical"
+       title="拖动调整宽度，双击恢复"
+       data-split-resizer data-split-owner="#question-layout" data-split-panel="#question-sidebar"
+       data-split-property="--question-sidebar-width" data-split-side="left"
+       data-split-min="170" data-split-max="420" data-split-main-min="380"
+       data-split-key="question-sidebar"></div>
+
   <!-- 主区：题目列表 -->
   <section class="content">
-    <form method="get" action="{{ url_for('index') }}" class="search-bar">
+    <form method="get" action="{{ url_for('index') }}" class="search-bar" id="search-form">
+      {% for name, value in search_scope_fields %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {% endfor %}
       <input type="text" name="q" value="{{ search or '' }}" class="input"
-             placeholder="搜索题干 / 标签 / 题源…">
+             placeholder="搜索，或输入 tag: / content: / source: …">
       <button type="submit" class="btn">搜索</button>
-      {% if search %}<a href="{{ url_for('index') }}" class="btn btn-ghost">清除</a>{% endif %}
+      {% if search %}<a href="{{ search_clear_url }}" class="btn btn-ghost" id="search-clear">清除</a>{% endif %}
     </form>
-    {% if search %}
-      <p class="muted search-hint">搜索「{{ search }}」，命中 {{ question_total }} 题</p>
-    {% endif %}
+    <div id="search-feedback">
+      {% if search_error %}
+        <p class="muted search-hint search-error">搜索条件有误：{{ search_error }}</p>
+      {% elif search %}
+        <p class="muted search-hint">在当前题目范围内搜索「{{ search }}」，命中 {{ question_total }} 题</p>
+      {% endif %}
+    </div>
     {# 文件夹局部切换依赖这个稳定挂载点；父文件夹现直接汇总后代原卷与题目。 #}
     <div id="collection-overview-host" data-overview="0"></div>
     <div id="papers-host">{% if active_collection %}{% include "_papers_pane.html" %}{% endif %}</div>
     <!-- 常驻工具栏：只留高频、始终有用的控件；批量操作移到底部浮动条 -->
     <div class="toolbar" id="q-toolbar">
-      <span>共 <b id="q-count">{{ question_total }}</b> 题，已勾选 <b id="sel-count">{{ selected_count }}</b> 题</span>
+      <span><b id="q-count">{{ question_total }}</b> 题 · 已选 <b id="sel-count">{{ selected_count }}</b></span>
       <label class="sort-label">排序
         <select id="sort-select">
           <option value="custom" {% if sort=='custom' %}selected{% endif %}>自定义（拖拽）</option>
@@ -221,7 +239,7 @@
         <input type="hidden" name="all" value="{{ '1' if show_all else '' }}">
         <button type="submit" class="btn">全选</button>
       </form>
-      <button type="button" class="btn btn-primary" onclick="document.getElementById('export-panel').classList.toggle('hidden')">导出试卷 ▾</button>
+      <button type="button" class="btn btn-primary" onclick="document.getElementById('export-panel').classList.toggle('hidden')">导出</button>
     </div>
 
     <!-- 导出面板 -->
@@ -262,8 +280,6 @@
             {# 只填「每小题多少分」这一个数字：题数由实际选入的题目数决定，总分
                = 题数 × 每小题分，都由 exporter._std_section_desc 自动算。以前这里
                让用户填整句描述，题目一增删就得回来手改数字。#}
-            <p class="muted" style="margin:2px 0 0">每小题分值填数字即可，题数与总分按实际选入的题目自动计算，
-              生成「一、单选题：本题共 8 小题，每小题 5 分，共 40 分。…」。留空用默认（单选 5 / 多选 6 / {{ '填空题'|qtype_label }} 5）。</p>
             <label>单选题每小题分 <input class="input" name="points_single" inputmode="numeric" style="width:80px" placeholder="5"></label>
             <label>多选题每小题分 <input class="input" name="points_multi" inputmode="numeric" style="width:80px" placeholder="6"></label>
             <label>{{ '填空题'|qtype_label }}每小题分 <input class="input" name="points_blank" inputmode="numeric" style="width:80px" placeholder="5"></label>
@@ -272,20 +288,32 @@
         </details>
 
         <label>格式
-          <select name="fmt">
+          <select name="fmt" id="export-format">
             <option value="pdf">PDF</option>
+            <option value="docx">Word 文档（.docx，可继续编辑）</option>
             <option value="tex">LaTeX 源码（.tex）</option>
             <option value="zip">LaTeX 源码包（.tex + 图片，.zip）</option>
           </select>
-          <small class="export-runtime-hint">PDF 需要本机 XeLaTeX；没有时可导出源码包并上传 Overleaf。<a href="{{ url_for('about_page') }}">检查环境</a></small>
+          <small class="export-runtime-hint" id="word-export-hint" hidden>Word 保留可编辑内容并由 Word/WPS 自行重排；底色与现有 WIMath 标志仅用于 PDF/TeX。</small>
         </label>
-        <label>纸张底色
+        <label>PDF 处理方式
+          <select name="tex_backend" id="tex-backend">
+            <option value="local">本机 TeX</option>
+          </select>
+        </label>
+        <label>预览方式
+          <select name="preview_kind" id="preview-kind">
+            <option value="pdf">PDF 版式预览</option>
+            <option value="html">免费 HTML/KaTeX 近似预览</option>
+          </select>
+        </label>
+        <label id="paper-tone-field">纸张底色
           <select name="paper_tone">
             <option value="white">纯白</option>
             <option value="cream">米黄护眼</option>
           </select>
         </label>
-        <label><input type="checkbox" name="wimath_logo" value="1"> 添加 WIMath 标志</label>
+        <label id="wimath-logo-field"><input type="checkbox" name="wimath_logo" value="1"> 添加 WIMath 标志</label>
         <label>试卷标题 <input type="text" name="title" value="试卷" class="input"></label>
         <label>范围
           <select name="scope">
@@ -305,7 +333,6 @@
         <!-- 页眉页脚 DIY（所有模式共用；双栏模式中横跨整页，不被切成左右两份） -->
         <details class="hf-block">
           <summary>页眉 / 页脚设置（所有导出模式适用）</summary>
-          <p class="muted" style="margin:6px 0">双栏刷题同样生效：页眉横跨两栏，页脚横跨整页。支持占位符：{页码} {总页数} {标题}</p>
           <div class="hf-grid">
             <span class="hf-tag">页眉</span>
             <input class="input" name="header_left"   placeholder="左">
@@ -323,7 +350,7 @@
 
         <!-- 讲义模式专属：知识要点 -->
         <div id="keypoints-field" class="keypoints-field hidden">
-          <label style="display:block">知识要点（放 PDF 首页，支持 $公式$；留空则不生成此区）</label>
+          <label style="display:block">知识要点</label>
           <textarea name="keypoints" rows="4" class="input"
                     placeholder="本讲重点：&#10;1. ...&#10;2. ..."></textarea>
         </div>
@@ -360,7 +387,6 @@
         <div class="empty-state">
           <div class="empty-state-mark" aria-hidden="true">QF</div>
           <h2>从一个题集开始</h2>
-          <p>从左侧选择一个题集，或浏览整库中的全部题目。</p>
           <div class="empty-state-actions">
             <a class="btn btn-primary" href="{{ url_for('index', all=1) }}">浏览全部题目</a>
             <a class="btn" href="{{ url_for('import_md') }}">导入试卷</a>
@@ -370,7 +396,6 @@
         <div class="empty-state">
           <div class="empty-state-mark" aria-hidden="true">＋</div>
           <h2>这里还没有题目</h2>
-          <p>手动新增一道题，或导入一整份试卷。</p>
           <div class="empty-state-actions">
             <button type="button" class="btn btn-primary" data-open-new-question>新增题目</button>
             <a class="btn" href="{{ url_for('import_md') }}">批量导入</a>
@@ -379,20 +404,28 @@
       {% endif %}
     {% endfor %}
     </div>
-    <div id="question-scroll-sentinel" class="question-scroll-sentinel"
+    <div id="question-scroll-sentinel" class="question-scroll-sentinel" role="status" aria-live="polite"
          {% if not question_page_token %}hidden{% endif %}>
       <span class="question-scroll-spinner" aria-hidden="true"></span>
       <span class="question-scroll-text">已加载 {{ questions|length }} / {{ question_total }}，继续下滑自动加载</span>
+      <button type="button" class="btn btn-sm question-scroll-retry" id="question-scroll-retry" hidden>
+        {{ icon('refresh-cw') }}<span>重新加载</span>
+      </button>
     </div>
-    {% if question_card_sort=='custom' and questions %}
-      <p class="muted hint">💡 拖动左侧 ⠿ 手柄可调整题目顺序，松手自动保存。当前顺序即导出顺序。</p>
-    {% endif %}
   </section>
 
   <button type="button" class="new-question-fab" id="new-question-fab"
           data-open-new-question
           title="在“{{ active_collection_name or '题库根目录' }}”末尾添加题目"
           aria-label="在当前文件夹末尾添加题目">＋</button>
+
+<div class="split-resizer question-bulk-resizer" role="separator" tabindex="0"
+     aria-label="调整已选题目栏宽度" aria-orientation="vertical"
+     title="拖动调整宽度，双击恢复"
+     data-split-resizer data-split-owner="#question-layout" data-split-panel="#bulkbar"
+     data-split-property="--question-bulk-width" data-split-side="right"
+     data-split-min="180" data-split-max="360" data-split-main-min="380"
+     data-split-key="question-bulk"></div>
 
 <!-- 已选题目操作栏：桌面端位于题目列表右侧，窄屏回落到页面内。
      必须留在 .layout 里面——它是网格的第三列，挪到外面就变回浮动条了。 -->
@@ -625,15 +658,18 @@ document.addEventListener('click', event => {
 // 迟到响应，避免把上一个年份的题卡追加进新试卷。
 const questionScrollSentinel = document.getElementById('question-scroll-sentinel');
 const questionScrollText = questionScrollSentinel?.querySelector('.question-scroll-text');
+const questionScrollRetry = document.getElementById('question-scroll-retry');
 let questionPageLoading = false;
 let questionPageGeneration = 0;
 let questionPositionRestoreGeneration = 0;
 let questionPositionRestoreState = null;
 
-function setQuestionScrollState(message, done = false) {
+function setQuestionScrollState(message, done = false, retry = false) {
   if (!questionScrollSentinel) return;
-  if (questionScrollText && message) questionScrollText.textContent = message;
+  if (questionScrollText) questionScrollText.textContent = message || '';
   questionScrollSentinel.hidden = done;
+  if (questionScrollRetry) questionScrollRetry.hidden = !retry;
+  questionScrollSentinel.classList.toggle('error', retry);
   questionScrollSentinel.classList.toggle('loading', questionPageLoading);
 }
 
@@ -648,6 +684,7 @@ async function loadNextQuestionPage() {
   }
   const generation = questionPageGeneration;
   questionPageLoading = true;
+  if (questionScrollRetry) questionScrollRetry.disabled = true;
   setQuestionScrollState(`正在加载 ${offset + 1}—${Math.min(total, offset + 30)} / ${total}…`);
   try {
     const response = await fetch('/questions/page?token=' + encodeURIComponent(token)
@@ -673,13 +710,13 @@ async function loadNextQuestionPage() {
       !!data.done);
   } catch (error) {
     if (generation === questionPageGeneration) {
-      setQuestionScrollState(`加载失败：${error.message}（点击重试）`);
-      questionScrollSentinel?.classList.add('error');
+      setQuestionScrollState(`加载失败：${error.message}`, false, true);
     }
   } finally {
     if (generation === questionPageGeneration) {
       questionPageLoading = false;
       questionScrollSentinel?.classList.remove('loading');
+      if (questionScrollRetry) questionScrollRetry.disabled = false;
     }
   }
 }
@@ -704,7 +741,18 @@ function resetQuestionInfiniteScroll() {
   if (token && loaded < total) questionPageObserver?.observe(questionScrollSentinel);
 }
 questionScrollSentinel?.addEventListener('click', () => {
+  if (questionScrollRetry && !questionScrollRetry.hidden) return;
   if (!questionPageLoading) void loadNextQuestionPage();
+});
+questionScrollRetry?.addEventListener('click', async event => {
+  event.stopPropagation();
+  if (questionPageLoading) return;
+  questionPageLoading = true;
+  questionScrollRetry.disabled = true;
+  setQuestionScrollState('正在重新加载题目…');
+  // 当前地址已经包含文件夹、搜索和筛选条件；复用片段加载可建立新快照，
+  // 又不会销毁桌面外壳或跳到整页顶部。
+  await loadFolderFragment(location.href, false);
 });
 
 // 刷新位置按“当前第一张可见题卡”保存，而不是只记 scrollY。全库与父目录首屏
@@ -1200,6 +1248,25 @@ if (modeSel) {
   syncModeUI();  // 初始化
 }
 
+// Word 以可编辑语义为目标；底色打印行为和现有 PDF 标志资源在 Office 中不稳定。
+// 禁用控件可避免把 PDF 专属参数静默传给后端，切回其他格式时原选择仍保留。
+const exportFormatSel = document.getElementById('export-format');
+const paperToneField = document.getElementById('paper-tone-field');
+const wimathLogoField = document.getElementById('wimath-logo-field');
+const wordExportHint = document.getElementById('word-export-hint');
+function syncExportFormatUI() {
+  const isWord = exportFormatSel && exportFormatSel.value === 'docx';
+  [paperToneField, wimathLogoField].forEach(field => {
+    if (!field) return;
+    field.querySelectorAll('input, select').forEach(control => { control.disabled = isWord; });
+  });
+  if (wordExportHint) wordExportHint.hidden = !isWord;
+}
+if (exportFormatSel) {
+  exportFormatSel.addEventListener('change', syncExportFormatUI);
+  syncExportFormatUI();
+}
+
 // —— 真实 PDF 预览 / 导出 ——
 // 两者都是「POST 拿一个取件地址，再由地址去取文件」，不再直接收文件流。原因是本页
 // 会被 Obsidian 插件嵌在 iframe 里（Electron 渲染进程），那里有两件事不成立：
@@ -1236,10 +1303,11 @@ if (previewBtn) {
   previewBtn.addEventListener('click', async () => {
     const form = document.getElementById('export-form');
     const fd = new FormData(form);
-    // 预览固定出 PDF：表单里的「格式」下拉是给导出用的，选了 tex/zip 时
-    // 也要能预览版式，所以这里覆盖掉它，而不是把 tex 源码塞进 iframe。
+    // 预览固定不受导出格式下拉影响；HTML 近似预览不启动 TeX。
     fd.set('fmt', 'pdf');
-    previewInfo.textContent = '正在生成 PDF…';
+    const previewKind = document.getElementById('preview-kind')?.value || 'pdf';
+    fd.set('preview_kind', previewKind);
+    previewInfo.textContent = previewKind === 'html' ? '正在生成 HTML/KaTeX 预览…' : '正在生成 PDF…';
     overlay.classList.remove('hidden');
     frame.src = 'about:blank';
     try {
@@ -1249,7 +1317,7 @@ if (previewBtn) {
         previewOpen.href = data.url;
         previewOpen.style.display = 'inline-block';
       }
-      previewInfo.textContent = '所见即所得（与导出一致）';
+      previewInfo.textContent = previewKind === 'html' ? 'HTML/KaTeX 近似预览（不等同 PDF 分页）' : '所见即所得（与导出一致）';
     } catch (e) {
       previewInfo.textContent = '';
       alert('预览失败：' + e.message);
@@ -1301,10 +1369,16 @@ function syncHiddenFormContext(formId, doc) {
   const current = document.getElementById(formId);
   const incoming = doc.getElementById(formId);
   if (!current || !incoming) return;
+  current.querySelectorAll('input[type="hidden"][name]').forEach(node => node.remove());
   incoming.querySelectorAll('input[type="hidden"][name]').forEach(source => {
-    const target = current.elements.namedItem(source.name);
-    if (target && 'value' in target) target.value = source.value;
+    current.appendChild(source.cloneNode(true));
   });
+}
+
+function syncContextLink(linkId, doc) {
+  const current = document.getElementById(linkId);
+  const incoming = doc.getElementById(linkId);
+  if (current && incoming) current.href = incoming.href;
 }
 
 // 点题集只替换题卡与原卷面板，保留文件夹展开状态和页面滚动位置。响应仍是完整
@@ -1360,6 +1434,15 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
     // 题卡换成了新文件夹后，所有按“当前范围”工作的表单也必须同步。此前漏了
     // 这一项，页面显示 A 文件夹、全选表单却仍提交初始根页的空 collection。
     syncHiddenFormContext('select-all-form', doc);
+    syncHiddenFormContext('search-form', doc);
+    syncHiddenFormContext('filter-form', doc);
+    syncContextLink('search-clear', doc);
+    syncContextLink('filter-reset', doc);
+    const searchFeedback = document.getElementById('search-feedback');
+    const incomingSearchFeedback = doc.getElementById('search-feedback');
+    if (searchFeedback && incomingSearchFeedback) {
+      searchFeedback.innerHTML = incomingSearchFeedback.innerHTML;
+    }
     if (refreshTree) {
       replaceFolderTreeFromDocument(doc);
     } else {
@@ -1573,7 +1656,11 @@ function renderLazyFolder(node) {
   icon.textContent = '▰';
   const link = document.createElement('a');
   link.className = 'folder-link'; link.dataset.ajax = '1';
-  link.href = '/?collection=' + encodeURIComponent(node.id);
+  const linkUrl = new URL(location.href);
+  linkUrl.searchParams.set('collection', node.id);
+  linkUrl.searchParams.delete('all');
+  linkUrl.searchParams.delete('recursive');
+  link.href = linkUrl;
   link.title = node.name; link.textContent = node.name;
   const actions = document.createElement('span');
   actions.className = 'folder-actions';

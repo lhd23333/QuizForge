@@ -1,6 +1,7 @@
-# 第三方组件说明（0.17.0-beta）
+# QuizForge 第三方组件声明
 
-本文件记录本次桌面内测包新增分发的第三方可执行组件，不替代正式商业发行前的完整依赖审计。
+QuizForge 自身按 `GPL-3.0-or-later` 发布，完整条款见仓库根目录及安装目录
+`licenses/LICENSE`。本文件记录随软件分发的主要第三方组件及相应许可证。
 
 ## Pandoc 3.9.0.2
 
@@ -11,7 +12,7 @@
 - 完整许可证与上游版权说明位于 `runtime/pandoc/licenses/`。
 - 对应版本源码包随软件放在 `runtime/pandoc/source/pandoc-3.9.0.2.tar.gz`，用户可以复制、研究和重新构建 Pandoc。
 
-Pandoc 与 QuizForge 均不对 Pandoc 提供任何额外担保。QuizForge 的专有许可不得限制用户依据 GPL 对 Pandoc 本身享有的权利。
+Pandoc 与 QuizForge 均不对 Pandoc 提供任何额外担保。Pandoc 继续适用其自身许可证，作为独立程序与 QuizForge 一同分发。
 
 ## pypdf 6.10.0
 

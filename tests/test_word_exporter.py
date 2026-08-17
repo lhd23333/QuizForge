@@ -1,13 +1,17 @@
 """题库首页 Word 语义导出的回归测试。"""
 
+import base64
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 import config
 import word_exporter
+import word_ooxml
 
 
 def sample_questions() -> list[dict]:
@@ -72,6 +76,8 @@ class WordPlanTests(unittest.TestCase):
         self.assertIn("单选题", plan.markdown)
         self.assertIn("答案与解析", plan.markdown)
         self.assertEqual(plan.markdown.count("QF-Q-1"), 2)
+        self.assertNotIn('1. [QF-Q-1]{custom-style="QuizForgeMarker"} :::',
+                         plan.markdown)
 
     def test_practice_uses_native_two_column_section(self):
         plan = word_exporter.build_word_plan(
@@ -88,6 +94,18 @@ class WordPlanTests(unittest.TestCase):
 
         self.assertEqual(plan.sections[-1].orientation, "slides")
         self.assertEqual(plan.markdown.count("QF_PAGE_BREAK"), 1)
+
+    def test_handout_fullpage_question_keeps_manual_page_break_intent(self):
+        plan = word_exporter.build_word_plan(
+            sample_questions(),
+            title="讲义",
+            mode="handout",
+            fullpage_ids=["solve-1"],
+        )
+
+        second_question = plan.markdown.index("QF-Q-2")
+        self.assertNotEqual(
+            plan.markdown.rfind("QF_PAGE_BREAK", 0, second_question), -1)
 
     def test_invalid_mode_is_rejected(self):
         with self.assertRaisesRegex(word_exporter.ExportError, "不支持"):
@@ -230,6 +248,69 @@ class WordPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(word_exporter.ExportError, "WIMath"):
             word_exporter.export(
                 sample_questions(), fmt="docx", wimath_logo=True)
+
+
+class WordPandocIntegrationTests(unittest.TestCase):
+    def test_real_docx_roundtrip_keeps_text_math_tables_and_images(self):
+        if not word_exporter.pandoc_available():
+            self.skipTest("本机未安装 Pandoc")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "output"
+            assets = root / "assets"
+            assets.mkdir()
+            (assets / "diagram.png").write_bytes(base64.b64decode(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+                "AAAADUlEQVR42mNk+M/wHwAF/gL+Xf0YAAAAAElFTkSuQmCC"
+            ))
+            questions = sample_questions()
+            questions[0]["body"] = (
+                "二次函数满足 $x^2=1$。\n\n"
+                "<table><tr><td>名称</td><td>值</td></tr>"
+                "<tr><td>根</td><td>$1$</td></tr></table>\n\n"
+                "![[diagram.png]]"
+            )
+            questions[0]["img_layouts"] = [
+                {"i": 0, "w": 35, "align": "center"},
+            ]
+
+            with (mock.patch.object(config, "OUTPUT_DIR", output),
+                  mock.patch.object(config, "ASSETS_DIR", assets)):
+                result = word_exporter.export(
+                    questions,
+                    title="真实 Word 回归",
+                    fmt="docx",
+                    mode="exam_std",
+                    solution_mode="separate",
+                    header_footer={
+                        "header_left": "{标题}",
+                        "footer_center": "第 {页码} / {总页数} 页",
+                    },
+                    std_opts={"subject": "数学", "info_bar": True},
+                )
+
+            word_ooxml.validate_docx(result)
+            with zipfile.ZipFile(result) as archive:
+                document_xml = archive.read("word/document.xml").decode("utf-8")
+                media = [name for name in archive.namelist()
+                         if name.startswith("word/media/")]
+            self.assertIn("oMath", document_xml)
+            self.assertIn("<w:tbl", document_xml)
+            self.assertIn("drawing", document_xml)
+            self.assertTrue(media)
+            self.assertNotIn("custom-style", document_xml)
+
+            readback = subprocess.run(
+                [config.PANDOC, str(result), "-t", "markdown"],
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            ).stdout
+            self.assertIn("二次函数", readback)
+            self.assertIn("答案与解析", readback)
+            self.assertIn("x", readback)
 
 
 if __name__ == "__main__":

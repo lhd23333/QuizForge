@@ -1,7 +1,9 @@
 param(
     [ValidateSet("auto", "pyinstaller", "nuitka")]
     [string]$Engine = "auto",
-    [string]$OutputDir = "build\desktop"
+    [string]$OutputDir = "build\desktop",
+    [string]$Version = "1.0.0",
+    [string]$FileVersion = "1.0.0.0"
 )
 
 # Keep this PowerShell 5.1 script ASCII-only. Windows PowerShell reads a UTF-8
@@ -11,6 +13,9 @@ $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path -LiteralPath $python)) {
     throw "Project virtual environment not found: $python"
+}
+if ($FileVersion -notmatch '^\d+\.\d+\.\d+\.\d+$') {
+    throw "FileVersion must contain four numeric components"
 }
 
 $icon = Join-Path $projectRoot "assets\quizforge.ico"
@@ -54,8 +59,8 @@ try {
             "--assume-yes-for-downloads",
             "--windows-console-mode=disable",
             "--windows-icon-from-ico=$icon",
-            "--file-version=0.17.0.0",
-            "--product-version=0.17.0.0",
+            "--file-version=$FileVersion",
+            "--product-version=$FileVersion",
             "--enable-plugin=tk-inter",
             "--include-package=src",
             "--include-package=webview",
@@ -64,8 +69,8 @@ try {
             "--include-data-dir=$projectRoot\prompts=prompts",
             "--include-data-dir=$projectRoot\vendor\project_alpha\templates=vendor/project_alpha/templates",
             "--include-data-files=$projectRoot\exam_template.tex=exam_template.tex",
-            "--include-data-files=$projectRoot\assets\license_public_key.pem=assets/license_public_key.pem",
             "--include-data-files=$projectRoot\assets\wimath-logo-latex-black.pdf=assets/wimath-logo-latex-black.pdf",
+            "--include-data-files=$projectRoot\assets\word-reference.docx=assets/word-reference.docx",
             "--output-dir=$resolvedOutput",
             "--output-filename=QuizForge.exe",
             "--product-name=QuizForge",
@@ -81,6 +86,25 @@ try {
     } else {
         $work = Join-Path $projectRoot "build\pyinstaller-work"
         $spec = Join-Path $projectRoot "build\pyinstaller-spec"
+        $versionResource = Join-Path $projectRoot "build\pyinstaller-version-generated.txt"
+        $tuple = [string]::Join(", ", $FileVersion.Split("."))
+        $resourceText = @"
+VSVersionInfo(
+  ffi=FixedFileInfo(filevers=($tuple), prodvers=($tuple), mask=0x3f, flags=0x0,
+    OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)),
+  kids=[StringFileInfo([StringTable('080404B0', [
+    StringStruct('CompanyName', 'QuizForge'),
+    StringStruct('FileDescription', 'QuizForge local question bank and exam builder'),
+    StringStruct('FileVersion', '$FileVersion'),
+    StringStruct('InternalName', 'QuizForge'),
+    StringStruct('LegalCopyright', 'Copyright (C) 2026 QuizForge'),
+    StringStruct('OriginalFilename', 'QuizForge.exe'),
+    StringStruct('ProductName', 'QuizForge'),
+    StringStruct('ProductVersion', '$Version')
+  ])]), VarFileInfo([VarStruct('Translation', [2052, 1200])])]
+)
+"@
+        Set-Content -LiteralPath $versionResource -Value $resourceText -Encoding ASCII
         $args = @(
             "-m", "PyInstaller",
             "--noconfirm",
@@ -89,7 +113,7 @@ try {
             "--windowed",
             "--name", "QuizForge",
             "--icon", $icon,
-            "--version-file", (Join-Path $projectRoot "installer\pyinstaller-version.txt"),
+            "--version-file", $versionResource,
             "--paths", $alphaRoot,
             "--collect-submodules", "src",
             "--collect-all", "webview",
@@ -98,8 +122,8 @@ try {
             "--add-data", "$projectRoot\prompts;prompts",
             "--add-data", "$projectRoot\vendor\project_alpha\templates;vendor/project_alpha/templates",
             "--add-data", "$projectRoot\exam_template.tex;.",
-            "--add-data", "$projectRoot\assets\license_public_key.pem;assets",
             "--add-data", "$projectRoot\assets\wimath-logo-latex-black.pdf;assets",
+            "--add-data", "$projectRoot\assets\word-reference.docx;assets",
             "--distpath", $resolvedOutput,
             "--workpath", $work,
             "--specpath", $spec,

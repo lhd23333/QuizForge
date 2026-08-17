@@ -239,9 +239,11 @@ class Doc2XStoreTests(unittest.TestCase):
     def test_key_is_encrypted_and_can_be_cleared(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            store_path = root / "doc2x.json"
+            store_path = root / "doc2x_local.json"
+            legacy_path = root / "doc2x.json"
             key_path = root / ".enc_key"
-            with patch.object(doc2x_store.config, "DOC2X_KEY_PATH", store_path), \
+            with patch.object(doc2x_store.config, "DOC2X_LOCAL_KEY_PATH", store_path), \
+                    patch.object(doc2x_store.config, "DOC2X_KEY_PATH", legacy_path), \
                     patch.object(crypto_utils, "_KEY_PATH", key_path):
                 self.assertTrue(doc2x_store.set_key("sk-test-secret"))
                 self.assertTrue(doc2x_store.has_key())
@@ -250,24 +252,30 @@ class Doc2XStoreTests(unittest.TestCase):
                 doc2x_store.clear_key()
                 self.assertFalse(doc2x_store.has_key())
 
-    def test_legacy_key_and_new_keys_share_multi_key_store(self):
+    def test_legacy_file_and_new_keys_share_multi_key_pool(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            store_path = root / "doc2x.json"
+            store_path = root / "doc2x_local.json"
+            legacy_path = root / "doc2x.json"
             key_path = root / ".enc_key"
-            with patch.object(doc2x_store.config, "DOC2X_KEY_PATH", store_path), \
+            with patch.object(doc2x_store.config, "DOC2X_LOCAL_KEY_PATH", store_path), \
+                    patch.object(doc2x_store.config, "DOC2X_KEY_PATH", legacy_path), \
                     patch.object(crypto_utils, "_KEY_PATH", key_path):
-                doc2x_store.set_key("sk-legacy")
+                legacy_path.write_text(json.dumps({"keys": [{
+                    "id": "legacy-1", "label": "升级前", "added": "",
+                    "key_enc": crypto_utils.encrypt_token("sk-legacy"),
+                }]}), encoding="utf-8")
                 self.assertEqual(["sk-legacy"], doc2x_store.resolve_all())
-                self.assertEqual("legacy", doc2x_store.list_keys()[0]["id"])
+                self.assertTrue(doc2x_store.list_keys()[0]["legacy"])
 
                 self.assertTrue(doc2x_store.add_key("sk-second", "备用号"))
-                self.assertEqual(["sk-legacy", "sk-second"],
+                self.assertEqual(["sk-second", "sk-legacy"],
                                  doc2x_store.resolve_all())
                 keys = doc2x_store.list_keys()
-                self.assertEqual(["", "备用号"], [item["label"] for item in keys])
+                self.assertEqual(["备用号", "升级前"], [item["label"] for item in keys])
                 self.assertTrue(doc2x_store.remove_key(keys[0]["id"]))
-                self.assertEqual(["sk-second"], doc2x_store.resolve_all())
+                self.assertEqual(["sk-legacy"], doc2x_store.resolve_all())
+                self.assertFalse(doc2x_store.remove_key(keys[1]["id"]))
                 self.assertNotIn("sk-second", store_path.read_text("utf-8"))
 
 
@@ -473,14 +481,11 @@ class ConverterAdapterTests(unittest.TestCase):
     def test_doc2x_path_does_not_require_mineru_token(self):
         seen = {}
 
-        class FakeClient:
-            def __init__(self, key):
-                seen["key"] = key
-
-            def parse_pdf(self, path, *, extract_dir):
-                Path(extract_dir).mkdir(parents=True, exist_ok=True)
-                return doc2x_client.Doc2XResult(
-                    "1. 第一题。\n\n2. 第二题。", "paper.md", "uid", "v3-2026", (90,))
+        def fake_parse(_client, path, *, extract_dir):
+            seen["provider"] = "doc2x"
+            Path(extract_dir).mkdir(parents=True, exist_ok=True)
+            return doc2x_client.Doc2XResult(
+                "1. 第一题。\n\n2. 第二题。", "paper.md", "uid", "v3-2026", (90,))
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -491,11 +496,11 @@ class ConverterAdapterTests(unittest.TestCase):
             with patch.object(converter, "_RAW_MD_ROOT", root / "raw"), \
                     patch.object(converter, "_load_config_for_user",
                                  return_value=cfg) as load_cfg, \
-                    patch.object(doc2x_client, "Doc2XClient", FakeClient):
+                  patch.object(doc2x_client.Doc2XClient, "parse_pdf", fake_parse):
                 pending = converter.convert_file_to_blocks(
                     pdf, ocr_backend=converter.OCR_DOC2X,
                     doc2x_api_key="doc2x-secret")
-            self.assertEqual("doc2x-secret", seen["key"])
+            self.assertEqual("doc2x", seen["provider"])
             self.assertEqual(2, len(pending["blocks"]))
             self.assertEqual("doc2x", pending["ocr_backend"])
             self.assertFalse(load_cfg.call_args.kwargs["require_mineru"])
@@ -505,18 +510,15 @@ class ConverterAdapterTests(unittest.TestCase):
         converter._clean_mineru_text(
             "1. 含�乱码", Path("乱码卷.pdf"), note_sink=notes.append)
 
-        class FakeClient:
-            def __init__(self, _key):
-                pass
-
-            def parse_pdf(self, _path, *, extract_dir):
-                Path(extract_dir).mkdir(parents=True, exist_ok=True)
-                return doc2x_client.Doc2XResult(
-                    "1. 第一题。", "paper.md", "uid", "v3-2026", (79,))
+        def fake_parse(_client, _path, *, extract_dir):
+            Path(extract_dir).mkdir(parents=True, exist_ok=True)
+            return doc2x_client.Doc2XResult(
+                "1. 第一题。", "paper.md", "uid", "v3-2026", (79,))
 
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(doc2x_client, "Doc2XClient", FakeClient):
+                patch.object(doc2x_client.Doc2XClient, "parse_pdf", fake_parse):
             root = Path(tmp)
+            (root / "paper.pdf").write_bytes(b"%PDF-1.4")
             converter._parse_with_ocr_backend(
                 root / "paper.pdf", root / "out", SimpleNamespace(),
                 ocr_backend=converter.OCR_DOC2X, doc2x_api_key="secret",
@@ -724,25 +726,34 @@ class ConverterAdapterTests(unittest.TestCase):
 
 
 class AppRouteTests(unittest.TestCase):
-    def test_settings_adds_and_removes_individual_doc2x_keys(self):
+    def test_settings_route_keeps_legacy_doc2x_and_lists_both_pools(self):
         import app as quiz_app
 
-        with patch.object(quiz_app.doc2x_store, "add_key", return_value=True) as add, \
-                patch.object(quiz_app.doc2x_store, "remove_key",
-                             return_value=True) as remove:
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(quiz_app.config, "DOC2X_KEY_PATH",
+                             Path(tmp) / "doc2x.json"), \
+                patch.object(quiz_app.config, "DOC2X_LOCAL_KEY_PATH",
+                             Path(tmp) / "doc2x_local.json"), \
+                patch.object(quiz_app.crypto_utils, "_KEY_PATH",
+                             Path(tmp) / ".enc_key"):
+            legacy = quiz_app.config.DOC2X_KEY_PATH
+            legacy.write_text(json.dumps({"keys": [{
+                "id": "legacy-1", "label": "升级前", "added": "",
+                "key_enc": crypto_utils.encrypt_token("sk-legacy"),
+            }]}), encoding="utf-8")
             client = quiz_app.app.test_client()
             response = client.post(
                 "/settings/doc2x",
-                data={"doc2x_key": "sk-secret", "doc2x_label": "备用号"},
+                data={"doc2x_key": "sk-secret", "doc2x_label": "legacy-label"},
                 headers={"X-CSRF-Token": quiz_app._WRITE_TOKEN})
             self.assertEqual(302, response.status_code)
-            add.assert_called_once_with("sk-secret", "备用号")
-
-            response = client.post(
-                "/settings/doc2x/delete", data={"key_id": "key-1"},
-                headers={"X-CSRF-Token": quiz_app._WRITE_TOKEN})
-            self.assertEqual(302, response.status_code)
-            remove.assert_called_once_with("key-1")
+            self.assertTrue(legacy.is_file())
+            self.assertNotIn("sk-legacy", legacy.read_text(encoding="utf-8"))
+            self.assertEqual(["legacy-label", "升级前"],
+                             [item["label"] for item in
+                              quiz_app.doc2x_store.list_keys()])
+            self.assertEqual({"sk-secret", "sk-legacy"},
+                             set(quiz_app.doc2x_store.resolve_all()))
 
     def test_batch_rejects_multiple_non_image_files_without_silent_drop(self):
         import app as quiz_app

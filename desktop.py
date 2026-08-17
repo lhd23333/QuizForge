@@ -752,6 +752,22 @@ class DesktopApi:
         self.restart_requested = False
         self.restart_bank_dir: Path | None = None
         self.restart_subject: str | None = None
+        self._update_lock = threading.RLock()
+        self._update_dir = self.app_data_dir / "updates"
+        previous_update = {}
+        try:
+            import update_client
+
+            previous_update = update_client.previous_update_status(self._update_dir)
+        except (ImportError, OSError):
+            pass
+        self._update_state: dict[str, object] = {
+            "status": "idle",
+            "message": "",
+            "downloaded": 0,
+            "total": 0,
+            "previous": previous_update,
+        }
 
     def runtime_info(self) -> dict:
         import desktop_product
@@ -810,6 +826,30 @@ class DesktopApi:
 
     def open_bank_folder(self) -> dict:
         return self._open_folder(self.bank_dir)
+
+    def open_local_file(self, raw_path: str) -> dict:
+        """用系统默认程序打开题库内文件；路径不允许越出当前题库。"""
+        value = str(raw_path or "").strip().replace("\\", "/")
+        relative = Path(value)
+        if (not value or relative.is_absolute() or relative.drive
+                or any(part in ("", ".", "..") for part in relative.parts)):
+            return {"ok": False, "error": "文件路径无效"}
+        root = self.bank_dir.resolve()
+        candidate = root.joinpath(*relative.parts)
+        try:
+            if (_is_link_or_junction(root) or
+                    any(_is_link_or_junction(root.joinpath(*relative.parts[:index]))
+                        for index in range(1, len(relative.parts) + 1))):
+                return {"ok": False, "error": "文件路径不能包含链接或联接点"}
+            target = candidate.resolve(strict=True)
+            if os.path.commonpath((str(root), str(target))) != str(root):
+                return {"ok": False, "error": "文件路径超出题库目录"}
+            if not target.is_file():
+                return {"ok": False, "error": "文件不存在"}
+            os.startfile(str(target))
+        except (AttributeError, OSError, ValueError) as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True}
 
     def open_log_folder(self) -> dict:
         return self._open_folder(self.app_data_dir / "logs")
@@ -1195,6 +1235,75 @@ class DesktopApi:
         threading.Timer(0.2, self._window.destroy).start()
         return {"ok": True}
 
+    def update_status(self) -> dict:
+        """返回一键更新进度；只含版本、字节数与状态文本。"""
+        with self._update_lock:
+            return {"ok": True, "update": dict(self._update_state)}
+
+    def _set_update_state(self, **values) -> None:
+        with self._update_lock:
+            self._update_state.update(values)
+
+    def _run_update(self) -> None:
+        import desktop_product
+        import service_ports
+        import update_client
+
+        try:
+            self._set_update_state(
+                status="checking", message="正在重新检查更新",
+                downloaded=0, total=0, error="",
+            )
+            entry = Path(sys.argv[0]).resolve()
+            if not getattr(sys, "frozen", False) or entry.suffix.lower() != ".exe":
+                raise update_client.UpdateCheckError("一键覆盖仅在正式安装版中可用")
+
+            def progress(downloaded: int, total: int) -> None:
+                self._set_update_state(
+                    status="downloading", message="正在下载安装包",
+                    downloaded=downloaded, total=total,
+                )
+
+            prepared = update_client.prepare_update(
+                desktop_product.PRODUCT_VERSION,
+                service_ports.load().update_manifest_url,
+                self._update_dir,
+                progress=progress,
+            )
+            self._set_update_state(
+                status="verified", message="安装包已验证，正在退出并覆盖安装",
+                version=prepared["latest_version"],
+            )
+            update_client.launch_installer(
+                Path(str(prepared["installer_path"])), entry.parent, entry,
+                self._update_dir, parent_pid=os.getpid(),
+            )
+            self._set_update_state(status="exiting", message="即将关闭并完成更新")
+            if self._window is None:
+                raise update_client.UpdateCheckError("桌面窗口尚未就绪")
+            threading.Timer(0.5, self._window.destroy).start()
+        except (update_client.UpdateCheckError, OSError, ValueError) as exc:
+            logging.getLogger(__name__).exception("一键更新失败")
+            self._set_update_state(status="failed", message=str(exc), error=str(exc))
+
+    def start_update(self) -> dict:
+        """启动一次受签名保护的更新；重复点击不会并发下载。"""
+        with self._update_lock:
+            if self._update_state.get("status") in {
+                "checking", "downloading", "verified", "exiting",
+            }:
+                return {"ok": False, "error": "更新已在进行中",
+                        "update": dict(self._update_state)}
+            self._update_state = {
+                "status": "queued", "message": "正在准备更新",
+                "downloaded": 0, "total": 0,
+                "previous": self._update_state.get("previous", {}),
+            }
+        threading.Thread(
+            target=self._run_update, name="quizforge-update", daemon=True
+        ).start()
+        return self.update_status()
+
 
 def _restart_command() -> list[str]:
     entry = Path(sys.argv[0]).resolve()
@@ -1274,7 +1383,8 @@ def main() -> int:
     os.environ["QUIZFORGE_BANK_STATE_DIR"] = str(bank_state_dir)
     os.environ["QUIZFORGE_SUBJECT"] = subject
     os.environ["QUIZFORGE_DESKTOP"] = "1"
-    os.environ["QUIZFORGE_LICENSE_ENFORCED"] = "1"
+    # 软件版默认免费本地运行。仅当用户在启动前显式设置旧兼容变量时，
+    # 才启用历史离线授权门控，避免升级时误把账号系统重新带回正常链路。
     _configure_logging(app_data_dir)
 
     import webview

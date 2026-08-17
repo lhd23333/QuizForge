@@ -1,8 +1,8 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "0.17.0-beta"
+  #define MyAppVersion "1.0.0"
 #endif
 #ifndef MyFileVersion
-  #define MyFileVersion "0.17.0.0"
+  #define MyFileVersion "1.0.0.0"
 #endif
 #ifndef MySourceDir
   #define MySourceDir "..\build\desktop\QuizForge"
@@ -29,7 +29,7 @@ OutputDir={#MyOutputDir}
 OutputBaseFilename=QuizForge-{#MyAppVersion}-Setup
 SetupIconFile=..\assets\quizforge.ico
 UninstallDisplayIcon={app}\QuizForge.exe
-LicenseFile=preview-license.txt
+LicenseFile=..\LICENSE
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -46,8 +46,8 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 
 [Files]
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "preview-license.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
-Source: "THIRD_PARTY_NOTICES-preview.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}\licenses"; Flags: ignoreversion
+Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\QuizForge"; Filename: "{app}\QuizForge.exe"; WorkingDir: "{app}"

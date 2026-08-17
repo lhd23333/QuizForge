@@ -35,6 +35,25 @@ def _file_fingerprint(raw_path) -> dict:
         return {"path": str(path), "missing": True}
 
 
+def _question_image_fingerprints(*texts: str) -> list[dict]:
+    """把题卡引用图片纳入 SVG 缓存键，图片替换后必须重新编译。"""
+    result = []
+    for text in texts:
+        for match in exporter._QIMG_EXPORT_RE.finditer(str(text or "")):
+            reference = match.group(1).strip()
+            resolved_name = reference
+            if reference.lower().endswith(".svg"):
+                resolved_name = str(
+                    Path(reference.replace("\\", "/")).with_suffix(".pdf"))
+            source = exporter._resolve_image_source(resolved_name)
+            result.append({
+                "reference": reference,
+                "resolved": (_file_fingerprint(source) if source is not None
+                             else {"missing": True}),
+            })
+    return result
+
+
 def _stage_wimath_logo(meta: dict, stem: str, work_dir: Path) -> str | None:
     """按需把品牌标志放进本次独占导出目录，TeX/ZIP 因而使用同一相对路径。"""
     return exporter._stage_wimath_logo(
@@ -236,9 +255,50 @@ def build_markdown(metadata: dict, body: str, *, stem: str = "handout",
     return document.rstrip() + "\n", warnings
 
 
+def build_portable_markdown(metadata: dict, body: str) -> tuple[str, list[str]]:
+    """生成不含 QuizForge 内部标记和 TeX 版式命令的可阅读 Markdown。
+
+    `.md` 是给用户继续编辑的内容出口，不是 Pandoc 的中间文件：题号、正文与解析
+    保留，内部 block id、frontmatter、samepage、分栏和清页命令全部不暴露。图片引用
+    保持原有 Obsidian `![[...]]` 形式，便于在同一题库或 Obsidian 中继续使用。
+    """
+    meta = handouts.normalize_metadata(metadata or {})
+    blocks, warnings = handouts.parse_content(body, meta.get("question_blocks"))
+    title = str(meta.get("title") or "讲义").replace("\n", " ").strip() or "讲义"
+    rendered = [f"# {title}"]
+    appendix: list[tuple[str, str]] = []
+    position = 0
+    for block in blocks:
+        if block["kind"] == "markdown":
+            text = str(block.get("text") or "").replace(
+                handouts.PAGE_BREAK_MARKER, "\n\n---\n\n")
+            if text.strip():
+                rendered.append(text.strip())
+            continue
+        position += 1
+        label = _label(block, position)
+        question = str(block.get("body") or "").strip()
+        item = f"**{label}**"
+        if question:
+            item += "\n\n" + question
+        mode = _solution_mode(block, meta)
+        solution = exporter._strip_solution_leading_label(
+            str(block.get("solution") or "")).strip()
+        if mode == "inline" and solution:
+            item += "\n\n**解析**\n\n" + solution
+        elif mode == "appendix" and solution:
+            appendix.append((label, solution))
+        rendered.append(item)
+    if appendix:
+        rendered.append("## 参考解析")
+        for label, solution in appendix:
+            rendered.append(f"**{label}**\n\n{solution}")
+    return "\n\n".join(part.strip() for part in rendered if part.strip()) + "\n", warnings
+
+
 def export(metadata: dict, body: str, fmt: str = "pdf") -> Path:
     """导出讲义当前内存草稿；无需先覆盖磁盘文件。"""
-    if fmt not in {"pdf", "tex", "zip"}:
+    if fmt not in {"pdf", "tex", "zip", "md"}:
         raise exporter.ExportError("不支持的讲义导出格式")
     meta = handouts.normalize_metadata(metadata or {})
     with exporter._EXPORT_SLOTS:
@@ -250,6 +310,12 @@ def export(metadata: dict, body: str, fmt: str = "pdf") -> Path:
         md_path = work_dir / f"{stem}.md"
         tex_path = work_dir / f"{stem}.tex"
         pdf_path = work_dir / f"{stem}.pdf"
+
+        if fmt == "md":
+            markdown, _warnings = build_portable_markdown(
+                meta, filestore.normalize_newlines(body))
+            md_path.write_text(markdown, encoding="utf-8", newline="\n")
+            return md_path
 
         markdown, _warnings = build_markdown(
             meta, filestore.normalize_newlines(body), stem=stem, work_dir=work_dir)
@@ -325,6 +391,7 @@ def render_question(metadata: dict, question: dict, position: int) -> Path:
         "question": question,
         "body": body,
         "solution": solution,
+        "images": _question_image_fingerprints(body, solution),
     }
     digest = hashlib.sha256(json.dumps(
         payload, ensure_ascii=False, sort_keys=True, default=str,

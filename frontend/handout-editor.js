@@ -30,6 +30,7 @@ const elements = {
   wimathLogo: document.getElementById('handout-wimath-logo'),
   saveState: document.getElementById('handout-save-state'),
   editor: document.getElementById('handout-editor'),
+  canvasScroll: document.getElementById('handout-canvas-scroll'),
   paper: document.getElementById('handout-paper'),
   pageGuides: document.getElementById('handout-page-guides'),
   raw: document.getElementById('handout-raw-fallback'),
@@ -68,6 +69,8 @@ const questionRenders = new Map();
 const renderRequests = new Map();
 let paginationFrame = 0;
 let paginationRunning = false;
+let paginationSuspended = false;
+let paginationPending = false;
 
 const paginationPluginKey = new PluginKey('handoutPagination');
 const HandoutPagination = Extension.create({
@@ -188,18 +191,32 @@ const HandoutQuestion = Node.create({
       handle.addEventListener('dragstart', event => {
         event.dataTransfer.effectAllowed = 'move';
         event.dataTransfer.setData('application/x-quizforge-handout-block', current.attrs.blockId);
+        dom.classList.add('is-dragging');
+        setReordering(true);
         // 后续移动由工作台统一处理；不再让 ProseMirror 同时复制一次节点。
         event.stopPropagation();
+      });
+      handle.addEventListener('dragend', () => {
+        dom.classList.remove('is-dragging');
+        setReordering(false);
       });
       const render = document.createElement('div');
       render.className = 'handout-question-render';
       dom.append(handle, render);
+      let lastRenderKey = '';
 
       const redraw = (label = dom.dataset.numberLabel || '') => {
         const compiled = questionRenders.get(current.attrs.blockId);
         dom.classList.toggle('is-pending', !current.attrs.confirmed);
         dom.classList.toggle('is-rendering', Boolean(current.attrs.confirmed && compiled?.status === 'loading'));
         dom.classList.toggle('is-render-error', Boolean(compiled?.status === 'error'));
+        const renderKey = JSON.stringify([
+          label, current.attrs.blockId, current.attrs.confirmed,
+          current.attrs.numberOverride, current.attrs.body,
+          compiled?.status || '', compiled?.url || '', compiled?.error || '',
+        ]);
+        if (renderKey === lastRenderKey) return;
+        lastRenderKey = renderKey;
         if (current.attrs.confirmed && compiled?.url) {
           if (render.firstElementChild?.dataset?.renderUrl !== compiled.url) {
             const image = document.createElement('img');
@@ -280,6 +297,10 @@ const HandoutPageBreak = Node.create({
 });
 
 function schedulePagination() {
+  if (paginationSuspended) {
+    paginationPending = true;
+    return;
+  }
   if (paginationRunning) return;
   if (paginationFrame) cancelAnimationFrame(paginationFrame);
   paginationFrame = requestAnimationFrame(() => {
@@ -304,6 +325,10 @@ function renderPageGuides(layout) {
 }
 
 function paginateEditor() {
+  if (paginationSuspended) {
+    paginationPending = true;
+    return;
+  }
   if (state.rawMode || elements.editor.hidden || paginationRunning) return;
   const root = elements.editor.querySelector('.handout-prosemirror');
   if (!root) return;
@@ -328,6 +353,10 @@ function paginateEditor() {
 
   requestAnimationFrame(() => {
     try {
+      if (paginationSuspended) {
+        paginationPending = true;
+        return;
+      }
       if (editor.state.doc !== measuredDoc) {
         requestAnimationFrame(schedulePagination);
         return;
@@ -372,6 +401,33 @@ function paginateEditor() {
       paginationRunning = false;
     }
   });
+}
+
+function setReordering(active) {
+  paginationSuspended = Boolean(active);
+  elements.canvasScroll?.classList.toggle('is-reordering', paginationSuspended);
+  if (!paginationSuspended && paginationPending) {
+    paginationPending = false;
+    schedulePagination();
+  }
+}
+
+function preserveCanvasViewport(callback) {
+  const viewport = elements.canvasScroll;
+  if (!viewport) return callback();
+  const top = viewport.scrollTop;
+  const left = viewport.scrollLeft;
+  const result = callback();
+  const restore = () => {
+    viewport.scrollTop = top;
+    viewport.scrollLeft = left;
+  };
+  queueMicrotask(restore);
+  requestAnimationFrame(() => {
+    restore();
+    requestAnimationFrame(restore);
+  });
+  return result;
 }
 
 function editMath(kind, node, pos) {
@@ -734,15 +790,32 @@ async function loadSelectedQuestions() {
       card.className = 'handout-source-question';
       card.draggable = true;
       card.dataset.qid = question.id;
-      card.innerHTML = `<div><span>${escapeText(question.type)}</span><small>${escapeText(question.source)}</small></div><p>${escapeText(question.excerpt)}</p><button type="button">插入到光标</button>`;
+      const meta = document.createElement('div');
+      meta.className = 'handout-source-meta';
+      const type = document.createElement('span');
+      type.textContent = question.type;
+      const source = document.createElement('small');
+      source.textContent = question.source;
+      meta.append(type, source);
+      const body = document.createElement('div');
+      body.className = 'handout-source-body body-structured';
+      // body_html 只来自服务端 qrender：原始题目先被转义，再生成受控结构标签。
+      // 保留 excerpt 回退，兼容更新过程中仍驻留的旧后端响应。
+      body.innerHTML = question.body_html || escapeText(question.excerpt);
+      const insert = document.createElement('button');
+      insert.type = 'button';
+      insert.textContent = '插入到光标';
+      card.append(meta, body, insert);
       card.addEventListener('dragstart', event => {
         event.dataTransfer.effectAllowed = 'copy';
         event.dataTransfer.setData('application/x-quizforge-question', question.id);
         event.dataTransfer.setData('text/plain', question.id);
       });
-      card.querySelector('button').addEventListener('click', () => insertQuestion(question.id));
+      insert.addEventListener('click', () => insertQuestion(question.id));
       elements.questionList.append(card);
     });
+    if (window.QMath?.typeset) window.QMath.typeset(elements.questionList);
+    else renderMath(elements.questionList);
   } catch (error) {
     elements.questionList.textContent = `读取失败：${error.message}`;
   }
@@ -759,7 +832,7 @@ function insertQuestionNode(snapshot, position) {
     solutionPlacement: 'inherit',
     confirmed: false,
   }};
-  insertBlockAt(editor, position, content);
+  preserveCanvasViewport(() => insertBlockAt(editor, position, content));
   markDirty();
   queueMicrotask(() => {
     renumberQuestions();
@@ -792,8 +865,8 @@ function questionEntry(blockId) {
 function updateQuestionNode(blockId, attrs) {
   const entry = questionEntry(blockId);
   if (!entry) return false;
-  editor.view.dispatch(editor.state.tr.setNodeMarkup(
-    entry.pos, undefined, {...entry.node.attrs, ...attrs}));
+  preserveCanvasViewport(() => editor.view.dispatch(editor.state.tr.setNodeMarkup(
+    entry.pos, undefined, {...entry.node.attrs, ...attrs})));
   return true;
 }
 
@@ -828,7 +901,9 @@ async function ensureQuestionRendered(blockId, force = false) {
   }
   const requestId = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}_${Math.random()}`;
   renderRequests.set(blockId, requestId);
-  questionRenders.set(blockId, {status: 'loading', signature});
+  questionRenders.set(blockId, {
+    status: 'loading', signature, url: previous?.url || '',
+  });
   questionViews.get(blockId)?.redraw();
   try {
     const data = await fetchJson('/api/handouts/render-question', jsonOptions({
@@ -976,7 +1051,8 @@ function deleteInspectorQuestion() {
   const blockId = state.selectedBlockId;
   const entry = questionEntry(blockId);
   if (!entry || !window.confirm('确定从当前讲义删除这道题吗？原题和选题篮不会受影响。')) return;
-  editor.view.dispatch(editor.state.tr.delete(entry.pos, entry.pos + entry.node.nodeSize));
+  preserveCanvasViewport(() => editor.view.dispatch(
+    editor.state.tr.delete(entry.pos, entry.pos + entry.node.nodeSize)));
   if (state.metadata.question_blocks) delete state.metadata.question_blocks[blockId];
   questionRenders.delete(blockId);
   renderRequests.delete(blockId);
@@ -1157,7 +1233,7 @@ elements.editor.addEventListener('drop', event => {
     event.stopPropagation();
     const targetBlockId = event.target.closest('.handout-question-node')?.dataset.blockId;
     if (!targetBlockId || targetBlockId === movingBlockId) return;
-    moveQuestionBefore(editor, movingBlockId, targetBlockId);
+    preserveCanvasViewport(() => moveQuestionBefore(editor, movingBlockId, targetBlockId));
     queueMicrotask(renumberQuestions);
     return;
   }

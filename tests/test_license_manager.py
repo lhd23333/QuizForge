@@ -1,8 +1,7 @@
-"""离线许可证的签名、设备绑定、安装、页面导入与导出门控回归。"""
+"""历史离线许可证兼容逻辑与开源版隔离回归。"""
 
 from base64 import b64encode
 from datetime import date
-from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
@@ -14,7 +13,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import config
 import device_identity
-import exporter
 import license_manager
 import service_ports
 
@@ -138,63 +136,50 @@ class OfflineLicenseTests(unittest.TestCase):
             self.assertFalse(state.valid)
             self.assertEqual(fixture.license_path.read_bytes(), original)
 
-    def test_export_is_locked_only_when_desktop_enforcement_is_enabled(self):
+    def test_historical_license_environment_cannot_gate_export(self):
         with tempfile.TemporaryDirectory() as td:
-            fixture = LicenseFixture(Path(td))
             service_path = Path(td) / "missing-services.json"
-            with (fixture.patch_config(),
-                  mock.patch.object(config, "SERVICE_PORTS_PATH", service_path),
+            with (mock.patch.object(config, "SERVICE_PORTS_PATH", service_path),
                   mock.patch.dict("os.environ", {"QUIZFORGE_LICENSE_ENFORCED": "1"}),
-                  mock.patch.object(
-                      license_manager.device_identity, "get_or_create",
-                      return_value=fixture.identity(),
-                  ),
                   mock.patch.object(
                       service_ports.exporter, "export", return_value=Path("x.zip")
                   ) as call):
-                with self.assertRaisesRegex(exporter.ExportError, "导入有效"):
-                    service_ports.export_document([])
-                license_manager.install(fixture.raw())
                 result = service_ports.export_document([{"id": "q1"}], title="测试")
             self.assertEqual(result, Path("x.zip"))
             call.assert_called_once()
 
-    def test_settings_route_imports_device_bound_license(self):
+    def test_settings_has_no_legacy_license_write_route(self):
         from app import _WRITE_TOKEN, app
 
         with tempfile.TemporaryDirectory() as td:
             fixture = LicenseFixture(Path(td))
-            with (fixture.patch_config(),
-                  mock.patch.dict("os.environ", {"QUIZFORGE_LICENSE_ENFORCED": "1"}),
-                  mock.patch.object(
-                      license_manager.device_identity, "get_or_create",
-                      return_value=fixture.identity(),
-                  )):
+            fixture.license_path.write_bytes(b"legacy-license")
+            with fixture.patch_config():
                 response = app.test_client().post(
                     "/settings/license",
-                    data={"license_file": (BytesIO(fixture.raw()), "tester.qflicense")},
                     headers={"X-CSRF-Token": _WRITE_TOKEN},
-                    content_type="multipart/form-data",
                 )
-                state = license_manager.load()
-            self.assertEqual(response.status_code, 302)
-            self.assertTrue(state.valid)
+            self.assertEqual(response.status_code, 404)
+            self.assertEqual(fixture.license_path.read_bytes(), b"legacy-license")
 
-    def test_settings_page_shows_device_request_code_in_desktop_mode(self):
-        from app import app
+    def test_settings_page_does_not_expose_legacy_license_controls(self):
+        import app as quiz_app
 
-        with tempfile.TemporaryDirectory() as td:
-            fixture = LicenseFixture(Path(td))
-            with (fixture.patch_config(),
-                  mock.patch.dict("os.environ", {"QUIZFORGE_LICENSE_ENFORCED": "1"}),
-                  mock.patch.object(
-                      license_manager.device_identity, "get_or_create",
-                      return_value=fixture.identity(),
-                  )):
-                response = app.test_client().get("/settings")
-            self.assertEqual(response.status_code, 200)
-            self.assertIn(DEVICE_ID.encode("ascii"), response.data)
-            self.assertIn(b"settings-license.js", response.data)
+        response = quiz_app.app.test_client().get("/settings")
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b".qflicense", response.data)
+        self.assertNotIn(b"settings-license.js", response.data)
+        self.assertNotIn("邀请码".encode(), response.data)
+        self.assertNotIn(b"activation.js", response.data)
+        self.assertIn(b"GPL-3.0", response.data)
+
+    def test_legacy_activation_and_cloud_routes_are_removed(self):
+        import app as quiz_app
+
+        client = quiz_app.app.test_client()
+        headers = {"X-CSRF-Token": quiz_app._WRITE_TOKEN}
+        self.assertEqual(client.post("/settings/activation", headers=headers).status_code, 404)
+        self.assertEqual(client.post("/settings/cloud", headers=headers).status_code, 404)
 
 
 if __name__ == "__main__":

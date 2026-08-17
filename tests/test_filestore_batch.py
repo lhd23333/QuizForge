@@ -373,7 +373,7 @@ class FilestoreBatchCreateTests(unittest.TestCase):
         self.assertEqual(years["2025"]["children"], [])
         self.assertTrue(years["2025"]["has_children"])
 
-    def test_navigation_tree_starts_with_every_folder_collapsed(self):
+    def test_navigation_tree_preloads_one_visible_hierarchy_level(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(config, "BANK_DIR", Path(td)):
             (Path(td) / "高考卷" / "2026" / "全国卷").mkdir(parents=True)
@@ -383,9 +383,10 @@ class FilestoreBatchCreateTests(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in tree], ["练习册", "高考卷"])
         for row in tree:
-            self.assertFalse(row["children_loaded"])
-            self.assertEqual(row["children"], [])
+            self.assertTrue(row["children_loaded"])
+            self.assertEqual(len(row["children"]), 1)
             self.assertTrue(row["has_children"])
+            self.assertFalse(row["children"][0]["children_loaded"])
 
     def test_loaded_question_updates_without_global_rescan(self):
         """题卡已经出现在页面后，单题按钮只能重读该题文件。"""
@@ -487,6 +488,43 @@ class FilestoreBatchCreateTests(unittest.TestCase):
         self.assertEqual(directory_tree[0]["cnt"], 0)
         self.assertEqual(counted_tree[0]["cnt"], 1)
         self.assertEqual(counted_tree[0]["children"][0]["cnt"], 1)
+
+    def test_plain_search_includes_question_source(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            expected = filestore.create_question(
+                "普通题干", source="2026 北京期中考试", folder="甲卷")
+            filestore.create_question(
+                "另一题", source="上海月考", folder="甲卷")
+
+            rows = filestore.list_questions(search="北京期中")
+
+        self.assertEqual([row["id"] for row in rows], [expected])
+
+    def test_structured_search_intersects_existing_question_scope(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            expected = filestore.create_question(
+                "二次函数压轴题", solution="配方法", qtype="解答题",
+                source="北京期中", difficulty="3", tags=["函数"], folder="甲卷")
+            filestore.set_starred_many([expected], True)
+            filestore.create_question(
+                "二次函数基础题", solution="配方法", qtype="解答题",
+                source="北京期中", difficulty="2", tags=["函数"], folder="甲卷")
+            filestore.create_question(
+                "二次函数压轴题", solution="配方法", qtype="解答题",
+                source="北京期中", difficulty="3", tags=["函数"], folder="乙卷")
+
+            rows = filestore.list_questions(
+                tags=["函数"], qtype="解答题", difficulty="3", starred=True,
+                collection="甲卷",
+                search="content:压轴 source:北京 starred:true")
+
+        self.assertEqual([row["id"] for row in rows], [expected])
 
 
 if __name__ == "__main__":

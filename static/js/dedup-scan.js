@@ -5,6 +5,7 @@
   const form = document.getElementById('dedup-scan-form');
   const threshold = document.getElementById('dedup-threshold');
   const button = document.getElementById('dedup-scan-button');
+  const pauseButton = document.getElementById('dedup-pause-button');
   const progress = document.getElementById('dedup-progress');
   const title = document.getElementById('dedup-status-title');
   const detail = document.getElementById('dedup-status-detail');
@@ -14,6 +15,7 @@
   let timer = 0;
   let activeJob = '';
   let completedJob = '';
+  let paused = false;
 
   function setState(kind, heading, message) {
     progress.dataset.state = kind;
@@ -32,20 +34,28 @@
         completedJob = activeJob;
         activeJob = '';
         button.disabled = false;
+        button.textContent = '重新扫描';
+        pauseButton.hidden = true;
         results.innerHTML = data.html || '';
         setState('done', '扫描完成', `已扫描 ${data.total || 0} 道题，发现 ${data.groups || 0} 组疑似重复。`);
         window.QMath?.typeset(results);
         return;
       }
       if (data.status === 'error') throw new Error(data.error || '查重失败');
+      paused = data.status === 'paused';
+      pauseButton.hidden = false;
+      pauseButton.textContent = paused ? '继续' : '暂停';
       const compared = Number(data.compared || 0);
       const compareText = compared ? `已分析 ${compared}/${data.total} 道题…` : `已读取 ${data.total} 道题，正在建立候选索引…`;
       const totalText = data.total == null ? '正在读取题库文件…' : compareText;
-      setState('running', '正在扫描当前题库', totalText + ' 可以离开本页继续使用其他功能。');
+      setState(paused ? 'paused' : 'running', paused ? '扫描已暂停' : '正在扫描当前题库',
+        paused ? `${totalText} 点击“继续”恢复扫描。` : totalText + ' 可以离开本页继续使用其他功能。');
       timer = window.setTimeout(poll, 900);
     } catch (error) {
       activeJob = '';
       button.disabled = false;
+      button.textContent = '重新扫描';
+      pauseButton.hidden = true;
       setState('error', '扫描失败', error.message || '请稍后重试');
     }
   }
@@ -53,6 +63,8 @@
   async function start() {
     clearTimeout(timer);
     button.disabled = true;
+    button.textContent = '扫描中';
+    pauseButton.hidden = true;
     results.innerHTML = '';
     setState('running', '正在启动扫描…', '页面可以正常切换；扫描完成后结果会自动显示。');
     try {
@@ -63,14 +75,36 @@
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || '启动查重失败');
       activeJob = data.job_id;
+      paused = false;
       poll();
     } catch (error) {
       button.disabled = false;
+      button.textContent = '开始扫描';
       setState('error', '扫描启动失败', error.message || '请稍后重试');
     }
   }
 
   form.addEventListener('submit', event => { event.preventDefault(); start(); });
+  pauseButton.addEventListener('click', async () => {
+    if (!activeJob) return;
+    pauseButton.disabled = true;
+    try {
+      const response = await fetch('/api/dedup/' + encodeURIComponent(activeJob) + '/control', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: paused ? 'resume' : 'pause'}),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '控制查重任务失败');
+      paused = data.status === 'paused';
+      pauseButton.textContent = paused ? '继续' : '暂停';
+      if (paused) setState('paused', '扫描已暂停', '已完成的进度会保留，点击“继续”恢复扫描。');
+      else setState('running', '正在继续扫描', '正在从暂停位置继续。');
+    } catch (error) {
+      setState('error', '任务控制失败', error.message || '请稍后重试');
+    } finally {
+      pauseButton.disabled = false;
+    }
+  });
   results.addEventListener('click', event => {
     const control = event.target.closest('[data-dedup-select]');
     if (control) {
@@ -106,8 +140,6 @@
     if (!count) { alert('没有勾选要删除的题目'); return false; }
     return confirm('确定删除勾选的 ' + count + ' 道题？题目会进入回收站。');
   };
-
-  if (progress.dataset.autoStart === '1') start();
 })();
 
 // 共享图片库体检与题目相似度查重是两项独立任务：前者跨全部已登记题库并带永久

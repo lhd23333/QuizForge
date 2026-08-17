@@ -1,72 +1,59 @@
 {% extends "base.html" %}
 {% block title %}设置 · QuizForge{% endblock %}
 {% block content %}
-<section class="app-page settings-page">
+{% from "_icons.html" import icon %}
+<section class="app-page settings-page"
+         data-tex-state="{{ tex_install | tojson | forceescape }}"
+         data-tex-status-url="{{ url_for('settings_tex_status') }}"
+         data-tex-install-url="{{ url_for('settings_tex_install') }}">
 <header class="app-page-head">
-  <div>
-    <h1>设置</h1>
-    <p>管理 OCR、识别模型、软件授权与外观。密钥加密保存在本机，页面不回显。</p>
-  </div>
+  <h1>设置</h1>
 </header>
 
-<div class="panel-grid">
+<div class="settings-layout">
+  <nav class="settings-section-nav" aria-label="设置分类">
+    <button type="button" data-settings-tab="local">{{ icon('cpu') }}<span>本地</span></button>
+    <button type="button" data-settings-tab="ocr">{{ icon('scan') }}<span>OCR</span></button>
+    <button type="button" data-settings-tab="export">{{ icon('file-output') }}<span>导出</span></button>
+    <button type="button" data-settings-tab="models">{{ icon('bot') }}<span>模型</span></button>
+    <button type="button" data-settings-tab="appearance">{{ icon('palette') }}<span>外观</span></button>
+  </nav>
+  <div class="settings-panels">
 
-  <!-- 离线软件授权 -->
-  <div class="panel col-full" id="software-license">
+  <section class="settings-category" data-settings-panel="local">
+  <div class="settings-section">
     <div class="license-panel-head">
-      <div>
-        <h3>软件授权</h3>
-        <p class="muted">许可证在本机使用内置公钥验签并绑定设备，不连接授权服务器，也不上传硬件或题库信息。</p>
-      </div>
-      <span class="license-badge {{ 'is-valid' if license_state.valid else 'is-invalid' }}">
-        {{ license_state.summary }}
-      </span>
+      <h2>开源本地版</h2>
+      <span class="license-badge is-valid">GPL-3.0</span>
     </div>
-    {% if license_state.valid %}
-      <dl class="license-details">
-        <dt>授权给</dt><dd>{{ license_state.licensee }}</dd>
-        <dt>版本</dt><dd>{{ license_state.edition }}</dd>
-        <dt>许可证编号</dt><dd>{{ license_state.license_id }}</dd>
-        <dt>绑定设备</dt><dd><code>{{ license_state.device_id }}</code></dd>
-        <dt>有效期</dt><dd>{{ license_state.expires_at or '永久' }}</dd>
-        <dt>更新期</dt><dd>{{ license_state.updates_until or '未限制' }}</dd>
-      </dl>
-    {% else %}
-      <p class="license-message">{{ license_state.detail }}</p>
-    {% endif %}
-    {% if not license_enforced %}
-      <p class="muted">当前是源码或 Obsidian 托管模式，授权限制未强制；独立桌面内测包会在预览和导出时校验许可证。</p>
-    {% elif device_state and device_state.valid %}
-      <div class="device-request-box">
-        <label for="license-device-id">本机设备请求码</label>
-        <div class="device-request-row">
-          <input id="license-device-id" class="input" type="text"
-                 value="{{ device_state.device_id }}" readonly spellcheck="false">
-          <button type="button" class="btn" data-copy-license-device>复制</button>
-        </div>
-        <p class="muted">把请求码发给发布者即可签发许可证。它由本机随机身份摘要生成，不包含主板、硬盘或题库信息。</p>
-      </div>
-    {% elif device_state %}
-      <p class="license-message license-device-error">{{ device_state.summary }}：{{ device_state.detail }}</p>
-    {% endif %}
-    <form method="post" action="{{ url_for('settings_license') }}"
-          enctype="multipart/form-data" class="license-import-form">
-      <input type="file" name="license_file" class="input" accept=".qflicense" required>
-      <button type="submit" class="btn btn-primary">{{ '更换' if license_state.valid else '导入' }}许可证</button>
-    </form>
+    <p class="settings-note">核心功能全部免费开放，可直接使用。</p>
+    <div class="settings-action-row">
+      {% if sponsor_url %}<a class="btn btn-primary" href="{{ sponsor_url }}" target="_blank" rel="noopener">赞助</a>{% endif %}
+      <a class="btn" href="{{ url_for('about_page') }}">环境检查</a>
+      <a class="btn" href="{{ github_repository_url }}" target="_blank" rel="noopener">GitHub 仓库</a>
+    </div>
   </div>
 
+  <div class="settings-section" data-update-control>
+    <h2>软件更新</h2>
+    <div class="update-state" aria-live="polite">
+      <progress data-update-progress max="1" value="0" hidden></progress>
+      <span data-update-status>当前版本 {{ desktop_version }}</span>
+    </div>
+    <div class="settings-action-row">
+      <button type="button" class="btn btn-primary" data-update-action>检查更新</button>
+      <a class="btn" data-update-download target="_blank" rel="noopener" hidden>手动下载</a>
+      <a class="btn" href="{{ github_releases_url }}" target="_blank" rel="noopener">GitHub 手动下载</a>
+    </div>
+  </div>
+  </section>
+
+  <section class="settings-category" data-settings-panel="ocr" hidden>
+
   <!-- MinerU Token（OCR） -->
-  <div class="panel">
-    <h3>MinerU API Token</h3>
-    <p class="muted">用于 PDF/图片 OCR 识别，在 <a href="https://mineru.net" target="_blank"
-      rel="noopener">mineru.net</a> 的「API 管理」页创建（付费服务）。</p>
-    <p class="muted">这里填了就优先用这份；一份都没填则回落到
-      <code>vendor/project_alpha/.env</code> 里的 <code>MINERU_API_TOKEN</code>。
-      两处都没有时，AI 识别会报错，其余功能（手动导入、题库管理、组卷导出）不受影响。</p>
-    <p class="muted"><strong>可以添加多份</strong>：每次真实 OCR 请求会按当前忙闲挑
-      最空闲的一份；题干和解析也能分别取凭证。多 Token 主要用于独立账号负载、失效
-      切换和可用性，同一账号的 Token 通常共享官方频控与优先级额度。</p>
+  <div class="settings-section">
+    <h2>MinerU</h2>
+    <p class="settings-note">多份 Token 会按忙闲和轮转使用，均只在本机加密保存。</p>
 
     {% if mineru_tokens %}
       <ul class="token-list">
@@ -84,132 +71,108 @@
       </ul>
     {% endif %}
 
-    <form method="post" action="{{ url_for('settings_mineru') }}">
-      <div class="field">
-        <label>添加 MinerU Token</label>
+    <form method="post" action="{{ url_for('settings_mineru') }}" class="settings-form-grid settings-form-compact">
+      <div class="field grow">
+        <label>Token</label>
         <input type="password" name="mineru_token" class="input" autocomplete="new-password"
                placeholder="输入你的 MinerU API Token">
       </div>
       <div class="field">
-        <label>备注（可选，用于区分是哪个账号）</label>
+        <label>备注（可选）</label>
         <input type="text" name="mineru_label" class="input" maxlength="40"
                placeholder="如 主号 / 备用号">
       </div>
-      <button type="submit" class="btn btn-primary">添加</button>
+      <div class="field settings-form-actions"><button type="submit" class="btn btn-primary">添加</button></div>
     </form>
   </div>
 
-  <!-- Doc2X Key（第二条 OCR 链路） -->
-  <div class="panel">
-    <h3>Doc2X API Key</h3>
-    <p class="muted">用于高保真 PDF → Markdown 识别。转换页可在 MinerU 与
-      Doc2X 间逐批选择；当前接入 <code>v3-2026</code>，保留公式、图片、表格结构和
-      页级质量分。结果只在云端临时保留，QuizForge 会在任务内立即导出到本机。</p>
-    <p class="muted"><strong>可以添加多份</strong>，转换时与 MinerU 一样按当前忙闲
-      选择。多 Key 用于独立账号负载、失效切换和可用性；同一账号的 Key 通常共享
-      官方并发与额度，不能靠重复创建 Key 线性提速。</p>
+  <!-- 本地 Doc2X 多 Key -->
+  <div class="settings-section">
+    <h2>Doc2X</h2>
+    <p class="settings-note">多份 API Key 按空闲度和轮转执行并发请求。</p>
     {% if doc2x_keys %}
       <ul class="token-list">
         {% for key in doc2x_keys %}
           <li>
             <span class="token-label">{{ key['label'] or '未命名' }}</span>
             <span class="muted">（已设置{% if key['added'] %}，{{ key['added'][:10] }}{% endif %}）</span>
-            <form method="post" action="{{ url_for('settings_doc2x_delete') }}"
-                  style="display:inline" onsubmit="return confirm('删除这份 Doc2X API Key？')">
+            {% if key['legacy'] %}
+              <span class="muted">升级前配置</span>
+            {% else %}
+            <form method="post" action="{{ url_for('settings_doc2x_delete') }}" style="display:inline" onsubmit="return confirm('删除这份 Doc2X Key？')">
               <input type="hidden" name="key_id" value="{{ key['id'] }}">
               <button type="submit" class="btn btn-sm btn-danger-text">删除</button>
             </form>
+            {% endif %}
           </li>
         {% endfor %}
       </ul>
     {% endif %}
-    <form method="post" action="{{ url_for('settings_doc2x') }}">
-      <div class="field">
-        <label>添加 Doc2X API Key</label>
-        <input type="password" name="doc2x_key" class="input" autocomplete="new-password"
-               placeholder="输入 sk- 开头的 Doc2X API Key">
-      </div>
-      <div class="field">
-        <label>备注（可选，用于区分账号）</label>
-        <input type="text" name="doc2x_label" class="input" maxlength="40"
-               placeholder="如 主号 / 备用号">
-      </div>
-      <button type="submit" class="btn btn-primary">添加</button>
+    <form method="post" action="{{ url_for('settings_doc2x') }}" class="settings-form-grid settings-form-compact">
+      <div class="field grow"><label>API Key</label><input type="password" name="doc2x_key" class="input" autocomplete="new-password" placeholder="输入 Doc2X API Key"></div>
+      <div class="field"><label>备注（可选）</label><input type="text" name="doc2x_label" class="input" maxlength="40" placeholder="如 主号 / 备用号"></div>
+      <div class="field settings-form-actions"><button type="submit" class="btn btn-primary">添加</button></div>
     </form>
   </div>
+  </section>
 
-  <!-- 加密说明 -->
-  <div class="panel">
-    <h3>密钥存储</h3>
-    <p class="muted">MinerU、Doc2X 与 LLM 的 API Key 都用 Fernet 对称加密后存在
-      <code>data/</code> 下（<code>data/mineru.json</code> /
-      <code>data/doc2x.json</code> / <code>data/providers.json</code>），加密密钥是
-      <code>data/.enc_key</code>。</p>
-    <p class="muted"><strong>删掉或换掉 <code>data/.enc_key</code>，已存的所有密钥都会
-      永久解不开</strong>，只能回这一页重新填。这个文件已在 <code>.gitignore</code> 里，
-      不要提交到 git，也不要加进任何备份/同步工具。</p>
-    <p class="muted">本应用只监听 <code>127.0.0.1</code>、没有任何用户认证，
-      请勿改成对局域网或公网监听。</p>
+  <section class="settings-category" data-settings-panel="export" hidden>
+
+  <!-- 本机 TeX 安装 -->
+  <div class="settings-section" id="tex-environment">
+    <h2>本机 TeX</h2>
+    <div class="tex-install-state" aria-live="polite">
+      <progress id="tex-install-progress" max="{{ tex_install.total }}" value="{{ tex_install.downloaded }}" {% if tex_install.status not in ['downloading', 'verifying', 'installing'] %}hidden{% endif %}></progress>
+      <span id="tex-install-message">{{ tex_install.message or ('本机 TeX 已可用' if tex_install.installed else (tex_install.blocked_reason if not tex_install.available else '尚未安装')) }}</span>
+      <span id="tex-install-error" class="license-message" {% if not tex_install.error %}hidden{% endif %}>{{ tex_install.error }}</span>
+    </div>
+    <div class="settings-action-row">
+      <button type="button" class="btn btn-primary" id="tex-install-button"
+              {% if not tex_install.available or tex_install.installed or tex_install.status in ['queued', 'downloading', 'verifying', 'installing'] %}disabled{% endif %}>
+        {{ '已安装' if tex_install.installed else ('一键安装暂不可用' if not tex_install.available else '下载并安装 MiKTeX') }}
+      </button>
+      <a class="btn" href="{{ url_for('about_page') }}">环境检查</a>
+    </div>
   </div>
 
+  <div class="settings-section">
+    <h2>Overleaf</h2>
+    <p class="settings-note">导出 tex.zip 后上传到 Overleaf 编译。</p>
+  </div>
+  </section>
+
+  <section class="settings-category" data-settings-panel="models" hidden>
+
   <!-- 识别模型（LLM） -->
-  <div class="panel col-full">
-    <h3>识别模型（LLM）</h3>
-    <p class="muted">
-      OCR 识别出的内容可交给大模型整理成题目。不配这里也能用——会走
-      内置默认 DeepSeek（读 <code>vendor/project_alpha/.env</code>，老行为），但那条路的
-      max_tokens 写死 8192，换推理模型会因思维链占满预算而「返回空内容」。
-      支持任意 OpenAI 兼容接口（DeepSeek / 阿里云百炼 / 硅基流动 / 中转站 / 自建等）。
-      可以存多套，在列表里点「启用」随时切换。
-    </p>
-    <p class="muted">模型分两条路径用，各自独立启用：</p>
-    <ul class="muted" style="margin:4px 0 0 1.2em">
-      <li><strong>导入识别</strong>：把 OCR 结果整理成题目，要的是长上下文的
-        <strong>文本</strong>模型。</li>
-      <li><strong>配图重绘</strong>：把题目里的照片重画成矢量图（TikZ），
-        <strong>必须支持图片输入</strong>——纯文本模型（如 <code>deepseek-chat</code>、
-        <code>deepseek-v4-pro</code>）会直接报错。没单独配时会回落到「导入识别」那套，
-        方便先试一下。</li>
-    </ul>
-    <p class="muted">一套凭据可以同时服务两条路径（两个开关都点亮），也可以各配一套。</p>
-    <p class="muted">
-      <strong>Base URL</strong>：填 API 根地址即可，会自动补全 <code>/v1</code>，
-      也不用管 <code>/chat/completions</code> 后缀——中转站直接填域名（如
-      <code>https://yapi.click</code>）就行，和 CC Switch 里的写法一致。
-      也可以填本机推理服务的回环地址（如 <code>http://127.0.0.1:11434/v1</code>）。
-    </p>
-    <p class="muted">
-      <strong>max_tokens</strong>：推理模型（如 deepseek-v4-pro）的思维链和正文共用这份预算，
-      填小了会思维链占满、正文一个字都不吐，建议 32000 以上；非推理模型（如 deepseek-chat）8192 够用。
-    </p>
+  <div class="settings-section">
+    <h2>识别模型</h2>
 
     {% set act_md = providers | selectattr('active_md') | first %}
     {% set act_rd = providers | selectattr('active_redraw') | first %}
-    <p style="margin-top:12px">
-      当前<strong>导入识别</strong>用的是：
+    <div class="model-current-grid">
+      <div><span>导入识别</span>
       {% if act_md %}
-        <strong>{{ act_md['name'] }}</strong>（{{ act_md['model'] }} · max_tokens {{ act_md['max_tokens'] }}）
+        <strong>{{ act_md['name'] }}</strong><small>{{ act_md['model'] }}</small>
       {% else %}
         <strong>内置默认 DeepSeek</strong>
       {% endif %}
-      <br>
-      当前<strong>配图重绘</strong>用的是：
+      </div>
+      <div><span>配图重绘</span>
       {% if act_rd %}
-        <strong>{{ act_rd['name'] }}</strong>（{{ act_rd['model'] }} · max_tokens {{ act_rd['max_tokens'] }}）
+        <strong>{{ act_rd['name'] }}</strong><small>{{ act_rd['model'] }}</small>
       {% elif act_md %}
-        <strong>{{ act_md['name'] }}</strong>（{{ act_md['model'] }}）
-        <span class="cell-muted">— 没单独配，回落到「导入识别」那套；它不支持图片输入的话重绘会报错</span>
+        <strong>{{ act_md['name'] }}</strong><small>跟随导入识别</small>
       {% else %}
-        <span class="cell-muted">没有可用配置，重绘会直接报错（内置默认 DeepSeek 不支持图片输入）</span>
+        <strong>未配置</strong>
       {% endif %}
-    </p>
+      </div>
+    </div>
 
     {% set vision_providers = providers | selectattr('supports_vision') | list %}
     {% if vision_providers %}
     <div class="llm-quick-switch" aria-label="配图重绘模型快速切换">
       <div>
         <strong>配图重绘快速切换</strong>
-        <span class="muted">点击模型即刻生效，不影响导入识别模型。</span>
       </div>
       <div class="llm-quick-switch-buttons">
         {% for p in vision_providers %}
@@ -230,18 +193,15 @@
     {% endif %}
 
     {% if providers %}
-    <table class="data-table" style="margin-top:12px">
+    <div class="settings-table-scroll"><table class="data-table model-table">
       <thead>
-        <tr><th>名称</th><th>Base URL</th><th>模型</th><th>max_tokens</th>
-            <th>导入识别</th><th>配图重绘</th><th>操作</th></tr>
+        <tr><th>名称</th><th>模型</th><th>导入识别</th><th>配图重绘</th><th>操作</th></tr>
       </thead>
       <tbody>
         {% for p in providers %}
         <tr>
           <td>{{ p['name'] }}</td>
-          <td class="cell-muted">{{ p['base_url'] }}</td>
           <td class="cell-muted">{{ p['model'] }}</td>
-          <td class="cell-muted">{{ p['max_tokens'] }}</td>
           {# 两列开关同一套模板：生效中的那个按钮本身就是「取消」——文字里写明白，
              别让人以为只是个状态标签。 #}
           {% for purpose in ['md', 'redraw'] %}
@@ -252,7 +212,7 @@
               <input type="hidden" name="llm_purpose" value="{{ purpose }}">
               <input type="hidden" name="llm_action" value="{{ 'deactivate' if on else 'activate' }}">
               <button type="submit" class="btn btn-sm">
-                {{ '✅ 生效中（点此停用）' if on else '启用' }}
+                {{ '停用' if on else '启用' }}
               </button>
             </form>
           </td>
@@ -260,18 +220,18 @@
           <td>
             <details style="display:inline-block">
               <summary class="btn btn-sm" style="list-style:none">编辑</summary>
-              <form method="post" action="{{ url_for('settings_llm') }}" class="panel" style="margin-top:8px;min-width:280px">
+              <form method="post" action="{{ url_for('settings_llm') }}" class="model-edit-form">
                 <input type="hidden" name="llm_action" value="edit">
                 <input type="hidden" name="llm_id" value="{{ p['id'] }}">
                 <label>名称 <input class="input" name="llm_name" value="{{ p['name'] }}" required></label>
                 <label>Base URL <input class="input" name="llm_base_url" value="{{ p['base_url'] }}" required></label>
                 <label>API Key <input class="input" type="password" name="llm_api_key" placeholder="留空则保持原值" autocomplete="new-password"></label>
                 <label>模型名 <input class="input" name="llm_model" value="{{ p['model'] }}" required></label>
-                <label>max_tokens <input class="input" type="number" name="llm_max_tokens" min="256" max="200000" value="{{ p['max_tokens'] }}" required></label>
+                <label>最大输出 tokens <input class="input" type="number" name="llm_max_tokens" min="256" max="200000" value="{{ p['max_tokens'] }}" required></label>
                 <label class="conv-sol">
                   <input type="checkbox" name="llm_supports_vision" value="1"
                          {% if p['supports_vision'] %}checked{% endif %}>
-                  支持图片输入（显示在配图重绘快速切换区）
+                  支持图片输入
                 </label>
                 <button type="submit" class="btn btn-sm btn-primary" style="margin-top:6px">保存</button>
               </form>
@@ -286,17 +246,28 @@
         </tr>
         {% endfor %}
       </tbody>
-    </table>
+    </table></div>
     {% else %}
-      <p class="muted" style="margin-top:12px">还没配过模型，当前用内置默认 DeepSeek。</p>
+      <p class="settings-note">当前使用内置默认 DeepSeek</p>
     {% endif %}
 
-    <form method="post" action="{{ url_for('settings_llm') }}" style="margin-top:16px">
+    <form method="post" action="{{ url_for('settings_llm') }}" class="model-add-form">
       <input type="hidden" name="llm_action" value="add">
-      <div class="inline-form">
+      <h3>添加模型</h3>
+      <script type="application/json" data-llm-presets>{{ llm_presets | tojson }}</script>
+      <div class="settings-form-grid">
+        <div class="field">
+          <label>服务商预设</label>
+          <select class="input" data-llm-preset>
+            <option value="">自定义</option>
+            {% for preset in llm_presets %}
+            <option value="{{ preset['id'] }}">{{ preset['label'] }}</option>
+            {% endfor %}
+          </select>
+        </div>
         <div class="field">
           <label>名称</label>
-          <input type="text" name="llm_name" class="input" placeholder="比如 我的 DeepSeek" required>
+          <input type="text" name="llm_name" class="input" placeholder="比如 我的模型" required>
         </div>
         <div class="field grow">
           <label>Base URL</label>
@@ -310,46 +281,51 @@
         </div>
         <div class="field">
           <label>模型名</label>
-          <input type="text" name="llm_model" class="input" placeholder="deepseek-chat" required>
+          <input type="text" name="llm_model" class="input" list="llm-model-options"
+                 placeholder="选择或输入模型名" required>
+          <datalist id="llm-model-options"></datalist>
         </div>
         <div class="field">
-          <label>max_tokens</label>
+          <label>最大输出 tokens</label>
           <input type="number" name="llm_max_tokens" class="input" min="256" max="200000"
-                 value="{{ default_max_tokens }}" style="width:7em">
+                  value="{{ default_max_tokens }}">
         </div>
         <div class="field">
           <button type="submit" class="btn btn-primary">添加</button>
         </div>
       </div>
-      <div style="margin-top:8px">
-        <span class="muted">添加后用于：</span>
+      <p class="model-preset-hint" data-llm-preset-hint role="status">
+        选择预设可自动填写地址和推荐输出；上下文窗口由模型决定。
+      </p>
+      <div class="model-purpose-row">
         <label class="conv-sol">
           <input type="checkbox" name="llm_for_md" value="1" checked> 导入识别
         </label>
         <label class="conv-sol">
-          <input type="checkbox" name="llm_for_redraw" value="1"> 配图重绘（需支持图片输入）
+          <input type="checkbox" name="llm_for_redraw" value="1"> 配图重绘
         </label>
       </div>
       {% if providers %}
       <label class="conv-sol">
         <input type="checkbox" name="llm_activate_now" value="1" checked>
-        添加后立即在上面勾选的路径上启用（会顶掉那条路径原来生效的配置）
+        添加后启用
       </label>
       {% endif %}
     </form>
   </div>
+  </section>
+
+  <section class="settings-category" data-settings-panel="appearance" hidden>
 
   <!-- 外观主题 -->
-  <div class="panel col-full">
-    <h3>🎨 外观主题</h3>
-    <p class="muted">插件是把本页嵌在 Obsidian 的窗格里，iframe 里是独立文档、
-      <strong>不会跟着 Obsidian 自己的主题变</strong>，所以深浅色要在这里单独设。</p>
+  <div class="settings-section">
+    <h2>外观</h2>
     <form method="post" action="{{ url_for('settings_theme') }}" enctype="multipart/form-data" id="theme-form">
       <div class="field">
         <label>模式</label>
         <div class="theme-mode-pick">
-          <label><input type="radio" name="theme_mode" value="light" {% if theme_mode != 'dark' %}checked{% endif %}> ☀️ 浅色</label>
-          <label><input type="radio" name="theme_mode" value="dark" {% if theme_mode == 'dark' %}checked{% endif %}> 🌙 深色</label>
+          <label><input type="radio" name="theme_mode" value="light" {% if theme_mode != 'dark' %}checked{% endif %}> 浅色</label>
+          <label><input type="radio" name="theme_mode" value="dark" {% if theme_mode == 'dark' %}checked{% endif %}> 深色</label>
         </div>
       </div>
 
@@ -366,7 +342,7 @@
       </div>
 
       <div class="field">
-        <label>壁纸（铺满背景，卡片半透明毛玻璃）</label>
+        <label>壁纸</label>
         {% if wallpaper %}
         <div style="margin-bottom:8px">
           {% if wallpaper_is_video %}
@@ -382,18 +358,20 @@
         </div>
         {% endif %}
         <input type="file" name="wallpaper" accept="image/*,video/*" class="input">
-        <p class="muted" style="font-size:12px">支持 jpg/png/webp/gif 等图片和动图（≤25MB），以及 mp4/webm/mov 等视频（≤100MB）。</p>
       </div>
 
       <button type="submit" class="btn btn-primary">保存外观</button>
     </form>
   </div>
+  </section>
 
+  </div>
 </div>
 </section>
 {% endblock %}
 
 {% block scripts %}
 <script src="{{ static_v('js/settings-theme.js') }}" defer></script>
-<script src="{{ static_v('js/settings-license.js') }}" defer></script>
+<script src="{{ static_v('js/settings-page.js') }}" defer></script>
+<script src="{{ static_v('js/update-controls.js') }}" defer></script>
 {% endblock %}

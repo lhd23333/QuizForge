@@ -33,6 +33,69 @@ _lock = threading.Lock()
 #: 合法用途。表单传进来的 purpose 一律先过 `_active_key()` 校验，别直接当键用。
 PURPOSES = ("md", "redraw")
 
+# 预设只用于辅助填写新配置，不写入 providers.json，也不会修改已有配置。
+# context_label 是服务商公布的模型能力提示；实际请求只使用 max_tokens。
+LLM_PROVIDER_PRESETS = (
+    {
+        "id": "deepseek",
+        "label": "DeepSeek",
+        "name": "DeepSeek",
+        "base_url": "https://api.deepseek.com",
+        "models": (
+            {
+                "id": "deepseek-v4-flash",
+                "label": "DeepSeek V4 Flash",
+                "context_label": "1M",
+                "recommended_max_tokens": 32768,
+                "supports_vision": False,
+            },
+            {
+                "id": "deepseek-v4-pro",
+                "label": "DeepSeek V4 Pro",
+                "context_label": "1M",
+                "recommended_max_tokens": 65536,
+                "supports_vision": False,
+            },
+        ),
+    },
+    {
+        "id": "qwen",
+        "label": "阿里云百炼（Qwen）",
+        "name": "Qwen",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "models": (
+            {
+                "id": "qwen3.7-flash",
+                "label": "Qwen3.7 Flash",
+                "context_label": "以百炼控制台为准",
+                "recommended_max_tokens": 32768,
+                "supports_vision": False,
+            },
+            {
+                "id": "qwen3.7-plus",
+                "label": "Qwen3.7 Plus",
+                "context_label": "以百炼控制台为准",
+                "recommended_max_tokens": 32768,
+                "supports_vision": False,
+            },
+            {
+                "id": "qwen3.8-max",
+                "label": "Qwen3.8 Max",
+                "context_label": "以百炼控制台为准",
+                "recommended_max_tokens": 65536,
+                "supports_vision": False,
+            },
+            {
+                "id": "qwen3.5-omni-plus",
+                "label": "Qwen3.5 Omni Plus（支持图片）",
+                "context_label": "以百炼控制台为准",
+                "recommended_max_tokens": 16384,
+                "supports_vision": True,
+            },
+        ),
+    },
+)
+
 #: 用途 → JSON 里存 active id 的键名。`md` 沿用老键 `active`，这样**已有的
 #: data/providers.json 不需要迁移**，老配置读出来天然就是「导入识别」那一套。
 _ACTIVE_KEY = {"md": "active", "redraw": "active_redraw"}

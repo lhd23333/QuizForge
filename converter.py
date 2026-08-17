@@ -1668,10 +1668,11 @@ def _parse_with_ocr_backend(path: Path, extract_dir: Path, cfg, *,
             prefix=f".{final_dir.name}.doc2x-", dir=final_dir.parent))
         try:
             result = ocr_pool.run(
-                OCR_DOC2X,
-                lambda key: doc2x_client.Doc2XClient(key).parse_pdf(
+                "doc2x",
+                lambda api_key: doc2x_client.Doc2XClient(api_key).parse_pdf(
                     path, extract_dir=staging),
-                fallback=doc2x_api_key)
+                fallback=doc2x_api_key,
+            )
         except doc2x_client.Doc2XError as exc:
             raise ConvertError(str(exc)) from exc
         except Exception:
@@ -1916,6 +1917,117 @@ def _write_collection_cache(workspace: Path, markdown: str, ocr_meta) -> None:
     finally:
         markdown_tmp.unlink(missing_ok=True)
         meta_tmp.unlink(missing_ok=True)
+
+
+def collection_cache_snapshot(cache_dirs, *, has_solution: bool) -> dict:
+    """读取可人工修订的合集 OCR 原文，不向路由层暴露缓存路径。"""
+    workspaces = _collection_cache_workspaces(bool(has_solution), cache_dirs)
+    documents = []
+    digest = hashlib.sha256()
+    for index, workspace in enumerate(workspaces):
+        cached = _read_collection_cache(workspace)
+        if cached is None:
+            side = "解析" if index else "题干"
+            raise ConvertError(f"{side} OCR 原文缓存不存在或已损坏")
+        markdown, ocr_meta = cached
+        encoded = markdown.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        documents.append({
+            "side": "solution" if index else "exam",
+            "markdown": markdown,
+            "ocr_meta": ocr_meta,
+        })
+    return {
+        "exam_markdown": documents[0]["markdown"],
+        "solution_markdown": (
+            documents[1]["markdown"] if len(documents) > 1 else ""),
+        "ocr_meta": {
+            "exam": documents[0]["ocr_meta"],
+            "solution": (documents[1]["ocr_meta"]
+                         if len(documents) > 1 else None),
+        },
+        "revision": digest.hexdigest(),
+    }
+
+
+def collection_cache_is_editable(cache_dirs, *, has_solution: bool) -> bool:
+    """失败看板只在完整 OCR 原文仍可读取时展示人工调整入口。"""
+    try:
+        collection_cache_snapshot(cache_dirs, has_solution=has_solution)
+    except ConvertError:
+        return False
+    return True
+
+
+def update_collection_cache_markdown(cache_dirs, *, has_solution: bool,
+                                     exam_markdown: str,
+                                     solution_markdown: str = "",
+                                     expected_revision: str = "") -> dict:
+    """原子替换人工修改后的 OCR Markdown，并保留原始 OCR 元数据。"""
+    snapshot = collection_cache_snapshot(
+        cache_dirs, has_solution=has_solution)
+    if (expected_revision
+            and snapshot["revision"] != str(expected_revision).strip()):
+        raise ConvertError("识别原文已在其他窗口发生变化，请刷新后重新修改")
+
+    documents = [str(exam_markdown or "")]
+    if has_solution:
+        documents.append(str(solution_markdown or ""))
+    for index, markdown in enumerate(documents):
+        side = "解析" if index else "题干"
+        if not markdown.strip():
+            raise ConvertError(f"{side} Markdown 不能为空")
+        if len(markdown.encode("utf-8")) > config.MAX_MD_FILE_BYTES:
+            limit = config.MAX_MD_FILE_BYTES // (1024 * 1024)
+            raise ConvertError(f"{side} Markdown 超过 {limit}MB 上限")
+        if not _has_text_beyond_images(markdown):
+            raise ConvertError(f"{side} Markdown 没有可识别的文字")
+
+    workspaces = _collection_cache_workspaces(bool(has_solution), cache_dirs)
+    metadata = [snapshot["ocr_meta"]["exam"]]
+    if has_solution:
+        metadata.append(snapshot["ocr_meta"]["solution"])
+    for workspace, markdown, ocr_meta in zip(
+            workspaces, documents, metadata, strict=True):
+        _write_collection_cache(workspace, markdown, ocr_meta)
+    return collection_cache_snapshot(cache_dirs, has_solution=has_solution)
+
+
+def materialize_collection_cache_as_unit(cache_dirs, *, has_solution: bool,
+                                         title: str,
+                                         ocr_backend: str) -> dict:
+    """把人工确认的整本 OCR 原文作为单组落盘，后续只跑机械题号拆分。"""
+    workspaces = _collection_cache_workspaces(bool(has_solution), cache_dirs)
+    snapshot = collection_cache_snapshot(
+        cache_dirs, has_solution=has_solution)
+    combined = snapshot["exam_markdown"].rstrip()
+    if has_solution:
+        combined += ("\n\n# 参考答案与解析\n\n"
+                     + snapshot["solution_markdown"].lstrip())
+
+    scope = f"collection_unit_{uuid.uuid4().hex}"
+    unit_dir = _raw_md_dir(scope)
+    unit_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        # 双文件首次识别时已把解析图片按命名空间复制到题干缓存，因此这里
+        # 统一从首个缓存复制即可，且只复制人工 Markdown 仍然引用的图片。
+        _copy_collection_images(combined, workspaces[0], unit_dir)
+        raw_path = unit_dir / f"{scope}_raw.md"
+        raw_path.write_text(combined, encoding="utf-8")
+    except Exception:
+        _remove_ocr_workspace(unit_dir, unit_only=True)
+        raise
+    return {
+        "title": str(title or "人工调整结果"),
+        "raw_path": str(raw_path),
+        "workspace_dir": str(unit_dir),
+        "scope": scope,
+        "include_solution": bool(has_solution),
+        "ocr_backend": normalize_ocr_backend(ocr_backend),
+        "ocr_meta": snapshot["ocr_meta"],
+        "collection_cache_dirs": [str(path) for path in workspaces],
+    }
 
 
 _COLLECTION_RECOVERY_VERSION = 1
@@ -4448,10 +4560,10 @@ def _prep_for_ocr(path: Path, ocr_backend: str, *, force_image=False,
     image_input = force_image or is_image_file(path.name)
     if normalize_ocr_backend(ocr_backend) == OCR_DOC2X and image_input:
         if not is_image_file(path.name):
-            raise ConvertError("Doc2X 图片输入的文件扩展名不受支持")
+            raise ConvertError("平台 OCR 图片输入的文件扩展名不受支持")
         work_dir.mkdir(parents=True, exist_ok=True)
         return images_to_pdf(
-            [path], work_dir / f"{path.stem}_doc2x_input.pdf")
+            [path], work_dir / f"{path.stem}_cloud_input.pdf")
     return _prep_for_mineru(path, work_dir)
 
 
@@ -4464,13 +4576,16 @@ def _convert_image(file_path: Path, cfg, keep_images: bool = True,
     from src.mineru_client import MineruClient
     from src.normalizer import normalize
 
-    mineru = MineruClient(cfg.mineru_token, cfg.mineru_model_version)
     source_path = Path(source_path) if source_path is not None else file_path
     source_stem = source_path.stem
     extract_dir = (Path(extract_dir) if extract_dir is not None
                    else _raw_md_dir(source_stem))
-    raw_md, _ = _parse_mineru_with_ocr_retry(
-        mineru, file_path, extract_dir, note_sink=note_sink)
+    raw_md, _ = ocr_pool.run(
+        OCR_MINERU,
+        lambda token: _parse_mineru_with_ocr_retry(
+            MineruClient(token, cfg.mineru_model_version), file_path,
+            extract_dir, note_sink=note_sink),
+        fallback=cfg.mineru_token)
     raw_md = _clean_mineru_text(raw_md, source_path, note_sink=note_sink)
     raw_md = _repair_choice_images(raw_md, extract_dir, note_sink)
     _ensure_raw_text(raw_md, source_path)

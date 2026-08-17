@@ -1,6 +1,7 @@
-"""独立桌面产品壳与未来联网孔位的离线回归。"""
+"""独立桌面产品壳与更新服务边界的回归。"""
 
 import json
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -20,24 +21,32 @@ class ServicePortsTests(unittest.TestCase):
             path = Path(td) / "missing.json"
             with mock.patch.object(config, "SERVICE_PORTS_PATH", path):
                 ports = service_ports.load()
-                self.assertEqual(ports.license_mode, "offline_signed")
-                self.assertEqual(ports.update_mode, "disabled")
-                self.assertEqual(ports.export_mode, "local")
+                self.assertEqual(ports.update_mode, "remote")
 
     def test_invalid_mode_falls_back_to_offline(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "services.json"
-            path.write_text(json.dumps({"export_mode": "unknown"}), encoding="utf-8")
+            path.write_text(json.dumps({"update_mode": "unknown"}), encoding="utf-8")
             with mock.patch.object(config, "SERVICE_PORTS_PATH", path):
-                self.assertEqual(service_ports.load(), service_ports.ServicePorts())
+                ports = service_ports.load()
+                self.assertEqual(ports.update_mode, "remote")
+                self.assertEqual(ports.update_manifest_url, config.UPDATE_MANIFEST_URL)
 
-    def test_remote_hole_cannot_accidentally_make_network_request(self):
+    def test_legacy_service_fields_are_ignored(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "services.json"
-            path.write_text(json.dumps({"export_mode": "remote"}), encoding="utf-8")
-            with mock.patch.object(config, "SERVICE_PORTS_PATH", path):
-                with self.assertRaises(exporter.ExportError):
-                    service_ports.export_document([])
+            path.write_text(json.dumps({
+                "license_mode": "remote", "export_mode": "remote",
+                "update_mode": "disabled",
+            }), encoding="utf-8")
+            with (mock.patch.object(config, "SERVICE_PORTS_PATH", path),
+                  mock.patch.object(
+                      service_ports.exporter, "export", return_value=Path("x.pdf")
+                  )):
+                ports = service_ports.load()
+                result = service_ports.export_document([])
+            self.assertEqual(ports.update_mode, "disabled")
+            self.assertEqual(result, Path("x.pdf"))
 
     def test_local_gateway_delegates_to_existing_exporter(self):
         with tempfile.TemporaryDirectory() as td:
@@ -48,7 +57,7 @@ class ServicePortsTests(unittest.TestCase):
             self.assertEqual(result, Path("x.pdf"))
             call.assert_called_once_with([{"id": "q1"}], title="测试")
 
-    def test_local_gateway_dispatches_docx_after_license_gate(self):
+    def test_local_gateway_dispatches_docx_without_license_gate(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "missing.json"
             with (mock.patch.object(config, "SERVICE_PORTS_PATH", path),
@@ -96,6 +105,19 @@ class DesktopSettingsTests(unittest.TestCase):
         api = desktop.DesktopApi(Path("D:/bank"), Path("D:/data"), Path("D:/data/desktop.json"))
         self.assertFalse(hasattr(api, "window"))
         self.assertIsNone(api._window)
+
+    def test_open_local_file_only_opens_a_regular_file_inside_bank(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "bank"
+            root.mkdir()
+            target = root / "卷子.pdf"
+            target.write_bytes(b"pdf")
+            api = desktop.DesktopApi(root, Path(td) / "data", Path(td) / "desktop.json")
+            with mock.patch.object(desktop.os, "startfile", create=True) as startfile:
+                self.assertEqual({"ok": True}, api.open_local_file("卷子.pdf"))
+            startfile.assert_called_once_with(str(target.resolve()))
+            self.assertFalse(api.open_local_file("../outside.pdf")["ok"])
+            self.assertFalse(api.open_local_file(str(target))["ok"])
 
     def test_bank_directory_can_be_browsed_then_saved_and_verified(self):
         with tempfile.TemporaryDirectory() as td:
@@ -488,8 +510,10 @@ class DesktopFirstRunTests(unittest.TestCase):
         file_version = f"{numeric}.0"
         expected = {
             "build_desktop.ps1": (
-                f'--file-version={file_version}',
-                f'--product-version={file_version}',
+                f'[string]$Version = "{product_version}"',
+                f'[string]$FileVersion = "{file_version}"',
+                '--file-version=$FileVersion',
+                '--product-version=$FileVersion',
             ),
             "build_installer.ps1": (
                 f'[string]$Version = "{product_version}"',
@@ -505,13 +529,20 @@ class DesktopFirstRunTests(unittest.TestCase):
             ),
             "package.json": (f'"version": "{product_version}"',),
             "package-lock.json": (f'"version": "{product_version}"',),
-            "installer/THIRD_PARTY_NOTICES-preview.md": (product_version,),
+            "LICENSE": ("GNU GENERAL PUBLIC LICENSE",),
+            "installer/THIRD_PARTY_NOTICES.md": ("QuizForge 第三方组件声明",),
         }
         for relative, markers in expected.items():
             raw = (root / relative).read_text(encoding="utf-8")
             for marker in markers:
                 with self.subTest(file=relative, marker=marker):
                     self.assertIn(marker, raw)
+
+        installer = (root / "installer" / "QuizForge.iss").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("LicenseFile=..\\LICENSE", installer)
+        self.assertIn('Source: "..\\LICENSE"', installer)
 
     def test_empty_bank_gets_original_demo_only_once(self):
         with tempfile.TemporaryDirectory() as td:
@@ -563,9 +594,9 @@ class DesktopFirstRunTests(unittest.TestCase):
             "version": desktop_product.PRODUCT_VERSION, "desktop": True, "frozen": True,
             "bank_dir": "D:/bank", "data_dir": "D:/data", "log_dir": "D:/data/logs",
             "checks": [], "ready": True, "services": {},
-            "license": {
-                "valid": False, "summary": "尚未导入许可证",
-                "detail": "请导入许可证。", "licensee": "", "expires_at": "",
+            "account": {
+                "logged_in": False, "entitlement_valid": False,
+                "entitlement_error": "", "user": {},
             },
         }
         with mock.patch.object(desktop_product, "environment_report", return_value=fake_report):
@@ -573,7 +604,8 @@ class DesktopFirstRunTests(unittest.TestCase):
             self.assertIn("关于 QuizForge", client.get("/about").get_data(as_text=True))
             welcome = client.get("/welcome?demo=1").get_data(as_text=True)
             self.assertIn("欢迎使用 QuizForge", welcome)
-            self.assertIn("已加入 3 道原创示例题", welcome)
+            self.assertIn("已加入 3 道示例题", welcome)
+            self.assertNotIn("导入许可证", welcome)
             self.assertIn("desktop-titlebar", welcome)
             self.assertIn("data-window-action=\"close\"", welcome)
 
@@ -620,8 +652,14 @@ class DesktopFirstRunTests(unittest.TestCase):
         root = Path(__file__).resolve().parent.parent
         stylesheet = (root / "static" / "style.css").read_text(encoding="utf-8")
 
-        self.assertIn("body > header {", stylesheet)
-        self.assertIn("html.desktop-host body > header {", stylesheet)
+        sidebar = re.search(
+            r"(?ms)^\.app-sidebar \{(.*?)^\}", stylesheet
+        ).group(1)
+        page_header = re.search(
+            r"(?ms)^\.app-page-head \{(.*?)^\}", stylesheet
+        ).group(1)
+        self.assertIn("position: fixed", sidebar)
+        self.assertNotIn("position: sticky", page_header)
         self.assertNotRegex(stylesheet, r"(?m)^header \{")
         self.assertNotRegex(stylesheet, r"(?m)^html\.desktop-host header \{")
 

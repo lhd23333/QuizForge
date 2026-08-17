@@ -7,17 +7,14 @@
   <div class="product-hero">
     <div class="product-mark" aria-hidden="true">QF</div>
     <div>
-      <p class="product-eyebrow">QUIZFORGE {{ report.version }}</p>
-      <h1>{{ '欢迎使用 QuizForge' if welcome else '关于 QuizForge' }}</h1>
-      <p>本地 Markdown 题库、试卷识别、整理与组卷导出工具。</p>
+      <h1>QuizForge</h1>
+      <p class="product-eyebrow">版本 {{ report.version }}</p>
     </div>
   </div>
 
   {% if welcome %}
   <div class="product-callout">
-    <b>首次启动检查已完成。</b>
-    {% if demo_created %}当前题库原本为空，已加入 3 道原创示例题，方便立即体验筛选、编辑与导出。{% endif %}
-    题目保存在你选择的目录中，卸载软件不会删除题库。
+    <b>首次启动检查完成</b>{% if demo_created %} · 已加入 3 道示例题{% endif %}
   </div>
   {% endif %}
 
@@ -25,7 +22,7 @@
     <span class="diagnostic-dot"></span>
     <div>
       <b>{{ '本地核心环境可用' if report.ready else '有必需组件不可用' }}</b>
-      <p>{{ '可以开始整理题库和导出。' if report.ready else '请按下方红色项目处理后再导出。' }}</p>
+      {% if not report.ready %}<p>请先处理下方错误项目</p>{% endif %}
     </div>
   </div>
 
@@ -56,53 +53,33 @@
     </article>
 
     <article class="product-panel">
-      <h2>授权与联网</h2>
+      <h2>运行与联网</h2>
       <ul class="product-service-list">
-        <li>
-          <span>软件授权</span>
-          <b class="{{ '' if report.license.valid else 'service-state-error' }}">
-            {{ '离线有效' if report.license.valid else report.license.summary }}
-          </b>
-        </li>
-        <li><span>自动更新</span><b>未启用</b></li>
-        <li><span>组卷导出</span><b>本机执行</b></li>
+        <li><span>开源协议</span><b>GPL-3.0-or-later</b></li>
+        {% set update_state = report.services.get('updates', {}) if report.services else {} %}
+        <li><span>自动更新</span><b>{{ '可检查' if update_state.get('enabled') else '未配置' }}</b></li>
+        <li><span>组卷导出</span><b>本机与 Overleaf</b></li>
       </ul>
-      {% if report.license.valid %}
-      <p class="muted">授权给 {{ report.license.licensee }}；有效期至 {{ report.license.expires_at or '永久' }}。</p>
-      {% else %}
-      <p class="muted">{{ report.license.detail }} <a href="{{ url_for('settings_page') }}#software-license">导入许可证</a></p>
-      {% endif %}
-      <p class="muted">MinerU、Doc2X 和云端 LLM 只有在设置凭据并主动开始识别时才会访问第三方。</p>
+      <p class="muted">不会上传题库、正文或 API Key。OCR 和 LLM 均使用你在本机配置的服务。</p>
+      <div class="product-actions update-actions" data-update-control>
+        <button type="button" class="btn" data-update-action>检查更新</button>
+        <span class="muted" data-update-status role="status" aria-live="polite"></span>
+        <progress data-update-progress max="1" value="0" hidden></progress>
+        <a class="btn" data-update-download target="_blank" rel="noopener" hidden>手动下载</a>
+        <a class="btn" href="{{ github_releases_url }}" target="_blank" rel="noopener">GitHub 下载</a>
+      </div>
     </article>
   </div>
 
   <div class="product-actions product-primary-actions">
     <a class="btn btn-primary" href="{{ url_for('index', all=1) }}">进入题库</a>
-    <a class="btn" href="{{ url_for('settings_page') }}">设置与授权</a>
+    <a class="btn" href="{{ url_for('settings_page') }}">打开设置</a>
+    <a class="btn" href="{{ github_repository_url }}" target="_blank" rel="noopener">查看源码</a>
   </div>
 </section>
 {% endblock %}
 
 {% block scripts %}
-<script>
-(function () {
-  var actions = document.querySelector('.desktop-only-actions');
-  window.addEventListener('pywebviewready', function () {
-    if (actions) actions.hidden = false;
-  });
-  document.querySelectorAll('[data-desktop-open]').forEach(function (button) {
-    button.addEventListener('click', async function () {
-      var kind = button.dataset.desktopOpen;
-      var method = kind === 'bank' ? 'open_bank_folder'
-        : kind === 'logs' ? 'open_log_folder' : 'open_data_folder';
-      try {
-        var result = await window.pywebview.api[method]();
-        if (!result.ok) alert(result.error || '打开目录失败');
-      } catch (error) {
-        alert('打开目录失败：' + error.message);
-      }
-    });
-  });
-})();
-</script>
+<script src="{{ static_v('js/about-page.js') }}" defer></script>
+<script src="{{ static_v('js/update-controls.js') }}" defer></script>
 {% endblock %}

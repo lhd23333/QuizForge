@@ -17,6 +17,17 @@
     html.style.setProperty('--primary', c);
     swatches.forEach(s =>
       s.classList.toggle('active', s.dataset.color.toLowerCase() === c.toLowerCase()));
+    reportTheme();
+  }
+
+  function reportTheme() {
+    if (window.parent === window) return;
+    window.parent.postMessage({
+      source: 'quizforge',
+      type: 'page-theme',
+      mode: html.dataset.theme || 'light',
+      color: html.style.getPropertyValue('--primary').trim(),
+    }, window.location.origin);
   }
 
   swatches.forEach(s => s.addEventListener('click', () => {
@@ -29,7 +40,10 @@
 
   document.querySelectorAll('input[name="theme_mode"]').forEach(r => {
     r.addEventListener('change', () => {
-      if (r.checked) html.setAttribute('data-theme', r.value);
+      if (r.checked) {
+        html.setAttribute('data-theme', r.value);
+        reportTheme();
+      }
     });
   });
 })();

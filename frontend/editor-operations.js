@@ -5,11 +5,10 @@ export function insertBlockAt(editor, position, content) {
   if ($pos.parent.type.name === 'paragraph' && $pos.parent.content.size === 0 && $pos.depth > 0) {
     const node = editor.schema.nodeFromJSON(content);
     const transaction = editor.state.tr.replaceWith($pos.before(), $pos.after(), node);
-    editor.view.dispatch(transaction.scrollIntoView());
-    editor.commands.focus();
+    editor.view.dispatch(transaction);
     return true;
   }
-  return editor.chain().focus().insertContentAt(pos, content).run();
+  return editor.commands.insertContentAt(pos, content);
 }
 
 /** 按稳定 blockId 把一个题目节点移动到另一个题目节点之前。 */
@@ -32,6 +31,6 @@ export function moveQuestionBefore(editor, movingBlockId, targetBlockId) {
   const transaction = editor.state.tr.delete(sourcePos, sourcePos + size);
   if (sourcePos < targetPos) insertPos -= size;
   transaction.insert(insertPos, sourceNode);
-  editor.view.dispatch(transaction.scrollIntoView());
+  editor.view.dispatch(transaction);
   return true;
 }

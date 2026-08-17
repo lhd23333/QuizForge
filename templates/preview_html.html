@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{ title or 'QuizForge 预览' }}</title>
+  <link rel="stylesheet" href="{{ static_v('style.css') }}">
+  <link rel="stylesheet" href="{{ static_v('js/katex/katex.min.css') }}">
+</head>
+<body class="html-preview-page">
+  <main class="html-preview-document">
+    <h1>{{ title or '试卷预览' }}</h1>
+    {% for question in questions %}
+    <article class="html-preview-question">
+      <h2>{{ loop.index }}. {{ question.type or '题目' }}</h2>
+      <div>{{ question|qbody|safe }}</div>
+      {% if question.solution %}
+      <details><summary>查看解析</summary><div>{{ question|qsolution|safe }}</div></details>
+      {% endif %}
+    </article>
+    {% endfor %}
+  </main>
+  <script src="{{ static_v('js/katex/katex.min.js') }}"></script>
+  <script src="{{ static_v('js/katex/contrib/auto-render.min.js') }}"></script>
+  <script>window.renderMathInElement && renderMathInElement(document.body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false},{left:'\\(',right:'\\)',display:false}]});</script>
+</body>
+</html>
