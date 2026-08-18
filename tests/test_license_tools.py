@@ -2,7 +2,7 @@
 
 import argparse
 from contextlib import closing, redirect_stdout
-from datetime import date
+from datetime import date, timedelta
 from io import StringIO
 from pathlib import Path
 import sqlite3
@@ -15,6 +15,7 @@ from tools import license_admin, license_signer
 
 
 DEVICE_ID = "QFD1-AAAAAAAA-AAAAAAAA-AAAAAAAA-AAAAAAAA-AAAAAAAA-AAAAAAAA-AAAA"
+TEST_ISSUED_DAY = date.today()
 
 
 def _issue_args(private_key: Path) -> argparse.Namespace:
@@ -25,7 +26,7 @@ def _issue_args(private_key: Path) -> argparse.Namespace:
         device_id=DEVICE_ID,
         license_id="",
         edition="beta",
-        issued="2026-08-12",
+        issued=TEST_ISSUED_DAY.isoformat(),
         not_before="",
         valid_days=license_signer.DEFAULT_VALID_DAYS,
         expires="",
@@ -70,7 +71,7 @@ class LicenseToolTests(unittest.TestCase):
                 edition="beta",
                 feature=None,
                 note="默认一周",
-                issued="2026-08-12",
+                issued=TEST_ISSUED_DAY.isoformat(),
                 not_before="",
                 valid_days=7,
                 expires="",
@@ -86,7 +87,14 @@ class LicenseToolTests(unittest.TestCase):
                 row = connection.execute(
                     "SELECT licensee, status, expires_at, file_path FROM licenses"
                 ).fetchone()
-            self.assertEqual(row[:3], ("台账测试用户", "active", "2026-08-18"))
+            self.assertEqual(
+                row[:3],
+                (
+                    "台账测试用户",
+                    "active",
+                    (TEST_ISSUED_DAY + timedelta(days=6)).isoformat(),
+                ),
+            )
             self.assertTrue((root / row[3]).is_file())
 
     def test_admin_can_adopt_the_key_pair_already_used_by_client(self):
