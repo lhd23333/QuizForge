@@ -1014,6 +1014,97 @@ class PageTests(unittest.TestCase):
         self.assertEqual(response.get_json()["ids"], [qid])
         self.assertEqual(updated["difficulty"], "4")
 
+    def test_export_source_is_optional_and_inserted_before_question_body(self):
+        folder = app_module.filestore.get_or_create_collection("题源导出测试", "")
+        qid = app_module.filestore.create_question(
+            "原始题干", qtype="填空题", source="2026 $A_1$ 卷", folder=folder)
+        app_module.filestore.clear_selected()
+        app_module.filestore.select_ids([qid])
+        try:
+            with app_module.app.test_request_context(
+                    "/export", method="POST", data={"scope": "selected"}):
+                plain = app_module._collect_questions("selected")
+                params = app_module._read_export_params()
+            with app_module.app.test_request_context(
+                    "/export", method="POST",
+                    data={"scope": "selected", "show_source": "1"}):
+                sourced = app_module._collect_questions("selected", show_source=True)
+                sourced_params = app_module._read_export_params()
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual(plain[0]["body"], "原始题干")
+        self.assertFalse(params["show_source"])
+        self.assertTrue(sourced_params["show_source"])
+        self.assertEqual(sourced[0]["body"], r"【2026 \$A\_1\$ 卷】原始题干")
+
+    def test_bulk_properties_update_selected_questions_and_append_notes(self):
+        folder = app_module.filestore.get_or_create_collection("批量属性测试", "")
+        first = app_module.filestore.create_question(
+            "第一题", qtype="单选题", source="旧题源", note="原备注", folder=folder)
+        second = app_module.filestore.create_question(
+            "第二题", qtype="填空题", folder=folder)
+        app_module.filestore.clear_selected()
+        app_module.filestore.select_ids([first, second])
+        try:
+            response = app_module.app.test_client().post(
+                "/questions/bulk-update",
+                data={
+                    "type": "解答题", "difficulty": "4", "starred": "on",
+                    "source_mode": "set", "source": "统一题源",
+                    "note_mode": "append", "note": "批量备注",
+                },
+                headers={
+                    "X-CSRF-Token": app_module._WRITE_TOKEN,
+                    "Accept": "application/json",
+                })
+            first_row = app_module.filestore.get_question(first)
+            second_row = app_module.filestore.get_question(second)
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.get_json()["ids"]), {first, second})
+        self.assertEqual(first_row["type"], "解答题")
+        self.assertEqual(first_row["difficulty"], "4")
+        self.assertTrue(first_row["starred"])
+        self.assertEqual(first_row["source"], "统一题源")
+        self.assertEqual(first_row["note"], "原备注\n\n批量备注")
+        self.assertEqual(second_row["note"], "批量备注")
+
+    def test_question_card_shows_source_and_always_exposes_note_toggle(self):
+        folder = app_module.filestore.get_or_create_collection("题卡属性展示", "")
+        app_module.filestore.create_question(
+            "无备注题", qtype="填空题", source="灰色题源", folder=folder)
+        html = app_module.app.test_client().get(
+            "/", query_string={"collection": folder}).get_data(as_text=True)
+        self.assertIn('class="card-star-source"', html)
+        self.assertIn('class="card-head-source"', html)
+        self.assertIn('title="题源：灰色题源">灰色题源</span>', html)
+        self.assertIn('class="q-note is-empty"', html)
+        self.assertIn('<summary>备注<span>未填写</span></summary>', html)
+        self.assertIn('data-inline-focus="note"', html)
+
+    def test_selected_export_collects_targeted_ids_without_global_scan(self):
+        folder = app_module.filestore.get_or_create_collection("定向导出测试", "")
+        first = app_module.filestore.create_question(
+            "定向导出第一题", qtype="填空题", folder=folder, number=1)
+        second = app_module.filestore.create_question(
+            "定向导出第二题", qtype="填空题", folder=folder, number=2)
+        app_module.filestore.clear_selected()
+        app_module.filestore.select_ids([second, first])
+        try:
+            with (mock.patch.object(
+                    app_module.filestore, "_all_records",
+                    side_effect=AssertionError("选题篮导出不应扫描整座题库")),
+                  app_module.app.test_request_context(
+                      "/export", method="POST", data={"scope": "selected"})):
+                questions = app_module._collect_questions("selected")
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual([question["id"] for question in questions], [first, second])
+
     def test_select_all_in_collection_scans_only_that_subtree(self):
         folder = app_module.filestore.get_or_create_collection("局部全选测试", "")
         qid = app_module.filestore.create_question(
@@ -1111,6 +1202,29 @@ class PageTests(unittest.TestCase):
         self.assertIn("isInvalidFolderDrop(sourceId, cid)", template)
         self.assertIn("remapActiveCollection(sourceId, data.id, true)", template)
         self.assertIn("loadFolderFragment(location.href, false, true)", template)
+
+    def test_question_page_has_folder_tabs_with_independent_browse_state(self):
+        folder_id = app_module.filestore.get_or_create_collection("多标签目录", "")
+        html = app_module.app.test_client().get(
+            "/", query_string={"collection": folder_id}).get_data(as_text=True)
+        self.assertIn('id="collection-tabs"', html)
+        self.assertIn('role="tablist" aria-label="已打开的题集"', html)
+        self.assertIn('class="collection-tab-label">多标签目录</span>', html)
+
+        template = (config.BASE_DIR / "templates" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn("quizforge:collection-tabs:v1", template)
+        self.assertIn("captureCollectionTabPosition", template)
+        self.assertIn("restoreCollectionTabPosition", template)
+        self.assertIn("await loadNextQuestionPage()", template)
+        self.assertIn("void openCollectionTab(link.href", template)
+        self.assertIn("closeCollectionTab", template)
+        self.assertIn("remapCollectionTabs(fid, data.id, true)", template)
+        self.assertIn("removeCollectionTabs(fid)", template)
+        self.assertIn("insertCreatedFolder(data)", template)
+        self.assertNotIn("await loadFolderFragment(location.href, false, true);\n    flashToast(data.message || '文件夹已新建')", template)
+        self.assertIn('id="bulk-folder-tree" role="tree"', template)
+        self.assertIn("loadBulkFolderChildren", template)
 
     def test_question_drag_has_viewport_edge_auto_scroll(self):
         template = (config.BASE_DIR / "templates" / "index.html").read_text(

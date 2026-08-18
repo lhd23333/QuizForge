@@ -1651,6 +1651,47 @@ def set_type(qid: str, qtype: str):
     _update_meta_fields(qid, {"type": qtype})
 
 
+def update_question_fields_many(ids: list[str], *, qtype: str | None = None,
+                                difficulty: str | None = None,
+                                starred: bool | None = None,
+                                source: str | None = None,
+                                note: str | None = None,
+                                append_note: bool = False) -> list[str]:
+    """批量修改题目属性；None 表示保持原值，空字符串表示明确清空。
+
+    备注位于 Markdown 正文分区，不能当作 frontmatter 字段写入。这里对每道题只做
+    一次读写，并继续通过 ``_replace_note_section`` 保留未知自定义分区。
+    """
+    updated = []
+    with _write_lock:
+        for qid in dict.fromkeys(str(item) for item in ids if item):
+            rec = get_question(qid)
+            if not rec:
+                continue
+            path = config.BANK_DIR / rec["path"]
+            meta, raw_body = _read_raw(path)
+            if qtype is not None:
+                meta["type"] = qtype
+            if difficulty is not None:
+                meta["difficulty"] = difficulty
+            if starred is not None:
+                meta["starred"] = bool(starred)
+            if source is not None:
+                meta["source"] = source
+
+            body = raw_body
+            if note is not None:
+                next_note = note
+                if append_note and rec["note"] and note:
+                    next_note = f"{rec['note'].rstrip()}\n\n{note}"
+                extra = _replace_note_section(rec["extra_sections"], next_note)
+                body = _join_sections(rec["body"], rec["solution"], extra)
+            meta["updated"] = _now_iso()
+            _write_raw(path, meta, body)
+            updated.append(qid)
+    return updated
+
+
 def set_img_align(qid: str, align: str | None):
     """设置首图（index 0）的水平位置：left/center/right，空清除。"""
     _update_meta_fields(qid, {"img_align": align or ""})

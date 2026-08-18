@@ -511,6 +511,37 @@ html.desktop-host .sidebar-filter-panel .tag-cloud { max-height: none; }
 .tag-rename:hover { color: var(--primary); }
 
 .content { min-width: 0; }
+.collection-tabs {
+  display: flex; align-items: flex-end; gap: 2px; min-width: 0; height: 36px;
+  margin: 0 0 8px; padding: 0 2px; overflow-x: auto; overflow-y: hidden;
+  border-bottom: 1px solid var(--border); scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+.collection-tabs::-webkit-scrollbar { height: 4px; }
+.collection-tabs::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 2px; }
+.collection-tab {
+  flex: none; display: inline-flex; align-items: center; min-width: 0; height: 35px;
+  border-bottom: 2px solid transparent; color: var(--muted);
+}
+.collection-tab:hover { color: var(--text); background: var(--surface-2); }
+.collection-tab.active { color: var(--text); border-bottom-color: var(--primary); }
+.collection-tab-switch,
+.collection-tab-close {
+  flex: none; height: 32px; border: 0; background: transparent; color: inherit;
+  font: inherit; cursor: pointer;
+}
+.collection-tab-switch {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 220px;
+  padding: 0 7px 0 10px;
+}
+.collection-tab-switch:focus-visible,
+.collection-tab-close:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.collection-tab-icon { flex: none; color: var(--warn); font-size: 12px; }
+.collection-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collection-tab-close {
+  width: 26px; padding: 0 7px 1px 3px; border-radius: 4px; font-size: 16px;
+}
+.collection-tab-close:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, transparent); }
 .toolbar {
   display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
@@ -573,6 +604,7 @@ select option { background: var(--surface); color: var(--text); }
 }
 @media (max-width: 720px) {
   .llm-quick-switch { align-items: flex-start; flex-direction: column; }
+  .collection-tab-switch { max-width: 150px; }
 }
 
 .export-panel {
@@ -649,6 +681,50 @@ main.bulk-active-page { max-width: 1500px; }
 }
 .bulkbar .input::placeholder { color: var(--muted); }
 .bulkbar select option { color: var(--text); }
+.bulk-folder-picker { position: relative; width: 100%; }
+.bulk-folder-trigger {
+  width: 100%; min-height: 34px; padding: 6px 10px; overflow: hidden;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px;
+  text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.bulk-folder-trigger:hover,
+.bulk-folder-trigger[aria-expanded="true"] { border-color: var(--primary); }
+.bulk-folder-popover {
+  max-height: 300px; margin-top: 5px; padding: 4px; overflow: auto;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.bulk-folder-popover[hidden] { display: none !important; }
+.bulk-folder-tree,
+.bulk-folder-children { margin: 0; padding: 0; list-style: none; }
+.bulk-folder-children { margin-left: 14px; border-left: 1px solid var(--border); }
+.bulk-folder-row { display: flex; align-items: center; min-width: 0; border-radius: 5px; }
+.bulk-folder-row:hover { background: var(--surface-2); }
+.bulk-folder-row.selected { background: var(--primary-soft); color: var(--primary-hover); }
+.bulk-folder-twist,
+.bulk-folder-pick {
+  border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer;
+}
+.bulk-folder-twist {
+  flex: none; width: 22px; height: 28px; padding: 0; color: var(--muted);
+  font-size: 17px; transition: transform .15s ease;
+}
+.bulk-folder-node[aria-expanded="true"] > .bulk-folder-row .bulk-folder-twist { transform: rotate(90deg); }
+.bulk-folder-twist.empty { cursor: default; }
+.bulk-folder-pick {
+  display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1;
+  height: 28px; padding: 0 6px 0 2px; text-align: left;
+}
+.bulk-folder-pick > span:first-child { flex: none; color: var(--warn); font-size: 11px; }
+.bulk-folder-pick > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bulk-folder-empty { margin: 8px; font-size: 12px; }
+.bulk-properties { width: 100%; }
+.bulk-properties > summary {
+  padding: 2px 0; color: var(--text-2); font-size: 13px; font-weight: 600; cursor: pointer;
+}
+.bulk-properties[open] > summary { margin-bottom: 8px; }
+.bulk-note-input { min-height: 66px; resize: vertical; }
 .bulkbar .btn {
   background: var(--surface); border-color: var(--border-strong); color: var(--text);
   padding: 7px 13px;
@@ -923,14 +999,15 @@ html.desktop-host .papers-upload .input { padding: 5px 8px; }
   position: sticky; top: 78px; z-index: 15; box-shadow: var(--shadow-sm);
 }
 
-/* ---------- 解析折叠 ---------- */
-.q-solution { margin-top: var(--sp-2); border-top: 1px dashed var(--border-strong); padding-top: var(--sp-2); }
-.q-solution > summary { width: fit-content; cursor: pointer; color: var(--success); font-size: 0.9em; user-select: none; }
-.q-solution .solution-body { margin-top: var(--sp-2); padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius-sm); color: var(--text-2); }
-.q-solution .img-layout-bar + .solution-body { margin-top: var(--sp-2); }
-.q-note { margin-top: var(--sp-2); border-top: 1px dashed var(--border-strong); padding-top: var(--sp-2); }
-.q-note > summary { width: fit-content; cursor: pointer; color: var(--primary); font-size: 0.9em; user-select: none; }
-.q-note .note-body { margin-top: var(--sp-2); padding: 10px 12px; background: var(--primary-soft); border-radius: var(--radius-sm); color: var(--text-2); }
+/* ---------- 解析与备注折叠 ---------- */
+.q-solution,
+.q-note { margin-top: 6px; border-top: 1px dashed var(--border-strong); padding-top: 6px; }
+.q-solution > summary,
+.q-note > summary { width: fit-content; cursor: pointer; color: var(--success); font-size: 0.9em; user-select: none; }
+.q-solution .solution-body,
+.q-note .note-body { margin-top: 6px; padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius-sm); color: var(--text-2); }
+.q-solution .img-layout-bar + .solution-body { margin-top: 6px; }
+.q-note > summary span { margin-left: 5px; color: var(--muted); font-size: 11px; }
 .qcard-sol-wrap { margin-top: 6px; }
 .qcard-sol-wrap > summary { cursor: pointer; font-size: 0.85em; }
 .qcard-solution { margin-top: 6px; }
@@ -963,7 +1040,19 @@ html.desktop-host .import-box { padding: 14px; border-radius: 8px; box-shadow: n
 .card-head { display: flex; align-items: center; gap: var(--sp-3); font-size: 13px; margin-bottom: var(--sp-2); flex-wrap: wrap; }
 .sel-box { cursor: pointer; user-select: none; }
 .desktop-card-controls, .desktop-card-more { display: none; }
-.card-meta { display: inline-flex; align-items: center; min-width: 0; }
+.card-meta {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
+  min-width: 0; max-width: 100%;
+}
+.card-star-source {
+  display: inline-flex; align-items: center; gap: 5px;
+  min-width: 0; max-width: 100%;
+}
+.card-head-source {
+  min-width: 0; max-width: min(280px, 30vw); overflow: hidden;
+  color: var(--muted); font-size: 14px; line-height: 1.25;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .star-toggle {
   padding: 0; border: 0; background: transparent; font-family: inherit;
 }
@@ -2342,9 +2431,12 @@ html[data-theme="dark"] .handout-conflict, html[data-theme="dark"] .handout-warn
   html.desktop-host .layout.bulk-active,
   .layout,
   .layout.bulk-active {
-    grid-template-columns: min(var(--question-sidebar-width), 42vw) 6px minmax(0, 1fr);
+    grid-template-columns: min(var(--question-sidebar-width), 35vw) 6px minmax(0, 1fr);
     gap: 2px;
   }
+  .sort-label { display: flex; min-width: 0; max-width: 100%; align-items: center; }
+  .sort-label select { min-width: 0; max-width: 100%; }
+  .papers-upload .input { width: 100%; min-width: 0; }
   .layout.bulk-active > .question-bulk-resizer { display: none !important; }
   .layout > .bulkbar { grid-column: auto; }
   .bulkbar.show {

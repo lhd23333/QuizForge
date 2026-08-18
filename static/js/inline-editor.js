@@ -112,11 +112,12 @@
     previewTimers.set(editor, setTimeout(() => refreshPreview(editor), delay ?? 260));
   }
 
-  function openEditor(card) {
+  function openEditor(card, focusField = 'body') {
     const editor = card.querySelector('.inline-editor');
     if (!editor) return;
+    const focusTarget = focusField === 'note' ? controls(editor).note : controls(editor).body;
     if (!editor.hidden) {
-      controls(editor).body.focus();
+      focusTarget.focus();
       return;
     }
     editor.hidden = false;
@@ -125,7 +126,7 @@
     snapshots.set(editor, signature(editor));
     setStatus(editor, '');
     setMode(editor, 'live');
-    controls(editor).body.focus();
+    focusTarget.focus();
   }
 
   function closeEditor(editor, force) {
@@ -183,7 +184,7 @@
   document.addEventListener('click', event => {
     const trigger = event.target.closest('.inline-edit-trigger');
     if (trigger) {
-      openEditor(trigger.closest('.card'));
+      openEditor(trigger.closest('.card'), trigger.dataset.inlineFocus || 'body');
       return;
     }
     const editor = event.target.closest('.inline-editor');

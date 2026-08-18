@@ -1893,6 +1893,71 @@ def difficulty_selected():
     return redirect(request.referrer or url_for("index"))
 
 
+@app.route("/questions/bulk-update", methods=["POST"])
+def questions_bulk_update():
+    """批量修改已勾选题目的题型、难度、标星、题源和备注。"""
+    ids = filestore.selected_ids()
+    if not ids:
+        return jsonify(ok=False, error="请先勾选题目"), 400
+
+    qtype_value = request.form.get("type", "__keep__")
+    difficulty_value = request.form.get("difficulty", "__keep__")
+    starred_value = request.form.get("starred", "__keep__")
+    source_mode = request.form.get("source_mode", "keep")
+    note_mode = request.form.get("note_mode", "keep")
+    source_value = request.form.get("source", "").strip()
+    note_value = request.form.get("note", "").strip()
+
+    changes = {}
+    if qtype_value != "__keep__":
+        qtype = "" if qtype_value == "__clear__" else qtype_value
+        if qtype and qtype not in config.QUESTION_TYPES:
+            return jsonify(ok=False, error="未知题型"), 400
+        changes["qtype"] = qtype
+    if difficulty_value != "__keep__":
+        difficulty = "" if difficulty_value == "__clear__" else difficulty_value
+        if difficulty and difficulty not in config.DIFFICULTIES:
+            return jsonify(ok=False, error="难度须为 1-5"), 400
+        changes["difficulty"] = difficulty
+    if starred_value != "__keep__":
+        if starred_value not in {"on", "off"}:
+            return jsonify(ok=False, error="标星状态无效"), 400
+        changes["starred"] = starred_value == "on"
+
+    if source_mode not in {"keep", "set", "clear"}:
+        return jsonify(ok=False, error="题源操作无效"), 400
+    if source_mode == "set":
+        if not source_value:
+            return jsonify(ok=False, error="请填写题源，或选择清空题源"), 400
+        if len(source_value) > 1000:
+            return jsonify(ok=False, error="题源不能超过 1000 个字符"), 400
+        changes["source"] = source_value
+    elif source_mode == "clear":
+        changes["source"] = ""
+
+    if note_mode not in {"keep", "append", "replace", "clear"}:
+        return jsonify(ok=False, error="备注操作无效"), 400
+    if note_mode in {"append", "replace"}:
+        if not note_value:
+            return jsonify(ok=False, error="请填写备注，或选择清空备注"), 400
+        if len(note_value.encode("utf-8")) > _MAX_INLINE_MARKDOWN_BYTES:
+            return jsonify(ok=False, error="批量备注不能超过 2 MB"), 413
+        changes["note"] = note_value
+        changes["append_note"] = note_mode == "append"
+    elif note_mode == "clear":
+        changes["note"] = ""
+
+    if not changes:
+        return jsonify(ok=False, error="请选择至少一项要修改的属性"), 400
+    updated = filestore.update_question_fields_many(ids, **changes)
+    message = f"已更新 {len(updated)} 道题的属性"
+    if request.accept_mimetypes.best == "application/json":
+        return jsonify(ok=True, ids=updated, count=filestore.count_selected(),
+                       message=message)
+    flash(message, "ok")
+    return redirect(request.referrer or url_for("index"))
+
+
 # ---------------------------------------------------------------------------
 # 题集（= 文件夹）
 # ---------------------------------------------------------------------------
@@ -1916,7 +1981,8 @@ def collection_create():
             cid = filestore.create_collection(name, parent_id=parent_id)
             message = f"已新建题集「{name}」"
             if request.accept_mimetypes.best == "application/json":
-                return jsonify(ok=True, id=cid, name=name, message=message)
+                return jsonify(ok=True, id=cid, name=name, parent_id=parent_id,
+                               message=message)
             flash(message, "ok")
         except ValueError as e:
             if request.accept_mimetypes.best == "application/json":
@@ -6069,6 +6135,7 @@ def _question_export_payload(record: dict) -> dict:
     """题库记录收敛为导出器字段；备注是内部整理信息，不进入交付产物。"""
     return {
         "id": record["id"], "body": record["body"], "type": record["type"],
+        "source": record.get("source", ""),
         # 双栏刷题的解答题作答区会结合难度与一级小问数计算；漏传时
         # exporter 只能把所有未知难度都按 3 处理，题卡上调的难度就失效。
         "difficulty": record["difficulty"],
@@ -6083,18 +6150,39 @@ def _question_export_payload(record: dict) -> dict:
     }
 
 
-def _collect_questions(scope: str) -> list[dict]:
+_EXPORT_SOURCE_SPECIAL_RE = re.compile(r"([\\`*_{}\[\]()#+.!$|<>])")
+
+
+def _source_prefixed_body(body: str, source: str) -> str:
+    """把题源作为安全的 Markdown 行内前缀放到题号后、题干前。"""
+    clean = " ".join(str(source or "").split())
+    if not clean:
+        return body
+    escaped = _EXPORT_SOURCE_SPECIAL_RE.sub(r"\\\1", clean)
+    return f"【{escaped}】{body}"
+
+
+def _collect_questions(scope: str, *, show_source: bool = False) -> list[dict]:
     """按 scope 从库里取题目 dict 列表（export 与 preview 共用）。"""
     tags = [t for t in request.form.get("tags", "").split(",") if t.strip()]
     match = request.form.get("match", "and")
     type_ = request.form.get("type") or ""
     if scope == "selected":
-        rows = filestore.list_questions(selected_only=True)
+        # 选题篮通常只有几十道题，不能为了筛这些 id 先解析整座题库。大题库冷启动
+        # 时旧路径会把近三万份 Markdown 全部读入并解析 YAML，导出前白等一分多钟。
+        # 定向读取仍交给 list_questions 排序，并在并发取消勾选时刷新 selected 状态。
+        selected = filestore.records_from_ids(filestore.selected_ids())
+        rows = filestore.list_questions(selected_only=True, records=selected)
     elif scope == "filtered":
         rows = filestore.list_questions(tags=tags, match=match, qtype=type_)
     else:
         rows = filestore.list_questions()
-    return [_question_export_payload(record) for record in rows]
+    questions = [_question_export_payload(record) for record in rows]
+    if show_source:
+        for question in questions:
+            question["body"] = _source_prefixed_body(
+                question["body"], question.get("source", ""))
+    return questions
 
 
 @app.route("/question/<qid>/export-tex-zip", methods=["POST"])
@@ -6130,6 +6218,7 @@ def _read_export_params():
         title=request.form.get("title", "").strip() or "试卷",
         keypoints=request.form.get("keypoints", ""),
         solution_mode=request.form.get("solution_mode", "none"),
+        show_source=request.form.get("show_source", "") in ("1", "true", "on"),
         paper_tone=paper_tone,
         wimath_logo=request.form.get("wimath_logo", "") in ("1", "true", "on"),
         fullpage_ids=[x for x in request.form.getlist("fullpage") if x],
@@ -6261,7 +6350,7 @@ def preview():
     而那条路在 Obsidian 的 Electron 环境里嵌不进 iframe（见 `_out_files` 的注释）。
     """
     p = _read_export_params()
-    questions = _collect_questions(p["scope"])
+    questions = _collect_questions(p["scope"], show_source=p["show_source"])
     if not questions:
         return jsonify(ok=False, error="没有可预览的题目"), 400
 
@@ -6306,7 +6395,7 @@ def export():
     if fmt not in {"pdf", "tex", "zip", "docx"}:
         return jsonify(ok=False, error="导出格式不支持"), 400
 
-    questions = _collect_questions(p["scope"])
+    questions = _collect_questions(p["scope"], show_source=p["show_source"])
     if not questions:
         return jsonify(ok=False, error="没有可导出的题目"), 400
 

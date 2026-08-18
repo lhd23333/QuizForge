@@ -69,10 +69,14 @@
           </span>
         </span>
       </span>
-      <button type="button" class="star-toggle {% if q['starred'] %}on{% endif %}"
-              data-id="{{ q['id'] }}" aria-pressed="{{ 'true' if q['starred'] else 'false' }}"
-              title="标星：标记高质量题（点击切换）" aria-label="切换标星">★</button>
-      {% if q['source'] %}<span class="src legacy-card-source">{{ q['source'] }}</span>{% endif %}
+      <span class="card-star-source">
+        <button type="button" class="star-toggle {% if q['starred'] %}on{% endif %}"
+                data-id="{{ q['id'] }}" aria-pressed="{{ 'true' if q['starred'] else 'false' }}"
+                title="标星：标记高质量题（点击切换）" aria-label="切换标星">★</button>
+        {% if q['source'] %}
+          <span class="card-head-source" title="题源：{{ q['source'] }}">{{ q['source'] }}</span>
+        {% endif %}
+      </span>
     </span>
     <div class="spacer"></div>
     <button type="button" class="link card-a4-preview-trigger" aria-pressed="false"
@@ -91,9 +95,6 @@
       <button type="button" class="card-more-trigger" data-card-popover-trigger="more"
               aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>
       <div class="question-popover card-action-menu" data-card-popover="more" role="menu" hidden>
-        <div class="card-menu-source" role="presentation" title="{{ q['source'] or '未记录题源' }}">
-          <span>题源</span><strong>{{ q['source'] or '未记录' }}</strong>
-        </div>
         <form method="post" action="{{ url_for('question_delete', qid=q['id']) }}"
               class="question-delete-form">
           <button type="submit" class="card-menu-danger" role="menuitem">删除题目</button>
@@ -203,12 +204,14 @@
       <div class="solution-body body-structured">{{ q | qsolution }}</div>
     </details>
   {% endif %}
-  {% if q['note'] %}
-    <details class="q-note">
-      <summary>备注</summary>
-      <div class="note-body body-structured">{{ q | qnote }}</div>
-    </details>
-  {% endif %}
+  <details class="q-note{% if not q['note'] %} is-empty{% endif %}">
+    <summary>备注{% if not q['note'] %}<span>未填写</span>{% endif %}</summary>
+    <div class="note-body body-structured">
+      {% if q['note'] %}{{ q | qnote }}{% else %}
+        <button type="button" class="link inline-edit-trigger" data-inline-focus="note">添加备注</button>
+      {% endif %}
+    </div>
+  </details>
   <div class="tags">
     {% for tg in q['tags'] %}<span class="tag">{{ tg }}</span>{% endfor %}
   </div>

@@ -194,6 +194,17 @@
 
   <!-- 主区：题目列表 -->
   <section class="content">
+    <div class="collection-tabs" id="collection-tabs" role="tablist" aria-label="已打开的题集">
+      <div class="collection-tab active" data-collection="{{ active_collection or '' }}">
+        <button type="button" class="collection-tab-switch" role="tab" aria-selected="true"
+                title="{{ active_collection or '全部题目' }}">
+          <span class="collection-tab-icon" aria-hidden="true">▰</span>
+          <span class="collection-tab-label">{{ active_collection_name or '全部题目' }}</span>
+        </button>
+        <button type="button" class="collection-tab-close" hidden
+                aria-label="关闭 {{ active_collection_name or '全部题目' }}" title="关闭">×</button>
+      </div>
+    </div>
     <form method="get" action="{{ url_for('index') }}" class="search-bar" id="search-form">
       {% for name, value in search_scope_fields %}
         <input type="hidden" name="{{ name }}" value="{{ value }}">
@@ -201,7 +212,7 @@
       <input type="text" name="q" value="{{ search or '' }}" class="input"
              placeholder="搜索，或输入 tag: / content: / note: / source: …">
       <button type="submit" class="btn">搜索</button>
-      {% if search %}<a href="{{ search_clear_url }}" class="btn btn-ghost" id="search-clear">清除</a>{% endif %}
+      <a href="{{ search_clear_url }}" class="btn btn-ghost" id="search-clear"{% if not search %} hidden{% endif %}>清除</a>
     </form>
     <div id="search-feedback">
       {% if search_error %}
@@ -329,6 +340,7 @@
             <option value="separate">解析另起页</option>
           </select>
         </label>
+        <label><input type="checkbox" name="show_source" value="1"> 显示题源</label>
 
         <!-- 页眉页脚 DIY（所有模式共用；双栏模式中横跨整页，不被切成左右两份） -->
         <details class="hf-block">
@@ -438,10 +450,17 @@
 
   <!-- 加入题集 -->
   <form method="post" id="add-coll-form">
-    <select name="cid">
-      <option value="">加入题集…（点击加载目录）</option>
-    </select>
-    <button type="submit" class="btn">加入</button>
+    <input type="hidden" name="cid" value="">
+    <div class="bulk-folder-picker" id="bulk-folder-picker">
+      <button type="button" class="bulk-folder-trigger" id="bulk-folder-trigger"
+              aria-haspopup="tree" aria-expanded="false">选择目标文件夹…</button>
+      <div class="bulk-folder-popover" id="bulk-folder-popover" hidden>
+        <ul class="bulk-folder-tree" id="bulk-folder-tree" role="tree"
+            aria-label="选择目标文件夹"></ul>
+        <p class="bulk-folder-empty muted" id="bulk-folder-empty" hidden>还没有文件夹</p>
+      </div>
+    </div>
+    <button type="submit" class="btn" id="bulk-folder-submit" disabled>加入</button>
   </form>
 
   <!-- 批量打标签 -->
@@ -450,15 +469,43 @@
     <button type="submit" class="btn">打标签</button>
   </form>
 
-  <!-- 批量设难度 -->
-  <form method="post" action="{{ url_for('difficulty_selected') }}">
-    <select name="level">
-      <option value="">设难度…</option>
-      {% for d in difficulties %}<option value="{{ d }}">难度 {{ d }}</option>{% endfor %}
-      <option value="">清除难度</option>
-    </select>
-    <button type="submit" class="btn">应用</button>
-  </form>
+  <details class="bulk-properties" open>
+    <summary>批量属性</summary>
+    <form method="post" action="{{ url_for('questions_bulk_update') }}"
+          id="bulk-properties-form">
+      <select name="type" aria-label="批量题型">
+        <option value="__keep__">题型：不修改</option>
+        {% for ty in types %}<option value="{{ ty }}">题型：{{ ty|qtype_label }}</option>{% endfor %}
+        <option value="__clear__">题型：清空</option>
+      </select>
+      <select name="difficulty" aria-label="批量难度">
+        <option value="__keep__">难度：不修改</option>
+        {% for d in difficulties %}<option value="{{ d }}">难度：{{ d }}</option>{% endfor %}
+        <option value="__clear__">难度：清空</option>
+      </select>
+      <select name="starred" aria-label="批量标星">
+        <option value="__keep__">标星：不修改</option>
+        <option value="on">全部标星</option>
+        <option value="off">取消标星</option>
+      </select>
+      <select name="source_mode" data-bulk-field-mode="source" aria-label="批量题源操作">
+        <option value="keep">题源：不修改</option>
+        <option value="set">覆盖题源</option>
+        <option value="clear">清空题源</option>
+      </select>
+      <input type="text" name="source" class="input" data-bulk-field-value="source"
+             placeholder="题源" disabled>
+      <select name="note_mode" data-bulk-field-mode="note" aria-label="批量备注操作">
+        <option value="keep">备注：不修改</option>
+        <option value="append">追加备注</option>
+        <option value="replace">覆盖备注</option>
+        <option value="clear">清空备注</option>
+      </select>
+      <textarea name="note" class="input bulk-note-input" rows="3"
+                data-bulk-field-value="note" placeholder="备注（支持 Markdown）" disabled></textarea>
+      <button type="submit" class="btn">应用属性</button>
+    </form>
+  </details>
 
   {% if active_collection %}
     <form method="post" action="{{ url_for('collection_remove', cid=active_collection) }}">
@@ -1372,6 +1419,342 @@ const folderTree = document.getElementById('folder-tree');
 const collectionOverviewHost = document.getElementById('collection-overview-host');
 let folderLoadGeneration = 0;
 
+// 文件夹标签只保存轻量浏览状态，不复制题卡 DOM。回切时按原分页快照重新加载到
+// 离开前的深度，再以第一张可见题卡恢复位置，内存不会随标签数量成倍增长。
+const COLLECTION_TABS_STORE = 'quizforge:collection-tabs:v1';
+const collectionTabsHost = document.getElementById('collection-tabs');
+let collectionTabRestoreGeneration = 0;
+let collectionTabsState = {tabs: [], active: ''};
+
+function collectionIdFromUrl(rawUrl) {
+  return new URL(rawUrl, location.href).searchParams.get('collection') || '';
+}
+
+function collectionTabUrl(rawUrl) {
+  const url = new URL(rawUrl, location.href);
+  url.searchParams.delete('_qf_refresh');
+  url.hash = '';
+  return url.pathname + url.search;
+}
+
+function collectionTabName(collectionId, fallback = '') {
+  if (!collectionId) return '全部题目';
+  return String(fallback || collectionId.split('/').pop() || collectionId).trim();
+}
+
+function persistCollectionTabs() {
+  try {
+    sessionStorage.setItem(COLLECTION_TABS_STORE, JSON.stringify(collectionTabsState));
+  } catch (_error) {
+    // 禁用存储或配额异常时，当前页面的标签仍可正常使用。
+  }
+}
+
+function renderCollectionTabs() {
+  if (!collectionTabsHost) return;
+  collectionTabsHost.replaceChildren();
+  collectionTabsState.tabs.forEach(tab => {
+    const item = document.createElement('div');
+    const active = tab.id === collectionTabsState.active;
+    item.className = `collection-tab${active ? ' active' : ''}`;
+    item.dataset.collection = tab.id;
+
+    const switchButton = document.createElement('button');
+    switchButton.type = 'button';
+    switchButton.className = 'collection-tab-switch';
+    switchButton.dataset.collectionTab = tab.id;
+    switchButton.setAttribute('role', 'tab');
+    switchButton.setAttribute('aria-selected', String(active));
+    switchButton.tabIndex = active ? 0 : -1;
+    switchButton.title = tab.id || '全部题目';
+    const icon = document.createElement('span');
+    icon.className = 'collection-tab-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    icon.textContent = tab.id ? '▰' : '☷';
+    const label = document.createElement('span');
+    label.className = 'collection-tab-label';
+    label.textContent = tab.name;
+    switchButton.append(icon, label);
+
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'collection-tab-close';
+    closeButton.dataset.collectionTabClose = tab.id;
+    closeButton.title = '关闭';
+    closeButton.setAttribute('aria-label', `关闭 ${tab.name}`);
+    closeButton.textContent = '×';
+    closeButton.hidden = collectionTabsState.tabs.length <= 1;
+    item.append(switchButton, closeButton);
+    collectionTabsHost.appendChild(item);
+  });
+
+  const activeItem = [...collectionTabsHost.children]
+    .find(item => item.dataset.collection === collectionTabsState.active);
+  if (activeItem) {
+    const left = activeItem.offsetLeft;
+    const right = left + activeItem.offsetWidth;
+    if (left < collectionTabsHost.scrollLeft) collectionTabsHost.scrollLeft = left;
+    else if (right > collectionTabsHost.scrollLeft + collectionTabsHost.clientWidth) {
+      collectionTabsHost.scrollLeft = right - collectionTabsHost.clientWidth;
+    }
+  }
+}
+
+function readCollectionTabs() {
+  let saved = null;
+  try {
+    saved = JSON.parse(sessionStorage.getItem(COLLECTION_TABS_STORE) || 'null');
+  } catch (_error) {
+    saved = null;
+  }
+  const tabs = [];
+  const seen = new Set();
+  (Array.isArray(saved?.tabs) ? saved.tabs : []).forEach(tab => {
+    if (!tab || typeof tab.id !== 'string' || typeof tab.url !== 'string'
+        || seen.has(tab.id)) return;
+    seen.add(tab.id);
+    tabs.push({
+      id: tab.id,
+      name: collectionTabName(tab.id, tab.name),
+      url: collectionTabUrl(tab.url),
+      position: tab.position && typeof tab.position === 'object' ? tab.position : null,
+    });
+  });
+
+  const currentId = listEl?.dataset.collection || collectionIdFromUrl(location.href);
+  const currentUrl = collectionTabUrl(location.href);
+  let current = tabs.find(tab => tab.id === currentId);
+  if (!current) {
+    current = {id: currentId, name: '', url: currentUrl, position: null};
+    tabs.push(current);
+  } else if (current.url !== currentUrl) {
+    // 搜索或筛选通过普通表单进入同一文件夹时，旧排序下的位置已经没有意义。
+    current.position = null;
+  }
+  current.name = collectionTabName(
+    currentId, listEl?.dataset.collectionName || current.name);
+  current.url = currentUrl;
+  collectionTabsState = {tabs, active: currentId};
+  persistCollectionTabs();
+  renderCollectionTabs();
+}
+
+function captureCollectionTabPosition() {
+  if (!listEl) return null;
+  const cards = [...listEl.querySelectorAll(':scope > .card[data-id]')];
+  const anchor = visibleQuestionAnchor(cards);
+  return {
+    id: anchor?.dataset.id || '',
+    path: anchor?.dataset.path || '',
+    top: anchor?.getBoundingClientRect().top ?? 0,
+    scrollY: window.scrollY,
+    loaded: Number(listEl.dataset.loaded || cards.length),
+  };
+}
+
+function saveActiveCollectionTabState(updateUrl = true) {
+  const tab = collectionTabsState.tabs.find(row => row.id === collectionTabsState.active);
+  if (!tab) return;
+  tab.position = captureCollectionTabPosition();
+  if (updateUrl && (listEl?.dataset.collection || '') === tab.id) {
+    tab.url = collectionTabUrl(location.href);
+  }
+  persistCollectionTabs();
+}
+
+function syncCollectionTabAfterLoad(rawUrl) {
+  const id = listEl?.dataset.collection || collectionIdFromUrl(rawUrl);
+  const url = collectionTabUrl(rawUrl);
+  let tab = collectionTabsState.tabs.find(row => row.id === id);
+  if (!tab) {
+    tab = {id, name: '', url, position: null};
+    collectionTabsState.tabs.push(tab);
+  } else if (tab.url !== url) {
+    tab.position = null;
+  }
+  tab.name = collectionTabName(id, listEl?.dataset.collectionName || tab.name);
+  tab.url = url;
+  collectionTabsState.active = id;
+  persistCollectionTabs();
+  renderCollectionTabs();
+}
+
+async function restoreCollectionTabPosition(state, expectedCollection) {
+  const restoreGeneration = ++collectionTabRestoreGeneration;
+  const pageGeneration = questionPageGeneration;
+  const isCurrent = () => (
+    restoreGeneration === collectionTabRestoreGeneration
+    && pageGeneration === questionPageGeneration
+    && (listEl?.dataset.collection || '') === expectedCollection
+    && collectionTabsState.active === expectedCollection
+  );
+  questionPageObserver?.disconnect();
+  try {
+    if (!state) {
+      window.scrollTo(0, 0);
+      await waitForLayoutFrames();
+      return;
+    }
+    const total = Number(listEl?.dataset.total || 0);
+    const targetLoaded = Math.min(total, Math.max(30, Number(state.loaded) || 30));
+    while (isCurrent() && listEl?.dataset.pageToken
+           && Number(listEl.dataset.loaded || 0) < targetLoaded) {
+      const before = Number(listEl.dataset.loaded || 0);
+      await loadNextQuestionPage();
+      if (Number(listEl?.dataset.loaded || 0) <= before) break;
+    }
+    await waitForPageLayout();
+    if (!isCurrent()) return;
+    const anchor = findQuestionAnchor(state);
+    if (anchor?.isConnected) {
+      const targetTop = Number.isFinite(Number(state.top)) ? Number(state.top) : 78;
+      for (let attempt = 0; attempt < 4 && anchor.isConnected; attempt += 1) {
+        if (!isCurrent()) return;
+        const delta = anchor.getBoundingClientRect().top - targetTop;
+        if (Math.abs(delta) <= 1) break;
+        window.scrollBy(0, delta);
+        await waitForLayoutFrames();
+      }
+    } else {
+      const oldScrollY = Number(state.scrollY);
+      window.scrollTo(0, Number.isFinite(oldScrollY) ? oldScrollY : 0);
+    }
+  } finally {
+    if (isCurrent()) resetQuestionInfiniteScroll();
+  }
+}
+
+async function openCollectionTab(rawUrl, fallbackName = '', options = {}) {
+  const {push = true, useRequestedUrl = false, capture = true,
+         updateCapturedUrl = true} = options;
+  if (capture) saveActiveCollectionTabState(updateCapturedUrl);
+  const requestedUrl = collectionTabUrl(rawUrl);
+  const id = collectionIdFromUrl(requestedUrl);
+  let tab = collectionTabsState.tabs.find(row => row.id === id);
+  if (!tab) {
+    tab = {id, name: collectionTabName(id, fallbackName), url: requestedUrl, position: null};
+    collectionTabsState.tabs.push(tab);
+  } else {
+    tab.name = collectionTabName(id, fallbackName || tab.name);
+    if (useRequestedUrl) tab.url = requestedUrl;
+  }
+  collectionTabsState.active = id;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  if ((listEl?.dataset.collection || '') === id && tab.url === collectionTabUrl(location.href)) {
+    return;
+  }
+  const position = tab.position ? {...tab.position} : null;
+  await loadFolderFragment(tab.url, push);
+  if ((listEl?.dataset.collection || '') === id && collectionTabsState.active === id) {
+    await restoreCollectionTabPosition(position, id);
+  }
+}
+
+function defaultRootCollectionUrl() {
+  const current = new URL(location.href);
+  const url = new URL(current.pathname, current.origin);
+  if (current.searchParams.has('_embedded')) {
+    url.searchParams.set('_embedded', current.searchParams.get('_embedded'));
+  }
+  url.searchParams.set('all', '1');
+  return collectionTabUrl(url);
+}
+
+async function closeCollectionTab(collectionId) {
+  const index = collectionTabsState.tabs.findIndex(tab => tab.id === collectionId);
+  if (index < 0) return;
+  const wasActive = collectionTabsState.active === collectionId;
+  if (wasActive) saveActiveCollectionTabState();
+  collectionTabsState.tabs.splice(index, 1);
+  if (!wasActive) {
+    persistCollectionTabs();
+    renderCollectionTabs();
+    return;
+  }
+  if (!collectionTabsState.tabs.length) {
+    collectionTabsState.tabs.push({
+      id: '', name: '全部题目', url: defaultRootCollectionUrl(), position: null,
+    });
+  }
+  const target = collectionTabsState.tabs[Math.min(index, collectionTabsState.tabs.length - 1)];
+  collectionTabsState.active = target.id;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  await openCollectionTab(target.url, target.name, {capture: false});
+}
+
+function remapCollectionTabs(oldId, newId, keepSuffix = true) {
+  saveActiveCollectionTabState();
+  collectionTabsState.tabs.forEach(tab => {
+    if (tab.id !== oldId && !tab.id.startsWith(oldId + '/')) return;
+    const suffix = keepSuffix ? tab.id.slice(oldId.length) : '';
+    const target = `${newId || ''}${suffix}`.replace(/^\/+/, '');
+    const url = new URL(tab.url, location.href);
+    tab.id = target;
+    if (target) {
+      url.searchParams.set('collection', target);
+      url.searchParams.delete('all');
+      url.searchParams.delete('recursive');
+    } else {
+      url.searchParams.delete('collection');
+      url.searchParams.delete('recursive');
+      url.searchParams.set('all', '1');
+    }
+    tab.url = collectionTabUrl(url);
+    if (!suffix) tab.name = collectionTabName(target);
+  });
+  if (collectionTabsState.active === oldId
+      || collectionTabsState.active.startsWith(oldId + '/')) {
+    const suffix = keepSuffix ? collectionTabsState.active.slice(oldId.length) : '';
+    collectionTabsState.active = `${newId || ''}${suffix}`.replace(/^\/+/, '');
+  }
+  const seen = new Set();
+  collectionTabsState.tabs = collectionTabsState.tabs.filter(tab => {
+    if (seen.has(tab.id)) return false;
+    seen.add(tab.id);
+    return true;
+  });
+  persistCollectionTabs();
+  renderCollectionTabs();
+}
+
+function removeCollectionTabs(rootId) {
+  saveActiveCollectionTabState();
+  const removedActive = collectionTabsState.active === rootId
+    || collectionTabsState.active.startsWith(rootId + '/');
+  collectionTabsState.tabs = collectionTabsState.tabs.filter(
+    tab => tab.id !== rootId && !tab.id.startsWith(rootId + '/'));
+  if (removedActive) collectionTabsState.active = '';
+  persistCollectionTabs();
+  renderCollectionTabs();
+}
+
+async function refreshCurrentCollectionTab(refreshTree = false) {
+  const collectionId = listEl?.dataset.collection || '';
+  const position = captureCollectionTabPosition();
+  saveActiveCollectionTabState();
+  const loaded = await loadFolderFragment(location.href, false, refreshTree);
+  if (loaded && (listEl?.dataset.collection || '') === collectionId) {
+    await restoreCollectionTabPosition(position, collectionId);
+  }
+}
+
+collectionTabsHost?.addEventListener('click', event => {
+  const closeButton = event.target.closest('[data-collection-tab-close]');
+  if (closeButton) {
+    void closeCollectionTab(closeButton.dataset.collectionTabClose || '');
+    return;
+  }
+  const switchButton = event.target.closest('[data-collection-tab]');
+  if (!switchButton) return;
+  const tab = collectionTabsState.tabs.find(
+    row => row.id === (switchButton.dataset.collectionTab || ''));
+  if (tab) void openCollectionTab(tab.url, tab.name);
+});
+window.addEventListener('pagehide', () => saveActiveCollectionTabState(), {capture: true});
+readCollectionTabs();
+
 function syncHiddenFormContext(formId, doc) {
   const current = document.getElementById(formId);
   const incoming = doc.getElementById(formId);
@@ -1401,7 +1784,51 @@ listEl?.addEventListener('click', async event => {
 function syncContextLink(linkId, doc) {
   const current = document.getElementById(linkId);
   const incoming = doc.getElementById(linkId);
-  if (current && incoming) current.href = incoming.href;
+  if (!current) return;
+  if (incoming) current.href = incoming.href;
+  current.hidden = !incoming || incoming.hidden;
+  current.classList.remove('hidden');
+}
+
+function syncVisibleQuestionControls(doc, url) {
+  const incomingSearch = doc.querySelector('#search-form input[name="q"]');
+  const currentSearch = document.querySelector('#search-form input[name="q"]');
+  if (currentSearch && incomingSearch) currentSearch.value = incomingSearch.value;
+
+  const incomingTags = doc.getElementById('tag-cloud');
+  const currentTags = document.getElementById('tag-cloud');
+  if (currentTags && incomingTags) currentTags.innerHTML = incomingTags.innerHTML;
+  const currentFilter = document.getElementById('filter-form');
+  const incomingFilter = doc.getElementById('filter-form');
+  if (currentFilter && incomingFilter) {
+    ['match', 'type', 'difficulty'].forEach(name => {
+      const current = currentFilter.querySelector(`select[name="${name}"]`);
+      const incoming = incomingFilter.querySelector(`select[name="${name}"]`);
+      if (current && incoming) current.value = incoming.value;
+    });
+    const currentStarred = currentFilter.querySelector('input[name="starred"]');
+    const incomingStarred = incomingFilter.querySelector('input[name="starred"]');
+    if (currentStarred) currentStarred.checked = !!incomingStarred?.checked;
+  }
+  const incomingSort = doc.getElementById('sort-select');
+  if (sortSel && incomingSort) sortSel.value = incomingSort.value;
+
+  const filterTab = document.getElementById('sidebar-tab-filters');
+  if (filterTab) {
+    const active = ['tag', 'tags', 'type', 'difficulty', 'starred']
+      .some(name => url.searchParams.has(name) && url.searchParams.get(name));
+    filterTab.classList.toggle('has-active-filter', active);
+    filterTab.setAttribute('aria-label', active ? '筛选（已启用）' : '筛选');
+    let dot = filterTab.querySelector('.sidebar-filter-dot');
+    if (active && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'sidebar-filter-dot';
+      dot.title = '已启用筛选';
+      filterTab.appendChild(dot);
+    } else if (!active) {
+      dot?.remove();
+    }
+  }
 }
 
 // 点题集只替换题卡与原卷面板，保留文件夹展开状态和页面滚动位置。响应仍是完整
@@ -1409,9 +1836,12 @@ function syncContextLink(linkId, doc) {
 async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
   // 用户一发起新导航就取消旧页面的刷新恢复，而不是等片段响应回来才取消。
   questionPositionRestoreGeneration += 1;
+  collectionTabRestoreGeneration += 1;
   const generation = ++folderLoadGeneration;
   const url = new URL(rawUrl, location.href);
-  if (sortSel?.value) url.searchParams.set('sort', sortSel.value);
+  if (!url.searchParams.has('sort') && sortSel?.value) {
+    url.searchParams.set('sort', sortSel.value);
+  }
   try {
     const res = await fetch(url, {headers: {'X-QF-Fragment': '1'}});
     if (!res.ok) throw new Error('片段请求失败');
@@ -1461,6 +1891,7 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
     syncHiddenFormContext('filter-form', doc);
     syncContextLink('search-clear', doc);
     syncContextLink('filter-reset', doc);
+    syncVisibleQuestionControls(doc, url);
     const searchFeedback = document.getElementById('search-feedback');
     const incomingSearchFeedback = doc.getElementById('search-feedback');
     if (searchFeedback && incomingSearchFeedback) {
@@ -1479,9 +1910,12 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
     syncModeUI();
     resetQuestionInfiniteScroll();
     if (push) history.pushState({qfFragment: true}, '', url);
+    syncCollectionTabAfterLoad(url);
+    return true;
   } catch (_error) {
     if (generation !== folderLoadGeneration) return;
     location.href = url;
+    return false;
   }
 }
 
@@ -1489,15 +1923,20 @@ folderTree?.addEventListener('click', event => {
   const link = event.target.closest('a.folder-link[data-ajax="1"]');
   if (!link) return;
   event.preventDefault();
-  loadFolderFragment(link.href);
+  const item = link.closest('.folder-item');
+  void openCollectionTab(link.href, item?.dataset.folderName || link.textContent);
 });
 collectionOverviewHost?.addEventListener('click', event => {
   const link = event.target.closest('a[data-folder-nav="1"]');
   if (!link) return;
   event.preventDefault();
-  loadFolderFragment(link.href);
+  void openCollectionTab(link.href, link.textContent);
 });
-window.addEventListener('popstate', () => loadFolderFragment(location.href, false));
+window.addEventListener('popstate', () => {
+  void openCollectionTab(location.href, '', {
+    push: false, useRequestedUrl: true, updateCapturedUrl: false,
+  });
+});
 
 function syncQuestionCountAfterRemoval(removed, removedInline = 0) {
   if (!listEl || removed < 1) return;
@@ -1552,7 +1991,7 @@ bulkbar?.addEventListener('submit', async event => {
   if (promptText && !confirm(promptText)) return;
   let action = form.action;
   if (form.id === 'add-coll-form') {
-    const cid = form.querySelector('select[name="cid"]')?.value || '';
+    const cid = form.querySelector('input[name="cid"]')?.value || '';
     if (!cid) return;
     action = new URL(collectionActionUrl(cid, 'add'), location.href).href;
   }
@@ -1592,6 +2031,10 @@ bulkbar?.addEventListener('submit', async event => {
         const summary = card.querySelector('.difficulty-summary-value');
         if (summary) summary.textContent = data.level || '—';
       });
+    } else if (path === '/questions/bulk-update') {
+      await refreshCurrentCollectionTab();
+      form.reset();
+      syncBulkPropertyInputs();
     } else if (data.deleted) {
       let removed = 0;
       let removedInline = 0;
@@ -1615,6 +2058,24 @@ bulkbar?.addEventListener('submit', async event => {
     if (button) button.disabled = false;
   }
 });
+
+function syncBulkPropertyInputs() {
+  const form = document.getElementById('bulk-properties-form');
+  if (!form) return;
+  form.querySelectorAll('[data-bulk-field-mode]').forEach(select => {
+    const field = select.dataset.bulkFieldMode;
+    const value = form.querySelector(`[data-bulk-field-value="${field}"]`);
+    if (!value) return;
+    value.disabled = field === 'source'
+      ? select.value !== 'set'
+      : !['append', 'replace'].includes(select.value);
+    if (value.disabled) value.value = '';
+  });
+}
+document.getElementById('bulk-properties-form')?.addEventListener('change', event => {
+  if (event.target.matches('[data-bulk-field-mode]')) syncBulkPropertyInputs();
+});
+syncBulkPropertyInputs();
 
 // “全选”会按当前筛选条件查询全部命中项，但查询完成后只需更新题卡勾选态与底部
 // 工具栏。旧的 POST + redirect 会把刚渲染好的 30 张题卡、公式和文件夹树全部销毁
@@ -1703,6 +2164,196 @@ function renderLazyFolder(node) {
   return li;
 }
 
+function insertFolderNodeSorted(host, node) {
+  const item = renderLazyFolder(node);
+  const siblings = [...host.children].filter(child => child.classList.contains('folder-item'));
+  const before = siblings.find(child => (
+    (child.dataset.folderName || '').localeCompare(node.name, 'zh-CN', {numeric: true}) > 0));
+  host.insertBefore(item, before || null);
+  return item;
+}
+
+function ensureFolderChildrenHost(parentItem, parentId) {
+  let children = parentItem.querySelector(':scope > .folder-children');
+  if (!children) {
+    children = document.createElement('ul');
+    children.className = 'folder-children';
+    children.dataset.parentId = parentId;
+    children.dataset.loaded = '1';
+    parentItem.appendChild(children);
+  }
+  const row = parentItem.querySelector(':scope > .folder-row');
+  let twist = row?.querySelector('.folder-twist');
+  if (twist?.classList.contains('folder-twist-empty')) {
+    twist.classList.remove('folder-twist-empty');
+    twist.title = '展开/折叠';
+    twist.innerHTML = '<span aria-hidden="true">›</span>';
+  }
+  parentItem.classList.add('has-children');
+  parentItem.classList.remove('collapsed');
+  children.classList.remove('collapsed');
+  return children;
+}
+
+async function insertCreatedFolder(data) {
+  const parentId = String(data.parent_id || '');
+  const node = {id: data.id, name: data.name, has_children: false};
+  if (!parentId) {
+    insertFolderNodeSorted(folderTree, node);
+    resetCollectionOptions();
+    return;
+  }
+  const parentItem = [...(folderTree?.querySelectorAll('.folder-item') || [])]
+    .find(item => item.dataset.folderId === parentId);
+  if (!parentItem) {
+    resetCollectionOptions();
+    return;
+  }
+  const children = ensureFolderChildrenHost(parentItem, parentId);
+  if (children.dataset.loaded === '1') {
+    insertFolderNodeSorted(children, node);
+  } else {
+    const response = await fetch('/collections/children?parent=' + encodeURIComponent(parentId));
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || '读取新文件夹失败');
+    children.replaceChildren(...result.children.map(renderLazyFolder));
+    children.dataset.loaded = '1';
+  }
+  resetCollectionOptions();
+}
+
+const bulkFolderPicker = document.getElementById('bulk-folder-picker');
+const bulkFolderTrigger = document.getElementById('bulk-folder-trigger');
+const bulkFolderPopover = document.getElementById('bulk-folder-popover');
+const bulkFolderTree = document.getElementById('bulk-folder-tree');
+const bulkFolderEmpty = document.getElementById('bulk-folder-empty');
+const bulkFolderInput = document.querySelector('#add-coll-form input[name="cid"]');
+const bulkFolderSubmit = document.getElementById('bulk-folder-submit');
+
+function renderBulkFolderNode(node) {
+  const item = document.createElement('li');
+  item.className = 'bulk-folder-node';
+  item.dataset.folderId = node.id;
+  item.dataset.folderName = node.name;
+  item.setAttribute('role', 'treeitem');
+  if (node.has_children) item.setAttribute('aria-expanded', 'false');
+  const row = document.createElement('div');
+  row.className = 'bulk-folder-row';
+  const twist = document.createElement('button');
+  twist.type = 'button';
+  twist.className = `bulk-folder-twist${node.has_children ? '' : ' empty'}`;
+  twist.dataset.bulkFolderTwist = '1';
+  twist.tabIndex = node.has_children ? 0 : -1;
+  twist.textContent = node.has_children ? '›' : '';
+  const pick = document.createElement('button');
+  pick.type = 'button';
+  pick.className = 'bulk-folder-pick';
+  pick.dataset.bulkFolderPick = '1';
+  pick.title = node.id;
+  pick.innerHTML = '<span aria-hidden="true">▰</span>';
+  const label = document.createElement('span');
+  label.textContent = node.name;
+  pick.appendChild(label);
+  row.append(twist, pick);
+  item.appendChild(row);
+  if (node.has_children) {
+    const children = document.createElement('ul');
+    children.className = 'bulk-folder-children';
+    children.dataset.parentId = node.id;
+    children.dataset.loaded = '0';
+    children.setAttribute('role', 'group');
+    children.hidden = true;
+    item.appendChild(children);
+  }
+  return item;
+}
+
+async function loadBulkFolderChildren(parentId, host) {
+  if (!host || host.dataset.loading === '1') return;
+  host.dataset.loading = '1';
+  try {
+    const response = await fetch('/collections/children?parent=' + encodeURIComponent(parentId));
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '读取文件夹失败');
+    host.replaceChildren(...data.children.map(renderBulkFolderNode));
+    host.dataset.loaded = '1';
+    if (!parentId && bulkFolderEmpty) bulkFolderEmpty.hidden = data.children.length > 0;
+  } finally {
+    host.dataset.loading = '';
+  }
+}
+
+function resetBulkFolderPicker() {
+  if (bulkFolderTree) {
+    bulkFolderTree.replaceChildren();
+    bulkFolderTree.dataset.loaded = '0';
+  }
+  if (bulkFolderInput) bulkFolderInput.value = '';
+  if (bulkFolderTrigger) bulkFolderTrigger.textContent = '选择目标文件夹…';
+  if (bulkFolderSubmit) bulkFolderSubmit.disabled = true;
+  if (bulkFolderEmpty) bulkFolderEmpty.hidden = true;
+  if (bulkFolderPopover) bulkFolderPopover.hidden = true;
+  bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+}
+
+bulkFolderTrigger?.addEventListener('click', async () => {
+  const opening = bulkFolderPopover?.hidden;
+  if (!bulkFolderPopover) return;
+  bulkFolderPopover.hidden = !opening;
+  bulkFolderTrigger.setAttribute('aria-expanded', String(opening));
+  if (opening && bulkFolderTree?.dataset.loaded !== '1') {
+    try {
+      await loadBulkFolderChildren('', bulkFolderTree);
+    } catch (error) {
+      bulkFolderPopover.hidden = true;
+      bulkFolderTrigger.setAttribute('aria-expanded', 'false');
+      flashToast(error.message, 'err');
+    }
+  }
+});
+
+bulkFolderTree?.addEventListener('click', async event => {
+  const item = event.target.closest('.bulk-folder-node');
+  if (!item) return;
+  if (event.target.closest('[data-bulk-folder-twist]')) {
+    const children = item.querySelector(':scope > .bulk-folder-children');
+    if (!children) return;
+    try {
+      if (children.dataset.loaded !== '1') {
+        await loadBulkFolderChildren(item.dataset.folderId, children);
+      }
+      children.hidden = !children.hidden;
+      item.setAttribute('aria-expanded', String(!children.hidden));
+    } catch (error) {
+      flashToast(error.message, 'err');
+    }
+    return;
+  }
+  if (!event.target.closest('[data-bulk-folder-pick]')) return;
+  bulkFolderTree.querySelectorAll('.bulk-folder-row.selected')
+    .forEach(row => row.classList.remove('selected'));
+  item.querySelector(':scope > .bulk-folder-row')?.classList.add('selected');
+  if (bulkFolderInput) bulkFolderInput.value = item.dataset.folderId;
+  if (bulkFolderTrigger) bulkFolderTrigger.textContent = item.dataset.folderId;
+  if (bulkFolderSubmit) bulkFolderSubmit.disabled = false;
+  if (bulkFolderPopover) bulkFolderPopover.hidden = true;
+  bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+});
+
+document.addEventListener('click', event => {
+  if (!bulkFolderPicker?.contains(event.target) && bulkFolderPopover) {
+    bulkFolderPopover.hidden = true;
+    bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && bulkFolderPopover && !bulkFolderPopover.hidden) {
+    bulkFolderPopover.hidden = true;
+    bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+    bulkFolderTrigger?.focus();
+  }
+});
+
 folderTree?.addEventListener('click', async event => {
   const twist = event.target.closest('.folder-twist:not(.folder-twist-empty)');
   if (!twist) return;
@@ -1745,7 +2396,6 @@ folderNewBtn?.addEventListener('click', () => {
 // 完整目录只在用户首次操作“加入/移动”时请求。它有 642 项，放进每次文件夹
 // 切换的 HTML 不仅增加体积，还会迫使服务端反复递归扫描整棵目录树。
 const folderMoveSelect = document.getElementById('folder-move-select');
-const addCollectionSelect = document.querySelector('#add-coll-form select[name="cid"]');
 let collectionOptionsPromise = null;
 function collectionActionUrl(fid, action) {
   const path = fid.split('/').map(encodeURIComponent).join('/');
@@ -1753,11 +2403,7 @@ function collectionActionUrl(fid, action) {
 }
 function resetCollectionOptions() {
   collectionOptionsPromise = null;
-  if (addCollectionSelect) {
-    while (addCollectionSelect.options.length > 1) addCollectionSelect.remove(1);
-    addCollectionSelect.options[0].textContent = '加入题集…';
-    addCollectionSelect.dataset.loaded = '';
-  }
+  resetBulkFolderPicker();
   if (folderMoveSelect) {
     if (folderTree?.contains(folderMoveSelect)) folderTree.after(folderMoveSelect);
     while (folderMoveSelect.options.length > 2) folderMoveSelect.remove(2);
@@ -1803,20 +2449,19 @@ async function postFolderForm(url, body) {
   return data;
 }
 async function loadCollectionOptions() {
-  if (addCollectionSelect?.dataset.loaded === '1') return;
+  if (folderMoveSelect?.dataset.loaded === '1') return;
   if (!collectionOptionsPromise) {
     collectionOptionsPromise = fetch('/collections/options').then(async response => {
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || '读取目录失败');
-      if (addCollectionSelect) {
-        addCollectionSelect.options[0].textContent = '加入题集…';
+      if (folderMoveSelect) {
         data.collections.forEach(row => {
           const option = document.createElement('option');
           option.value = row.id;
           option.textContent = '　'.repeat(row.depth) + row.name;
-          addCollectionSelect.appendChild(option);
+          folderMoveSelect.appendChild(option);
         });
-        addCollectionSelect.dataset.loaded = '1';
+        folderMoveSelect.dataset.loaded = '1';
       }
     }).catch(error => {
       collectionOptionsPromise = null;
@@ -1825,10 +2470,6 @@ async function loadCollectionOptions() {
   }
   return collectionOptionsPromise;
 }
-addCollectionSelect?.addEventListener('focus', () => {
-  loadCollectionOptions().catch(error => flashToast(error.message, 'err'));
-});
-
 folderNewForm?.addEventListener('submit', async event => {
   event.preventDefault();
   const button = folderNewForm.querySelector('button[type="submit"]');
@@ -1837,7 +2478,7 @@ folderNewForm?.addEventListener('submit', async event => {
     const data = await postFolderForm(folderNewForm.action, new FormData(folderNewForm));
     folderNewForm.reset();
     folderNewForm.hidden = true;
-    await loadFolderFragment(location.href, false, true);
+    await insertCreatedFolder(data);
     flashToast(data.message || '文件夹已新建');
   } catch (error) {
     flashToast(error.message, 'err');
@@ -1853,12 +2494,6 @@ async function showFolderMove(li) {
   } catch (error) {
     flashToast(error.message, 'err');
     return;
-  }
-  if (folderMoveSelect.dataset.loaded !== '1') {
-    [...(addCollectionSelect?.options || [])].slice(1).forEach(opt => {
-      folderMoveSelect.appendChild(opt.cloneNode(true));
-    });
-    folderMoveSelect.dataset.loaded = '1';
   }
   const fid = li.dataset.folderId;
   const alreadyOpen = (folderMoveSelect.dataset.id === fid
@@ -1886,6 +2521,7 @@ async function renameFolder(li) {
   try {
     const data = await postFolderForm(collectionActionUrl(fid, 'rename'), form);
     const next = remapActiveCollection(fid, data.id, true);
+    remapCollectionTabs(fid, data.id, true);
     await loadFolderFragment(next.url, next.changed, true);
     flashToast(data.message || '文件夹已改名');
   } catch (error) {
@@ -1899,6 +2535,7 @@ async function deleteFolder(li) {
   try {
     const data = await postFolderForm(collectionActionUrl(fid, 'delete'), new FormData());
     const next = remapActiveCollection(fid, data.parent_id || '', false);
+    removeCollectionTabs(fid);
     await loadFolderFragment(next.url, next.changed, true);
     flashToast(data.message || '题集已移入回收站');
   } catch (error) {
@@ -1939,6 +2576,7 @@ folderMoveSelect?.addEventListener('change', async () => {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || '移动失败');
       const next = remapActiveCollection(fid, data.id, true);
+      remapCollectionTabs(fid, data.id, true);
       await loadFolderFragment(next.url, next.changed, true);
       flashToast(data.message || '文件夹已移动');
     } catch (error) {
@@ -1983,7 +2621,7 @@ folderCtx?.addEventListener('click', async e => {
   if (act === 'new-question') {
     const folderId = li.dataset.folderId;
     if ((listEl?.dataset.collection || '') !== folderId) {
-      await loadFolderFragment('/?collection=' + encodeURIComponent(folderId));
+      await openCollectionTab('/?collection=' + encodeURIComponent(folderId), li.dataset.folderName);
     }
     await openNewQuestionCard(folderId);
   } else if (act === 'new-folder') {
@@ -2094,6 +2732,7 @@ folderTree?.addEventListener('drop', async e => {
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.ok) throw new Error(data.error || '移动文件夹失败');
       const next = remapActiveCollection(sourceId, data.id, true);
+      remapCollectionTabs(sourceId, data.id, true);
       await loadFolderFragment(next.url, next.changed, true);
       flashToast(data.message || '文件夹已移动');
     } catch (error) {

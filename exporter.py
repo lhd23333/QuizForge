@@ -2736,6 +2736,11 @@ _ROMAN_MATH_GREEK_RE = re.compile(
     r"\\mathrm\s*\{\s*\\(?P<name>Omega)\s*\}"
 )
 _ORPHAN_NOT_SCRIPT_RE = re.compile(r"\^\s*\{\s*\\not\s*\}")
+# OCR 常把填空横线写成 ``______`` 或 Markdown 转义后的 ``\_\_\_``。前者若
+# 落在数学区会被 TeX 当成连续下标，后者在普通文本里又可能被 Pandoc 拆成反斜杠和
+# 强调标记。只认连续三个及以上，避免碰到 ``a_1`` 这类正常下标。
+_FILL_BLANK_RE = re.compile(r"(?:\\_\s*){2,}\\_|_{3,}")
+_FILL_BLANK_TEX = r"\underline{\hspace{2cm}}"
 _SOLUTION_LEADING_LABEL_RE = re.compile(
     r"\A\s*(?:#{1,6}\s*)?(?:【\s*解析\s*】|解析\s*[：:])\s*",
     re.I,
@@ -2761,6 +2766,18 @@ def _sanitize_export_text(text: str) -> str:
     # 闭合美元后留空格：Pandoc 要求行内数学的闭合 `$` 后不能紧跟数字，`$\neq$0`
     # 会被误判成普通文本；写成 `$\neq$ 0` 才会稳定生成 `\(\neq\) 0`。
     return cleaned.replace("$\u0338=", r"$ $\neq$ ")
+
+
+def _normalize_fill_blank_markers(text: str) -> str:
+    """把连续下划线占位符转成合法填空线，不修改题库原文。"""
+    if not text or "_" not in text:
+        return text
+    parts = _MATH_SPLIT_RE.split(text)
+    for i, part in enumerate(parts):
+        replacement = (_FILL_BLANK_TEX if i % 2
+                       else f"${_FILL_BLANK_TEX}$")
+        parts[i] = _FILL_BLANK_RE.sub(lambda _match: replacement, part)
+    return "".join(parts)
 
 
 def _normalize_unicode_math_symbols(text: str) -> str:
@@ -3186,21 +3203,23 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
         """staging 阶段的正文预处理，顺序不能反：
 
         1. _sanitize_export_text 清掉不可见控制码与无语义的私用区括号碎片；
-        2. _repair_nested_dollar_math 去掉「块公式内又嵌行内公式」的无效外壳；
-        3. _normalize_unicode_math_symbols 把数学区 Unicode 符号转为标准 LaTeX；
-        4. _normalize_unicode_text_symbols 把文本区字体不含的斜等号包成行内数学；
-        5. _repair_invalid_math_font_wrappers 修复会吞掉 Δ/Ξ 的错误粗体包裹与孤立 not；
-        6. _repair_duplicate_math_scripts 修复数学区的连续同类脚标；
-        7. _repair_incomplete_math_commands 给数学区末尾缺分母的 frac 补空参数；
+        2. _normalize_fill_blank_markers 把连续下划线转成合法的 TeX 填空线；
+        3. _repair_nested_dollar_math 去掉「块公式内又嵌行内公式」的无效外壳；
+        4. _normalize_unicode_math_symbols 把数学区 Unicode 符号转为标准 LaTeX；
+        5. _normalize_unicode_text_symbols 把文本区字体不含的斜等号包成行内数学；
+        6. _repair_invalid_math_font_wrappers 修复会吞掉 Δ/Ξ 的错误粗体包裹与孤立 not；
+        7. _repair_duplicate_math_scripts 修复数学区的连续同类脚标；
+        8. _repair_incomplete_math_commands 给数学区末尾缺分母的 frac 补空参数；
            两者都只改本次导出的内存副本，不改题库文件，也不丢 OCR 识别出的内容；
-        8. _stash_tables 把内联 HTML <table> 换成 base64 令牌 —— 必须在
+        9. _stash_tables 把内联 HTML <table> 换成 base64 令牌 —— 必须在
            _escape_stray_backslash 之前，否则表格里的反斜杠会先被双写成字面反斜杠，
            而表格单元格的转义由 _cell_tex/_tex_text 自己负责（两套转义会打架）；
            令牌本身只含 A-Za-z0-9-_=，不含反斜杠，后一步碰不到它。
-        9. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
-        10. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
+        10. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
+        11. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
         """
         repaired = _sanitize_export_text(text)
+        repaired = _normalize_fill_blank_markers(repaired)
         repaired = _repair_nested_dollar_math(repaired)
         repaired = _normalize_unicode_math_symbols(repaired)
         repaired = _normalize_unicode_text_symbols(repaired)

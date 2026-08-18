@@ -131,6 +131,17 @@ class SlidesExportTests(unittest.TestCase):
         self.assertIn(r"x ^ { 2 } {}^ { , , }", repaired)
         self.assertIn(r"文本 ^ {a} ^ {b} 不动", repaired)
 
+    def test_fill_blank_markers_become_tex_lines_without_changing_subscripts(self):
+        source = r"普通______，转义\_\_\_，公式 $S_6=______$，下标 $a_1$"
+
+        repaired = exporter._normalize_fill_blank_markers(source)
+
+        self.assertEqual(repaired.count(r"\underline{\hspace{2cm}}"), 3)
+        self.assertNotIn("______", repaired)
+        self.assertNotIn(r"\_\_\_", repaired)
+        self.assertIn(r"$S_6=\underline{\hspace{2cm}}$", repaired)
+        self.assertIn(r"$a_1$", repaired)
+
     def test_nested_inline_math_unwraps_only_invalid_display_shell(self):
         source = "$$\n$x$ $O$ $y$\n$$\n\n$$\n(0, \\frac{1}{2})\n$$"
 
