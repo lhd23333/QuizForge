@@ -32,6 +32,7 @@ try {
         "doc2x_client.py", "doc2x_store.py", "imgorder.py", "blockpipe.py",
         "blocksplit.py", "blocknorm.py", "mechfix.py", "importer.py", "dedup.py",
         "llm_client.py", "providers.py", "qrender.py", "task_store.py",
+        "history_store.py",
         "cleanup_output.py", "corpus.py", "update_client.py", "tools\eval_doc2x.py",
         "vendor\project_alpha\src\mineru_client.py"
     )

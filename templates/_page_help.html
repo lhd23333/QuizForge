@@ -9,6 +9,8 @@
   {% set help_title = '导入帮助' %}
 {% elif 'batch' in endpoint %}
   {% set help_title = '转换任务帮助' %}
+{% elif endpoint.startswith('history_') %}
+  {% set help_title = '历史记录帮助' %}
 {% elif endpoint == 'dedup_page' %}
   {% set help_title = '查重帮助' %}
 {% elif endpoint == 'recycle_bin' %}
@@ -29,7 +31,7 @@
     <h3>编辑讲义</h3><p>新建或打开讲义后，从选题篮插入题目，并在右侧检查器调整标题、编号和内容。</p>
     <h3>保存与导出</h3><p>讲义保存在当前题库的 <code>_handouts</code> 目录。导出前先保存，外部修改冲突时页面会保留当前草稿。</p>
   {% elif endpoint.startswith('library') %}
-    <h3>浏览资料</h3><p>左侧按需展开题库文件。Markdown、PDF 和图片会在右侧以标签页打开。</p>
+    <h3>浏览资料</h3><p>左侧按需展开题库文件与识别历史。Markdown、PDF 和图片会在右侧以标签页打开。</p>
     <h3>分栏与编辑</h3><p>可切换单栏、左右分栏或上下分栏。Markdown 保存前会核对磁盘版本，避免覆盖 Obsidian 的外部修改。</p>
   {% elif endpoint.startswith('import') or endpoint.startswith('block_') %}
     <h3>选择文件</h3><p>每个任务对应一份试卷。题干和解析可上传 PDF、DOCX 或按顺序排列的图片。</p>
@@ -38,6 +40,10 @@
   {% elif 'batch' in endpoint %}
     <h3>任务状态</h3><p>各组独立转换，完成一组即可审核一组，不必等待整批结束。</p>
     <h3>中止</h3><p>未开始的组会跳过；已发给外部服务的组会跑完但结果作废，避免重复计费。</p>
+  {% elif endpoint.startswith('history_') %}
+    <h3>归档内容</h3><p>每次识别默认保留该组原文件与最终 Markdown，按当前题库独立存放，不自动过期。</p>
+    <h3>再次提取</h3><p>“再次提取”直接把归档 Markdown 建成一组待审核任务，不重复调用 OCR 或识别模型。</p>
+    <h3>删除</h3><p>删除先进入历史回收站；只有“永久删除”才真正移除归档文件。</p>
   {% elif endpoint == 'dedup_page' %}
     <h3>题目查重</h3><p>调整相似度后扫描当前范围，确认内容后再决定保留或删除。</p>
     <h3>图片体检</h3><p>系统会跨全部登记题库、回收站、讲义和安全备份核对引用。任一目录不可访问时会拒绝删除图片。</p>

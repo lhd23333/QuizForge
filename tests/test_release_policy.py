@@ -85,6 +85,12 @@ class ReleasePolicyTests(unittest.TestCase):
         )
         self.assertNotIn("latest", script.lower())
 
+    def test_release_verification_compiles_history_store(self):
+        script = (ROOT / "tools" / "verify_release.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"history_store.py"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

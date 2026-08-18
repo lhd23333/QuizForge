@@ -1470,6 +1470,23 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
   .bo-prog { min-width: 8em; }
 }
 
+/* ---------- 识别历史 ---------- */
+.history-toolbar { display: flex; gap: var(--sp-2); margin-bottom: var(--sp-3); }
+.history-list { display: grid; gap: var(--sp-2); }
+.history-row {
+  display: flex; align-items: center; gap: var(--sp-4); padding: var(--sp-3) var(--sp-4);
+}
+.history-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.history-main > strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-meta { color: var(--muted); font-size: 12px; }
+.history-files { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 12px; }
+.history-actions { display: flex; align-items: center; gap: var(--sp-2); flex-wrap: wrap; }
+.history-actions form { margin: 0; }
+@media (max-width: 720px) {
+  .history-row { align-items: stretch; flex-direction: column; }
+  .history-actions { justify-content: flex-end; }
+}
+
 /* ---------- 拆题审核页（block_review.html） ---------- */
 /* 几何对齐 .prev-layout（左原卷 sticky、右列表独立滚动），只是右栏内容是
    「块」而不是最终题卡。 */
@@ -2337,8 +2354,14 @@ html[data-theme="dark"] .handout-conflict, html[data-theme="dark"] .handout-warn
   }
 
   .library-shell {
-    grid-template-columns: min(var(--library-sidebar-width), 42vw) 6px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: min(180px, 27vh) minmax(0, 1fr);
   }
+  .library-sidebar { border-bottom: 1px solid var(--border); }
+  .library-sidebar-resizer { display: none !important; }
+  .library-workspace { grid-row: 2; }
+  .library-current-path { display: none; }
+  .library-view-toolbar { gap: 8px; padding-inline: 8px; }
 
   .handout-shell,
   .handout-shell.has-inspector {

@@ -25,6 +25,8 @@ class UpdateInstalledPolicyTests(unittest.TestCase):
         )
         for name in protected_names:
             self.assertIn(f'    "{name}"', text)
+        self.assertIn('$protectedTreeNames = @("history")', text)
+        self.assertIn('$file.Extension -eq ".md"', text)
 
     def test_update_hashes_state_before_and_after_install_and_startup(self):
         text = SCRIPT.read_text(encoding="utf-8")

@@ -100,6 +100,7 @@
       {# 转换任务：batch_id 只在内存里，离开看板页就找不回来了，得有个总入口 #}
       <a href="{{ url_for('batches_overview') }}" title="转换任务" class="nav-link{% if 'batch' in endpoint %} active{% endif %}">{{ icon('clock') }}<span>转换任务</span>{% if nav_batch_count %}
         <span class="nav-badge">{{ nav_batch_count }}</span>{% endif %}</a>
+      <a href="{{ url_for('history_page') }}" title="历史记录" class="nav-link{% if endpoint.startswith('history_') %} active{% endif %}">{{ icon('archive') }}<span>历史记录</span></a>
       </div>
       <div class="nav-group nav-tools">
       <span class="nav-group-label">工具</span>

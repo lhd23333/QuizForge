@@ -209,6 +209,11 @@ BATCH_UPLOAD_DIR = UPLOAD_DIR / "batch"
 # 本应用的扫描，管不了 Obsidian）。
 CORPUS_DIR = BANK_STATE_DIR / "corpus"
 
+# 用户可见的识别历史。每个任务组保留原文件与最终 Markdown；删除先移入其中的
+# trash 子目录，只有用户明确永久删除才真正释放文件。与转换任务一样按题库隔离，
+# 避免同时打开数学、物理题库时互相看到对方的试卷。
+HISTORY_DIR = BANK_STATE_DIR / "history"
+
 # 更新服务配置。旧文件里的授权和云导出字段会被忽略。
 SERVICE_PORTS_PATH = DATA_DIR / "service_ports.json"
 

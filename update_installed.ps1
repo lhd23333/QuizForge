@@ -42,6 +42,7 @@ $protectedRootNames = @(
     "ui_prefs.json"
 )
 $protectedStateNames = @("conversion_tasks.json", "selections.json")
+$protectedTreeNames = @("history")
 $protectedResumePatterns = @(".mineru_task_*.json", ".mineru_result_*.zip.part")
 
 function Assert-LastExitCode([string]$Step) {
@@ -124,6 +125,27 @@ function Get-ProtectedSnapshot([string]$AppDataDir, [string]$ProgramDir,
                             -Filter $name -ErrorAction SilentlyContinue)) {
             $key = Get-RelativeKey "appdata" $appRoot $file
             $snapshot[$key] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        }
+    }
+
+    # History can contain large source PDFs. Re-hashing every source four times
+    # during an update would make the protection check grow with the archive.
+    # Path, size and mtime still detect replacement/removal, while the small
+    # manifests and Markdown results receive a full content hash.
+    foreach ($treeName in $protectedTreeNames) {
+        foreach ($tree in @(Get-ChildItem -LiteralPath $AppDataDir -Recurse -Force `
+                            -Directory -Filter $treeName `
+                            -ErrorAction SilentlyContinue)) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $tree.FullName -Recurse `
+                                -Force -File -ErrorAction SilentlyContinue)) {
+                $key = Get-RelativeKey "appdata" $appRoot $file
+                if ($file.Name -eq "manifest.json" -or $file.Extension -eq ".md") {
+                    $snapshot[$key] = (Get-FileHash -LiteralPath $file.FullName `
+                                      -Algorithm SHA256).Hash
+                } else {
+                    $snapshot[$key] = "$($file.Length)|$($file.LastWriteTimeUtc.Ticks)"
+                }
+            }
         }
     }
 
@@ -310,6 +332,7 @@ try {
         "mineru_store.py", "doc2x_client.py", "doc2x_store.py", "imgorder.py",
         "blockpipe.py", "blocksplit.py", "blocknorm.py", "mechfix.py", "importer.py",
         "dedup.py", "llm_client.py", "providers.py", "qrender.py", "task_store.py",
+        "history_store.py",
         "cleanup_output.py", "corpus.py", "update_client.py", "tools\eval_doc2x.py",
         "vendor\project_alpha\src\mineru_client.py"
     )

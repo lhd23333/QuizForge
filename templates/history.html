@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}历史记录 · QuizForge{% endblock %}
+{% block content %}
+<section class="app-page history-page">
+  <header class="app-page-head">
+    <h1>历史记录</h1>
+  </header>
+
+  <div class="history-toolbar">
+    <a class="btn{% if not show_trash %} btn-primary{% endif %}"
+       href="{{ url_for('history_page') }}">记录</a>
+    <a class="btn{% if show_trash %} btn-primary{% endif %}"
+       href="{{ url_for('history_page', trash=1) }}">回收站</a>
+  </div>
+
+  {% if records %}
+  <div class="history-list">
+    {% for record in records %}
+    <article class="history-row app-surface">
+      <div class="history-main">
+        <strong>{{ record.title }}</strong>
+        <span class="history-meta">{{ record.created_label }} · {{ record.files|length }} 个原文件{% if record.has_markdown %} · MD 已保存{% endif %}</span>
+        <div class="history-files">
+          {% for file in record.files %}
+          <a href="{{ url_for('history_file', record_id=record.id, name=file.name, trash=1 if show_trash else None) }}"
+             target="_blank" rel="noopener">{{ file.display_name }}</a>
+          {% endfor %}
+          {% if record.has_markdown %}
+          <a href="{{ url_for('history_file', record_id=record.id, name='result.md', trash=1 if show_trash else None, download=1) }}">Markdown</a>
+          {% endif %}
+        </div>
+      </div>
+      <div class="history-actions">
+        {% if show_trash %}
+        <form method="post" action="{{ url_for('history_restore', record_id=record.id) }}">
+          <button class="btn btn-sm" type="submit">恢复</button>
+        </form>
+        <form method="post" action="{{ url_for('history_purge', record_id=record.id) }}"
+              onsubmit="return confirm('永久删除这条历史记录及全部归档文件？此操作不可恢复。')">
+          <button class="btn btn-sm btn-danger-text" type="submit">永久删除</button>
+        </form>
+        {% else %}
+          {% if record.has_markdown %}
+          <form method="post" action="{{ url_for('history_reimport', record_id=record.id) }}">
+            <button class="btn btn-sm btn-primary" type="submit">再次提取</button>
+          </form>
+          {% endif %}
+        <form method="post" action="{{ url_for('history_delete', record_id=record.id) }}">
+          <button class="btn btn-sm btn-danger-text" type="submit">删除</button>
+        </form>
+        {% endif %}
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="app-empty-state app-surface">
+    <strong>{% if show_trash %}历史回收站为空{% else %}暂无识别历史{% endif %}</strong>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

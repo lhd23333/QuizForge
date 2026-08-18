@@ -32,8 +32,16 @@
   function validPath(raw) {
     const path = String(raw || '').replace(/\\/g, '/').replace(/^\/+/, '');
     const parts = path.split('/').filter(Boolean);
-    if (!parts.length || parts.some(part => part === '..' || part.startsWith('.'))) return '';
+    if (!parts.length || parts.some((part, index) => part === '..'
+        || (part.startsWith('.')
+          && !(index === 0 && part === '.quizforge-history')))) return '';
     return parts.join('/');
+  }
+
+  function displayPath(path) {
+    return path === '.quizforge-history'
+      ? '历史记录'
+      : path.replace(/^\.quizforge-history\//, '历史记录/');
   }
 
   function parentPath(path) {
@@ -197,8 +205,8 @@
     toolbar.className = 'library-view-toolbar';
     const path = document.createElement('span');
     path.className = markdown ? 'library-current-path' : 'library-current-path library-current-path-only';
-    path.textContent = tab.path;
-    path.title = tab.path;
+    path.textContent = displayPath(tab.path);
+    path.title = displayPath(tab.path);
     toolbar.append(path);
     if (markdown) {
       const modes = document.createElement('div');

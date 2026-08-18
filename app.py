@@ -34,6 +34,7 @@ import doc2x_store
 import ui_prefs
 import tikz_redraw
 import task_store
+import history_store
 import cleanup_output
 import handouts
 import pdf_collection
@@ -448,6 +449,7 @@ _LIBRARY_IMAGE_EXTS = frozenset({
 })
 _LIBRARY_FILE_EXTS = (_LIBRARY_MARKDOWN_EXTS | _LIBRARY_PDF_EXTS
                        | _LIBRARY_IMAGE_EXTS)
+_LIBRARY_HISTORY_PREFIX = ".quizforge-history"
 _LIBRARY_PAGE_SIZE = 300
 _LIBRARY_TEXT_LIMIT = 8 * 1024 * 1024
 
@@ -493,6 +495,86 @@ def _library_natural_key(name: str) -> tuple:
                  for part in re.split(r"(\d+)", name))
 
 
+def _library_history_parts(raw: str) -> tuple[str, ...] | None:
+    """识别资料库的历史虚拟路径；隐藏前缀不会与题库真实文件冲突。"""
+    value = str(raw or "").strip().replace("\\", "/")
+    rel = PurePosixPath(value)
+    parts = tuple(part for part in rel.parts if part not in ("", "."))
+    if not parts or parts[0] != _LIBRARY_HISTORY_PREFIX:
+        return None
+    if (rel.is_absolute() or any(part == ".." for part in parts)
+            or any(part.startswith(".") for part in parts[1:])):
+        abort(404)
+    return parts[1:]
+
+
+def _library_history_file(raw: str) -> tuple[Path, str, str]:
+    parts = _library_history_parts(raw)
+    if parts is None or len(parts) != 2:
+        abort(404)
+    record_id, stored_name = parts
+    try:
+        record = history_store.get(record_id)
+        target = history_store.file_path(record_id, stored_name)
+    except history_store.HistoryError:
+        abort(404)
+    if stored_name == "result.md":
+        display_name = "result.md"
+    else:
+        meta = next((item for item in record["files"]
+                     if item.get("name") == stored_name), {})
+        display_name = meta.get("display_name") or stored_name
+    return target, PurePosixPath(*(_LIBRARY_HISTORY_PREFIX, *parts)).as_posix(), display_name
+
+
+def _library_history_children(parts: tuple[str, ...], offset: int):
+    if not parts:
+        entries = []
+        for record in history_store.list_records():
+            timestamp = float(record.get("created_at") or 0)
+            try:
+                date_label = datetime.fromtimestamp(timestamp).strftime("%m-%d %H:%M")
+            except (OSError, OverflowError, ValueError):
+                date_label = "时间未知"
+            entries.append({
+                "name": f"{record.get('title') or '识别记录'} · {date_label}",
+                "path": f"{_LIBRARY_HISTORY_PREFIX}/{record['id']}",
+                "kind": "folder",
+            })
+    elif len(parts) == 1:
+        try:
+            record = history_store.get(parts[0])
+        except history_store.HistoryError:
+            return jsonify(ok=False, error="历史记录不存在"), 404
+        entries = []
+        for item in record["files"]:
+            name = item.get("name") or ""
+            kind = _library_kind(Path(name))
+            if kind:
+                entries.append({
+                    "name": item.get("display_name") or name,
+                    "path": f"{_LIBRARY_HISTORY_PREFIX}/{record['id']}/{name}",
+                    "kind": kind, "size": int(item.get("size") or 0),
+                })
+        if record.get("has_markdown"):
+            target = history_store.file_path(record["id"], "result.md")
+            entries.append({
+                "name": "result.md",
+                "path": f"{_LIBRARY_HISTORY_PREFIX}/{record['id']}/result.md",
+                "kind": "markdown", "size": target.stat().st_size,
+            })
+        entries.sort(key=lambda item: _library_natural_key(item["name"]))
+    else:
+        return jsonify(ok=False, error="历史路径不存在"), 404
+    page = entries[offset:offset + _LIBRARY_PAGE_SIZE]
+    next_offset = offset + len(page)
+    virtual_path = PurePosixPath(
+        _LIBRARY_HISTORY_PREFIX, *parts).as_posix()
+    return jsonify(ok=True, path=virtual_path, entries=page,
+                   total=len(entries), next_offset=next_offset,
+                   done=next_offset >= len(entries))
+
+
 @app.route("/library")
 def library_page():
     return render_template("library.html")
@@ -500,13 +582,17 @@ def library_page():
 
 @app.route("/api/library/children")
 def library_children():
-    directory, rel = _library_path(request.args.get("path", ""), root_allowed=True)
-    if not directory.is_dir():
-        return jsonify(ok=False, error="文件夹不存在"), 404
+    raw_path = request.args.get("path", "")
     try:
         offset = max(0, int(request.args.get("offset") or 0))
     except ValueError:
         return jsonify(ok=False, error="列表位置无效"), 400
+    history_parts = _library_history_parts(raw_path)
+    if history_parts is not None:
+        return _library_history_children(history_parts, offset)
+    directory, rel = _library_path(raw_path, root_allowed=True)
+    if not directory.is_dir():
+        return jsonify(ok=False, error="文件夹不存在"), 404
     entries = []
     try:
         children = list(directory.iterdir())
@@ -525,6 +611,11 @@ def library_children():
                 "name": child.name, "path": child_rel, "kind": kind,
                 "size": child.stat().st_size,
             })
+    if not rel:
+        entries.append({
+            "name": "历史记录", "path": _LIBRARY_HISTORY_PREFIX,
+            "kind": "folder",
+        })
     entries.sort(key=lambda item: (
         item["kind"] != "folder", _library_natural_key(item["name"])))
     page = entries[offset:offset + _LIBRARY_PAGE_SIZE]
@@ -535,7 +626,12 @@ def library_children():
 
 @app.route("/api/library/read")
 def library_read():
-    target, rel = _library_path(request.args.get("path", ""))
+    raw_path = request.args.get("path", "")
+    if _library_history_parts(raw_path) is not None:
+        target, rel, display_name = _library_history_file(raw_path)
+    else:
+        target, rel = _library_path(raw_path)
+        display_name = target.name
     if not target.is_file() or target.suffix.lower() not in _LIBRARY_MARKDOWN_EXTS:
         return jsonify(ok=False, error="Markdown 文件不存在"), 404
     size = target.stat().st_size
@@ -548,14 +644,23 @@ def library_read():
         return jsonify(ok=False, error=f"无法按 UTF-8 读取文件：{exc}"), 400
     # 纳秒时间戳通常是 19 位，超过 JavaScript 的安全整数上限。必须作为十进制
     # 字符串交给前端原样回传，否则 JSON.parse 取整后每次保存都会被误判为外部修改。
-    return jsonify(ok=True, path=rel, name=target.name, text=text,
+    return jsonify(ok=True, path=rel, name=display_name, text=text,
                    mtime=str(target.stat().st_mtime_ns))
 
 
 @app.route("/api/library/write", methods=["POST"])
 def library_write():
     payload = request.get_json(silent=True) or {}
-    target, rel = _library_path(payload.get("path", ""))
+    raw_path = payload.get("path", "")
+    history_parts = _library_history_parts(raw_path)
+    if history_parts is not None:
+        target, rel, _display_name = _library_history_file(raw_path)
+        if len(history_parts) != 2 or history_parts[1] != "result.md":
+            return jsonify(ok=False, error="历史原文件只读"), 400
+        history_record_id = history_parts[0]
+    else:
+        target, rel = _library_path(raw_path)
+        history_record_id = None
     if not target.is_file() or target.suffix.lower() not in _LIBRARY_MARKDOWN_EXTS:
         return jsonify(ok=False, error="Markdown 文件不存在"), 404
     text = payload.get("text")
@@ -574,9 +679,13 @@ def library_write():
     if len(text.encode("utf-8")) > _LIBRARY_TEXT_LIMIT:
         return jsonify(ok=False, error="Markdown 文件超过 8 MB，无法在软件内保存"), 413
     try:
-        saved, mtime = filestore.write_markdown_text(
-            target, text, expected_mtime)
-    except OSError as exc:
+        if history_record_id:
+            saved, mtime = history_store.write_markdown(
+                history_record_id, text, expected_mtime)
+        else:
+            saved, mtime = filestore.write_markdown_text(
+                target, text, expected_mtime)
+    except (OSError, history_store.HistoryError) as exc:
         return jsonify(ok=False, error=f"无法保存文件：{exc}"), 400
     if not saved:
         return jsonify(
@@ -758,12 +867,17 @@ def handouts_export():
 
 @app.route("/library/raw")
 def library_raw():
-    target, _rel = _library_path(request.args.get("path", ""))
+    raw_path = request.args.get("path", "")
+    if _library_history_parts(raw_path) is not None:
+        target, _rel, display_name = _library_history_file(raw_path)
+    else:
+        target, _rel = _library_path(raw_path)
+        display_name = target.name
     kind = _library_kind(target)
     if not target.is_file() or kind not in {"pdf", "image"}:
         abort(404)
     response = send_file(target, as_attachment=False, conditional=True,
-                         download_name=target.name)
+                         download_name=display_name)
     response.headers["X-Content-Type-Options"] = "nosniff"
     if target.suffix.lower() == ".svg":
         # SVG 可携带脚本；作为图片显示仍额外加 sandbox，禁止它获得同源脚本能力。
@@ -2072,10 +2186,17 @@ def folder_paper_reconvert(cid):
     disp_name = exam.name
     if sol is not None:
         disp_name = f"{Path(disp_name).stem} + {sol.name}（解析）"
+    try:
+        history_id = _history_record_for_sources(
+            disp_name, exam, sol, ocr_backend=ocr_backend)
+    except (OSError, history_store.HistoryError) as exc:
+        flash(f"历史记录创建失败：{exc}", "err")
+        return redirect(request.referrer or url_for("index"))
     job_id = uuid.uuid4().hex
     with _jobs_lock:
         _jobs[job_id] = {"status": "pending", "md": None, "error": None,
-                         "filename": exam.name, "path": str(exam)}
+                         "filename": exam.name, "path": str(exam),
+                         "history_id": history_id}
         _persist_job(job_id, _jobs[job_id])
     grp = {
         "gid": 0, "job_id": job_id, "file_path": str(exam),
@@ -2089,6 +2210,7 @@ def folder_paper_reconvert(cid):
         "status": "pending", "md": None, "error": None,
         "pending": None, "note": "",
         "reviewed": None, "imported_count": 0,
+        "history_id": history_id,
     }
     batch_id = uuid.uuid4().hex
     with _batch_jobs_lock:
@@ -2323,6 +2445,70 @@ def _convert_with_ocr_credentials(ocr_backend: str, make_call):
     return make_call("", "")
 
 
+def _history_record_for_sources(title: str, file_path, solution_path=None,
+                                *, ocr_backend: str = "") -> str:
+    """给一次识别尝试建立原文件归档，返回历史编号。"""
+    paths = [path for path in (file_path, solution_path) if path]
+    names = [str(title or Path(paths[0]).name)]
+    if solution_path:
+        names.append(f"解析文件{Path(solution_path).suffix.lower()}")
+    record = history_store.create_record(
+        Path(str(title or "识别记录")).stem or "识别记录",
+        paths,
+        source_names=names,
+        metadata={"ocr_backend": _parse_ocr_backend(ocr_backend)},
+    )
+    return record["id"]
+
+
+def _archive_group_markdown(group: dict, markdown: str,
+                            *, record_id: str | None = None) -> None:
+    """把最终 Markdown 补进该次尝试的归档；历史再导入不重复制造副本。"""
+    if group.get("history_reimport") or group.get("history_skip_archive"):
+        return
+    record_id = record_id or group.get("history_id")
+    if not record_id:
+        record_id = _history_record_for_sources(
+            group.get("filename") or "识别记录",
+            group.get("file_path"), group.get("solution_path"),
+            ocr_backend=group.get("ocr_backend", ""))
+        group["history_id"] = record_id
+    history_store.attach_markdown(
+        record_id, markdown,
+        title=Path(group.get("filename") or "识别记录").stem,
+        metadata={"include_solution": bool(group.get("include_solution"))},
+    )
+
+
+def _history_record_for_retry(group: dict) -> str | None:
+    """重试优先从现存原文件归档；旧任务没有可访问原件时保持原流程。"""
+    file_path = group.get("file_path")
+    solution_path = group.get("solution_path")
+    direct_paths = [path for path in (file_path, solution_path) if path]
+    if direct_paths and all(Path(path).is_file() for path in direct_paths):
+        return _history_record_for_sources(
+            group.get("filename") or "识别记录", file_path, solution_path,
+            ocr_backend=group.get("ocr_backend", ""))
+    previous_id = group.get("history_id")
+    if not previous_id:
+        return None
+    try:
+        previous = history_store.get(previous_id)
+        source_paths = [history_store.file_path(previous_id, item["name"])
+                        for item in previous["files"]]
+    except (KeyError, history_store.HistoryError):
+        return None
+    record = history_store.create_record(
+        Path(group.get("filename") or previous.get("title") or "识别记录").stem,
+        source_paths,
+        source_names=[item.get("display_name") or item["name"]
+                      for item in previous["files"]],
+        metadata={"ocr_backend": _parse_ocr_backend(
+            group.get("ocr_backend", ""))},
+    )
+    return record["id"]
+
+
 def _convert_worker(job_id: str, saved_path, orig_filename: str,
                     include_solution: bool = False, solution_path=None,
                     only_numbers=None, provider=None,
@@ -2357,6 +2543,9 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
                     num_template=num_template, note_sink=notes.append,
                     ocr_backend=ocr_backend, doc2x_api_key=doc2x_key))
         with _jobs_lock:
+            history_job = dict(_jobs.get(job_id) or {})
+        _archive_group_markdown(history_job, md)
+        with _jobs_lock:
             # 池子重试会把整条转换重跑一遍，notes 里可能攒了同一句话两份，去重
             _jobs[job_id].update(status="done", md=md,
                                  note=" ".join(dict.fromkeys(notes)))
@@ -2384,6 +2573,7 @@ def _convert_one_group(batch_id: str, g: dict):
         if not batch or g not in batch.get("groups", []):
             return
         attempt = int(g.get("attempt") or 0)
+        history_id = g.get("history_id")
         is_collection_parent = (
             g.get("collection_strategy") == "ocr_structure"
             and not g.get("collection_unit"))
@@ -2510,6 +2700,7 @@ def _convert_one_group(batch_id: str, g: dict):
                     or g.get("cancelled")
                     or int(g.get("attempt") or 0) != attempt):
                 return
+            _archive_group_markdown(g, md, record_id=history_id)
             g["md"] = md
             g["status"] = "done"
             # 池子重试会把整条转换重跑一遍，notes 里可能攒了同一句话两份，去重
@@ -2615,6 +2806,32 @@ def _expand_collection_parent_inner(batch_id: str, parent: dict) -> None:
 
     cleanup_dirs = [unit.get("workspace_dir") for unit in units
                     if unit.get("workspace_dir")]
+    child_history_ids = []
+    created_child_history_ids = []
+    try:
+        for index, unit in enumerate(units):
+            if index == 0 and parent.get("history_id"):
+                child_history_ids.append(parent["history_id"])
+                continue
+            title = unit.get("title") or f"合集第 {index + 1} 组"
+            record_id = _history_record_for_sources(
+                title, parent["file_path"], parent.get("solution_path"),
+                ocr_backend=parent.get("ocr_backend", ""))
+            child_history_ids.append(record_id)
+            created_child_history_ids.append(record_id)
+    except (OSError, history_store.HistoryError) as exc:
+        for record_id in created_child_history_ids:
+            try:
+                history_store.move_to_trash(record_id)
+                history_store.purge(record_id)
+            except (OSError, history_store.HistoryError):
+                pass
+        for directory in cleanup_dirs:
+            converter.cleanup_collection_workspace(directory)
+        _set_collection_parent_error(
+            batch_id, parent, f"历史记录创建失败：{exc}", attempt=attempt,
+            cache_dirs=parent.get("collection_cache_dirs") or [])
+        return
     with _batch_jobs_lock:
         batch = _batch_jobs.get(batch_id)
         if (not batch or parent not in batch.get("groups", [])
@@ -2622,11 +2839,23 @@ def _expand_collection_parent_inner(batch_id: str, parent: dict) -> None:
                 or int(parent.get("attempt") or 0) != attempt):
             for directory in cleanup_dirs:
                 converter.cleanup_collection_workspace(directory)
+            for record_id in created_child_history_ids:
+                try:
+                    history_store.move_to_trash(record_id)
+                    history_store.purge(record_id)
+                except (OSError, history_store.HistoryError):
+                    pass
             return
         projected = len(batch["groups"]) - 1 + len(units)
         if projected > _MAX_BATCH_GROUPS:
             for directory in cleanup_dirs:
                 converter.cleanup_collection_workspace(directory)
+            for record_id in created_child_history_ids:
+                try:
+                    history_store.move_to_trash(record_id)
+                    history_store.purge(record_id)
+                except (OSError, history_store.HistoryError):
+                    pass
             message = (f"合集识别出 {len(units)} 组，本批展开后共 "
                        f"{projected} 组，超过上限 {_MAX_BATCH_GROUPS} 组")
             parent["status"] = "error"
@@ -2691,6 +2920,7 @@ def _expand_collection_parent_inner(batch_id: str, parent: dict) -> None:
                 "reviewed": None, "imported_count": 0,
                 "attempt": 0,
                 "in_flight": False,
+                "history_id": child_history_ids[index],
             }
             children.append(child)
             new_jobs.append((job_id, {
@@ -2698,6 +2928,7 @@ def _expand_collection_parent_inner(batch_id: str, parent: dict) -> None:
                 "filename": filename, "path": parent["file_path"],
                 "solution_path": parent.get("solution_path"),
                 "ocr_backend": child["ocr_backend"],
+                "history_id": child["history_id"],
             }))
 
         old_job_id = parent["job_id"]
@@ -2863,6 +3094,8 @@ def _group_files(g) -> list[str]:
     多图组存 cleanup_paths（含原始图片 + 合成 PDF）；老结构/单文件组
     退回 file_path/solution_path，向后兼容。
     """
+    if g.get("preserve_source_files"):
+        return []
     paths = list(g.get("cleanup_paths") or [])
     for key in ("file_path", "solution_path"):
         p = g.get(key)
@@ -2984,6 +3217,19 @@ def convert_start():
     if sol_file and sol_file.filename:
         solution_path = _save(sol_file, uuid.uuid4().hex)
 
+    try:
+        history_id = _history_record_for_sources(
+            orig_filename, saved_path, solution_path,
+            ocr_backend=ocr_backend)
+    except (OSError, history_store.HistoryError) as exc:
+        for path in (saved_path, solution_path):
+            if path:
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
+        return jsonify(ok=False, error=f"历史记录创建失败：{exc}"), 500
+
     with _jobs_lock:
         # solution_path 也登记进来：「一并保存原卷」要把答案卷一起存进文件夹，
         # 而它只能从这里查（表单传路径等于开一个任意文件读取接口）。
@@ -2995,7 +3241,8 @@ def convert_start():
                          "solution_path": str(solution_path) if solution_path else None,
                          "include_solution": include_solution,
                          "only_numbers": only_numbers, "note": "",
-                         "ocr_backend": ocr_backend}
+                         "ocr_backend": ocr_backend,
+                         "history_id": history_id}
         _persist_job(job_id, _jobs[job_id])
     threading.Thread(target=_convert_worker,
                      args=(job_id, saved_path, orig_filename, include_solution,
@@ -3019,6 +3266,19 @@ def convert_file_view(job_id):
     path_key = "solution_path" if side == "solution" else "path"
     if not job or not job.get(path_key):
         abort(404)
+    if job.get("history_reimport") and job.get("history_id"):
+        stored_name = job.get("history_source_name")
+        if not stored_name:
+            abort(404)
+        try:
+            path = history_store.file_path(job["history_id"], stored_name)
+        except history_store.HistoryError:
+            try:
+                path = history_store.file_path(
+                    job["history_id"], stored_name, trashed=True)
+            except history_store.HistoryError:
+                abort(404)
+        return send_file(str(path), as_attachment=False)
     path = Path(job[path_key]).resolve()
     upload_root = config.UPLOAD_DIR.resolve()
     if upload_root not in path.parents or not path.is_file():
@@ -3401,6 +3661,23 @@ def batch_convert_create():
             error=f"合集拆分后共有 {len(prepared)} 份试卷，超过上限 {_MAX_BATCH_GROUPS} 份",
         ), 400
 
+    created_history_ids = []
+    try:
+        for item in prepared:
+            item["history_id"] = _history_record_for_sources(
+                item["filename"], item["file_path"], item["solution_path"],
+                ocr_backend=item["ocr_backend"])
+            created_history_ids.append(item["history_id"])
+    except (OSError, history_store.HistoryError) as exc:
+        for record_id in created_history_ids:
+            try:
+                history_store.move_to_trash(record_id)
+                history_store.purge(record_id)
+            except (OSError, history_store.HistoryError):
+                pass
+        _discard(path for item in prepared for path in item["cleanup_paths"])
+        return jsonify(ok=False, error=f"历史记录创建失败：{exc}"), 500
+
     groups = []
     for gid, item in enumerate(prepared):
         job_id = uuid.uuid4().hex
@@ -3409,6 +3686,7 @@ def batch_convert_create():
                 "status": "pending", "md": None, "error": None,
                 "filename": item["filename"], "path": item["file_path"],
                 "ocr_backend": item["ocr_backend"],
+                "history_id": item["history_id"],
             }
             _persist_job(job_id, _jobs[job_id])
         groups.append({
@@ -3432,6 +3710,7 @@ def batch_convert_create():
             "reviewed": None, "imported_count": 0,
             "attempt": 0,
             "in_flight": False,
+            "history_id": item["history_id"],
         })
 
     batch_id = uuid.uuid4().hex
@@ -3689,6 +3968,7 @@ def batch_group_reconvert(batch_id, gid):
         if g.get("num_template") and g.get("engine") != converter.ENGINE_BLOCK:
             g["engine"] = converter.ENGINE_BLOCK
             flash("题号模板只在「逐题识别」下生效，已自动切换识别方式", "ok")
+        refresh_previous_items = None
         if is_imported_refresh and not g.get("refresh_in_progress"):
             previous_preview, _, previous_missing = _build_import_preview(
                 g.get("md") or "",
@@ -3702,9 +3982,19 @@ def batch_group_reconvert(batch_id, gid):
                 flash("旧入库结果无法完整重建，已拒绝刷新", "err")
                 return redirect(url_for("batch_dashboard", batch_id=batch_id))
             source = Path(g.get("filename") or "").stem or ""
-            g["refresh_previous_items"] = _auto_import_items(
+            refresh_previous_items = _auto_import_items(
                 previous_chosen, source)
+        try:
+            history_id = _history_record_for_retry(g)
+        except (OSError, history_store.HistoryError) as exc:
+            flash(f"历史记录创建失败：{exc}", "err")
+            return redirect(url_for(
+                "batch_dashboard", batch_id=batch_id))
+        if refresh_previous_items is not None:
+            g["refresh_previous_items"] = refresh_previous_items
             g["refresh_in_progress"] = True
+        g["history_id"] = history_id
+        g["history_skip_archive"] = history_id is None
         # 每次重转都换代。旧调用即使在“中止→立刻重转”后才返回，也只能
         # 发现代次已过期并丢弃结果，不能覆盖新一轮或触发旧结果自动入库。
         g["attempt"] = int(g.get("attempt") or 0) + 1
@@ -3724,7 +4014,7 @@ def batch_group_reconvert(batch_id, gid):
         if job_id in _jobs:
             _jobs[job_id].update(
                 status="pending" if is_collection_parent else "converting",
-                md=None, error=None)
+                md=None, error=None, history_id=history_id)
             _persist_job(job_id, _jobs[job_id])
     with _batch_jobs_lock:
         batch = _batch_jobs.get(batch_id)
@@ -3816,6 +4106,20 @@ def batch_group_source_review(batch_id, gid):
             return redirect(url_for(
                 "batch_group_source_review", batch_id=batch_id, gid=gid))
 
+        retry_snapshot = {
+            "filename": filename, "file_path": source_path,
+            "solution_path": solution_path or None,
+            "ocr_backend": ocr_backend, "history_id": g.get("history_id"),
+        }
+        try:
+            history_id = _history_record_for_retry(retry_snapshot)
+        except (OSError, history_store.HistoryError) as exc:
+            if unit:
+                converter.cleanup_collection_workspace(unit["workspace_dir"])
+            flash(f"历史记录创建失败：{exc}", "err")
+            return redirect(url_for(
+                "batch_group_source_review", batch_id=batch_id, gid=gid))
+
         with _batch_jobs_lock:
             current, current_group = _find_group(batch_id, gid)
             if (not current or current_group is not g
@@ -3824,6 +4128,11 @@ def batch_group_source_review(batch_id, gid):
                 if unit:
                     converter.cleanup_collection_workspace(
                         unit["workspace_dir"])
+                try:
+                    history_store.move_to_trash(history_id)
+                    history_store.purge(history_id)
+                except (OSError, history_store.HistoryError):
+                    pass
                 flash("任务状态已经变化，请返回看板确认", "err")
                 return redirect(url_for("batch_dashboard", batch_id=batch_id))
             g["attempt"] = attempt + 1
@@ -3836,6 +4145,8 @@ def batch_group_source_review(batch_id, gid):
             g["note"] = ""
             g["cancelled"] = False
             g["reviewed"] = None
+            g["history_id"] = history_id
+            g["history_skip_archive"] = history_id is None
             current["status"] = "converting"
             if unit:
                 g["collection_unit"] = True
@@ -3851,7 +4162,8 @@ def batch_group_source_review(batch_id, gid):
         with _jobs_lock:
             job = _jobs.get(job_id)
             if job is not None:
-                job.update(status=g["status"], md=None, error=None)
+                job.update(status=g["status"], md=None, error=None,
+                           history_id=history_id)
                 _persist_job(job_id, job)
 
         threading.Thread(
@@ -3944,7 +4256,7 @@ def _finish_block_inflight(batch_id: str, gid: int, attempt: int) -> None:
 
 def _finish_block_review_worker(batch_id: str, gid: int, pending: dict,
                                 include_solution: bool, provider,
-                                attempt: int):
+                                attempt: int, history_id: str | None):
     """后台线程：审核确认后把改好的块送 AI 收尾（状态字段与
     _convert_one_group 的 done/error 分支保持一致）。"""
     # 拦截最终图片时仍可能发现 OCR Markdown 引用的文件不存在。该提示必须回写
@@ -3975,6 +4287,7 @@ def _finish_block_review_worker(batch_id: str, gid: int, pending: dict,
             if (not g or g.get("cancelled")
                     or int(g.get("attempt") or 0) != attempt):
                 return
+            _archive_group_markdown(g, md, record_id=history_id)
             g["md"] = md
             g["status"] = "done"
             g["pending"] = None
@@ -4019,6 +4332,7 @@ def batch_group_blocks_confirm(batch_id, gid):
         pending["blocks"] = edited   # 用户改过的块覆盖切块原结果
         include_solution = g["include_solution"]
         attempt = int(g.get("attempt") or 0)
+        history_id = g.get("history_id")
         if g.get("in_flight"):
             flash("该组仍有转换在运行，请稍候重试", "err")
             return redirect(url_for("batch_dashboard", batch_id=batch_id))
@@ -4034,7 +4348,8 @@ def batch_group_blocks_confirm(batch_id, gid):
             provider = providers.resolve_active()
             threading.Thread(
                 target=_finish_block_review_worker,
-                args=(batch_id, gid, pending, include_solution, provider, attempt),
+                args=(batch_id, gid, pending, include_solution, provider,
+                      attempt, history_id),
                 daemon=True).start()
         except Exception as exc:
             with _batch_jobs_lock:
@@ -4071,6 +4386,8 @@ def batch_group_blocks_confirm(batch_id, gid):
             batch, current = _find_group(batch_id, gid)
             if (current and not current.get("cancelled")
                     and int(current.get("attempt") or 0) == attempt):
+                _archive_group_markdown(
+                    current, md, record_id=history_id)
                 current["md"] = md
                 current["status"] = "done"
                 current["pending"] = None
@@ -4198,6 +4515,139 @@ def batch_delete(batch_id):
                                            "等正在识别的几组落地后再删除"), 400
     _clean_batch_uploads(batch_id)
     return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 识别历史：原文件 + 最终 Markdown，长期保存且可从 MD 重新进入校对队列
+# ---------------------------------------------------------------------------
+
+
+def _history_rows(*, trashed: bool = False) -> list[dict]:
+    rows = history_store.list_records(trashed=trashed)
+    for row in rows:
+        try:
+            timestamp = float(row.get("created_at") or 0)
+            row["created_label"] = datetime.fromtimestamp(timestamp).strftime(
+                "%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, TypeError, ValueError):
+            row["created_label"] = "时间未知"
+    return rows
+
+
+@app.route("/history")
+def history_page():
+    trashed = request.args.get("trash") in ("1", "true", "on")
+    return render_template(
+        "history.html", records=_history_rows(trashed=trashed),
+        show_trash=trashed)
+
+
+@app.route("/history/<record_id>/file/<name>")
+def history_file(record_id, name):
+    trashed = request.args.get("trash") in ("1", "true", "on")
+    try:
+        record = history_store.get(record_id, trashed=trashed)
+        path = history_store.file_path(record_id, name, trashed=trashed)
+    except history_store.HistoryError:
+        abort(404)
+    if name == "result.md":
+        download_name = f"{record.get('title') or '识别结果'}.md"
+    else:
+        meta = next((item for item in record["files"]
+                     if item.get("name") == name), {})
+        download_name = meta.get("display_name") or name
+    download = request.args.get("download") in ("1", "true", "on")
+    return send_file(str(path), as_attachment=download,
+                     download_name=download_name)
+
+
+@app.route("/history/<record_id>/delete", methods=["POST"])
+def history_delete(record_id):
+    try:
+        history_store.move_to_trash(record_id)
+        flash("已移入历史回收站", "ok")
+    except (OSError, history_store.HistoryError) as exc:
+        flash(f"删除失败：{exc}", "err")
+    return redirect(url_for("history_page"))
+
+
+@app.route("/history/<record_id>/restore", methods=["POST"])
+def history_restore(record_id):
+    try:
+        history_store.restore(record_id)
+        flash("历史记录已恢复", "ok")
+    except (OSError, history_store.HistoryError) as exc:
+        flash(f"恢复失败：{exc}", "err")
+    return redirect(url_for("history_page", trash=1))
+
+
+@app.route("/history/<record_id>/purge", methods=["POST"])
+def history_purge(record_id):
+    try:
+        history_store.purge(record_id)
+        flash("历史记录已永久删除", "ok")
+    except (OSError, history_store.HistoryError) as exc:
+        flash(f"永久删除失败：{exc}", "err")
+    return redirect(url_for("history_page", trash=1))
+
+
+@app.route("/history/<record_id>/reimport", methods=["POST"])
+def history_reimport(record_id):
+    """直接把归档 MD 建成一组待审核任务，不重新调用 OCR 或 LLM。"""
+    try:
+        record = history_store.get(record_id)
+        markdown = history_store.read_markdown(record_id)
+        first_file = next(iter(record["files"]), None)
+        if first_file is None:
+            raise history_store.HistoryError("历史记录没有原文件")
+        source = history_store.file_path(record_id, first_file["name"])
+    except history_store.HistoryError as exc:
+        flash(f"无法再次提取：{exc}", "err")
+        return redirect(url_for("history_page"))
+
+    batch_id = uuid.uuid4().hex
+    job_id = uuid.uuid4().hex
+    title = record.get("title") or "历史识别结果"
+    ocr_backend = _parse_ocr_backend(
+        (record.get("metadata") or {}).get("ocr_backend", ""))
+    job = {
+        "status": "done", "md": markdown, "error": None,
+        "filename": f"{title}.md", "path": str(source),
+        "solution_path": None, "include_solution": True,
+        "only_numbers": None, "note": "", "ocr_backend": ocr_backend,
+        "history_id": record_id, "history_reimport": True,
+        "history_source_name": first_file["name"],
+    }
+    group = {
+        "gid": 0, "job_id": job_id, "file_path": str(source),
+        "solution_path": None, "include_solution": True,
+        "only_numbers": None, "filename": f"{title}.md",
+        "engine": _DEFAULT_ENGINE, "ocr_backend": ocr_backend,
+        "block_mode": _BLOCK_MODE_NO_AI, "num_template": "",
+        "cleanup_paths": [], "cleanup_dirs": [],
+        "collection_mode": False, "collection_strategy": "",
+        "collection_unit": False, "collection_raw_path": None,
+        "collection_ocr_meta": {}, "status": "done", "md": markdown,
+        "error": None, "pending": None, "note": "",
+        "reviewed": None, "imported_count": 0, "attempt": 0,
+        "in_flight": False, "history_id": record_id,
+        "history_reimport": True, "preserve_source_files": True,
+    }
+    batch = {
+        "status": "done", "groups": [group], "current_idx": 0,
+        "files_cleaned": False, "created_at": time.time(),
+        "running": 0, "cancelled": False, "pack_folder_name": "",
+        "target_parent_id": "", "auto_import": False,
+        "per_task_folder": False, "auto_keep_original": False,
+    }
+    with _jobs_lock:
+        _jobs[job_id] = job
+        _persist_job(job_id, job)
+    with _batch_jobs_lock:
+        _batch_jobs[batch_id] = batch
+        _persist_batch(batch_id, batch)
+    flash("已从历史 Markdown 建立 1 组待审核任务", "ok")
+    return redirect(url_for("batch_dashboard", batch_id=batch_id))
 
 
 # ---------------------------------------------------------------------------

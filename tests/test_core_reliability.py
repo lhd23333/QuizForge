@@ -41,6 +41,7 @@ def setUpModule():
     config.TASKS_PATH = root / "tasks.json"
     config.UPLOAD_DIR = root / "uploads"
     config.BATCH_UPLOAD_DIR = config.UPLOAD_DIR / "batch"
+    config.HISTORY_DIR = root / "history"
     config.OUTPUT_DIR = root / "output"
     app_module = importlib.import_module("app")
 
@@ -159,6 +160,85 @@ class TaskLifecycleTests(unittest.TestCase):
         self.assertEqual(len(attempts), 3)
         self.assertTrue(config.TASKS_PATH.is_file())
         self.assertEqual(list(config.TASKS_PATH.parent.glob("tasks.json.*.tmp")), [])
+
+
+class HistoryRouteTests(unittest.TestCase):
+    def setUp(self):
+        app_module.task_store._write_unlocked(app_module.task_store._empty())
+        app_module._jobs.clear()
+        app_module._batch_jobs.clear()
+        shutil.rmtree(config.HISTORY_DIR, ignore_errors=True)
+        config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        self.client = app_module.app.test_client()
+        self.headers = {"X-CSRF-Token": app_module._WRITE_TOKEN}
+
+    def test_history_reimport_creates_one_ready_group_without_ocr(self):
+        source = config.UPLOAD_DIR / "history-source.pdf"
+        source.write_bytes("%PDF-1.4\n历史原卷".encode("utf-8"))
+        record = app_module.history_store.create_record(
+            "历史试卷", [source], source_names=["历史试卷.pdf"])
+        app_module.history_store.attach_markdown(
+            record["id"], "1. 历史题目\n\n## 解析\n\n历史解析")
+
+        page = self.client.get("/history")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("历史试卷", page.get_data(as_text=True))
+        with mock.patch.object(
+                app_module.converter, "convert_file",
+                side_effect=AssertionError("历史 MD 再导入不应调用 OCR")):
+            response = self.client.post(
+                f"/history/{record['id']}/reimport", headers=self.headers)
+
+        self.assertEqual(response.status_code, 302)
+        batch_id = response.headers["Location"].rstrip("/").split("/")[-1]
+        group = app_module._batch_jobs[batch_id]["groups"][0]
+        self.assertEqual(group["status"], "done")
+        self.assertTrue(group["history_reimport"])
+        self.assertIn("历史题目", group["md"])
+        self.assertEqual(group["history_id"], record["id"])
+
+    def test_history_delete_restore_and_purge_routes(self):
+        source = config.UPLOAD_DIR / "history-trash.pdf"
+        source.write_bytes(b"%PDF-1.4\ntrash")
+        record = app_module.history_store.create_record("回收测试", [source])
+
+        deleted = self.client.post(
+            f"/history/{record['id']}/delete", headers=self.headers)
+        self.assertEqual(deleted.status_code, 302)
+        self.assertEqual(app_module.history_store.list_records(), [])
+        self.assertEqual(len(app_module.history_store.list_records(trashed=True)), 1)
+
+        restored = self.client.post(
+            f"/history/{record['id']}/restore", headers=self.headers)
+        self.assertEqual(restored.status_code, 302)
+        self.assertEqual(len(app_module.history_store.list_records()), 1)
+
+        self.client.post(
+            f"/history/{record['id']}/delete", headers=self.headers)
+        purged = self.client.post(
+            f"/history/{record['id']}/purge", headers=self.headers)
+        self.assertEqual(purged.status_code, 302)
+        self.assertEqual(app_module.history_store.list_records(trashed=True), [])
+
+    def test_archive_uses_attempt_record_instead_of_new_group_record(self):
+        source = config.UPLOAD_DIR / "attempt-source.pdf"
+        source.write_bytes(b"%PDF-1.4\nattempt")
+        previous = app_module.history_store.create_record("旧轮次", [source])
+        current = app_module.history_store.create_record("新轮次", [source])
+        group = {
+            "filename": "重试任务.pdf", "file_path": str(source),
+            "solution_path": None, "ocr_backend": "mineru",
+            "history_id": current["id"],
+        }
+
+        app_module._archive_group_markdown(
+            group, "旧轮次结果", record_id=previous["id"])
+
+        self.assertEqual(
+            app_module.history_store.read_markdown(previous["id"]),
+            "旧轮次结果")
+        with self.assertRaises(app_module.history_store.HistoryError):
+            app_module.history_store.read_markdown(current["id"])
 
 
 class PersistenceAndCleanupTests(unittest.TestCase):
@@ -1764,6 +1844,50 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertEqual(self.client.get(
             "/library/raw", query_string={"path": "资料阅读测试/忽略.txt"}
         ).status_code, 404)
+
+    def test_library_lists_reads_and_edits_history_markdown(self):
+        shutil.rmtree(config.HISTORY_DIR, ignore_errors=True)
+        source = config.UPLOAD_DIR / "library-history.pdf"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"%PDF-1.7\n%%EOF")
+        record = app_module.history_store.create_record(
+            "资料库历史", [source], source_names=["历史原卷.pdf"])
+        app_module.history_store.attach_markdown(
+            record["id"], "# 原始识别\n")
+
+        root_entries = self.client.get(
+            "/api/library/children").get_json()["entries"]
+        history_root = next(
+            item for item in root_entries if item["name"] == "历史记录")
+        records = self.client.get(
+            "/api/library/children",
+            query_string={"path": history_root["path"]}).get_json()["entries"]
+        self.assertEqual(len(records), 1)
+        files = self.client.get(
+            "/api/library/children",
+            query_string={"path": records[0]["path"]}).get_json()["entries"]
+        by_name = {item["name"]: item for item in files}
+        self.assertEqual(set(by_name), {"历史原卷.pdf", "result.md"})
+
+        note = self.client.get(
+            "/api/library/read",
+            query_string={"path": by_name["result.md"]["path"]})
+        self.assertEqual(note.status_code, 200)
+        self.assertEqual(note.get_json()["text"], "# 原始识别\n")
+        saved = self.client.post(
+            "/api/library/write",
+            json={"path": by_name["result.md"]["path"],
+                  "text": "# 人工修订\n", "mtime": note.get_json()["mtime"]},
+            headers=self.headers)
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(
+            app_module.history_store.read_markdown(record["id"]),
+            "# 人工修订\n")
+        pdf = self.client.get(
+            "/library/raw",
+            query_string={"path": by_name["历史原卷.pdf"]["path"]})
+        self.assertEqual(pdf.status_code, 200)
+        pdf.close()
 
     def test_library_rejects_traversal_hidden_paths_and_symlink_escape(self):
         self.assertEqual(self.client.get(
