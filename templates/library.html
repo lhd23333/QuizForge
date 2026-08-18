@@ -7,7 +7,11 @@
   <aside class="library-sidebar">
     <div class="library-sidebar-head">
       <h1>资料库</h1>
-      <span class="library-local-badge">本机</span>
+      <div class="library-sidebar-actions">
+        <span class="library-local-badge">本机</span>
+        <button type="button" id="library-new-folder" class="library-sidebar-action"
+                title="新建顶层文件夹" aria-label="新建顶层文件夹">＋</button>
+      </div>
     </div>
     <div id="library-tree" class="library-tree" role="tree" aria-label="文件列表">
       <div class="library-loading">正在读取文件…</div>

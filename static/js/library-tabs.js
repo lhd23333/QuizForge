@@ -8,8 +8,11 @@
   const tree = document.getElementById('library-tree');
   const panesHost = document.getElementById('library-panes');
   const paneTemplate = document.getElementById('library-pane-template');
+  const newFolderButton = document.getElementById('library-new-folder');
   if (!tree || !panesHost || !paneTemplate) return;
 
+  const READ_ONLY_ROOTS = new Set(['_assets', '_handouts', '_backups']);
+  const pathCollator = new Intl.Collator('zh-CN', {numeric: true, sensitivity: 'base'});
   const tabs = new Map();
   const panes = new Map();
   let layout = 'single';
@@ -24,6 +27,7 @@
     const ext = (path.match(/\.[^.\/]+$/) || [''])[0].toLowerCase();
     if (['.md', '.markdown'].includes(ext)) return 'markdown';
     if (ext === '.pdf') return 'pdf';
+    if (['.doc', '.docx'].includes(ext)) return 'word';
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(ext)) return 'image';
     return '';
   }
@@ -63,6 +67,84 @@
       throw error;
     }
     return data;
+  }
+
+  function showLibraryToast(message, isError = false) {
+    document.querySelector('.toast.toast-live')?.remove();
+    const toast = document.createElement('div');
+    toast.className = `toast toast-live${isError ? ' toast-error' : ''}`;
+    toast.textContent = message;
+    document.body.append(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    window.setTimeout(() => {
+      toast.classList.remove('show');
+      window.setTimeout(() => toast.remove(), 180);
+    }, 2200);
+  }
+
+  function iconLetter(kind) {
+    return kind === 'handout' ? 'H' : kind === 'markdown' ? 'M'
+      : kind === 'pdf' ? 'P' : kind === 'word' ? 'W' : 'I';
+  }
+
+  function isReadOnlyTreePath(path) {
+    const parts = String(path || '').split('/').filter(Boolean);
+    return parts[0] === '.quizforge-history' || READ_ONLY_ROOTS.has(parts[0]);
+  }
+
+  let nameDialogPromise = null;
+
+  function askLibraryName(title, initialValue) {
+    if (nameDialogPromise) return nameDialogPromise;
+    nameDialogPromise = new Promise(resolve => {
+      const dialog = document.createElement('dialog');
+      dialog.className = 'library-name-dialog';
+      const form = document.createElement('form');
+      form.method = 'dialog';
+      const heading = document.createElement('h2');
+      heading.textContent = title;
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.maxLength = 255;
+      input.value = initialValue;
+      input.autocomplete = 'off';
+      input.setAttribute('aria-label', title);
+      const actions = document.createElement('div');
+      actions.className = 'library-name-actions';
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = '取消';
+      const confirm = document.createElement('button');
+      confirm.type = 'submit';
+      confirm.className = 'is-primary';
+      confirm.textContent = '确定';
+      actions.append(cancel, confirm);
+      form.append(heading, input, actions);
+      dialog.append(form);
+      document.body.append(dialog);
+      let finished = false;
+      const finish = value => {
+        if (finished) return;
+        finished = true;
+        if (dialog.open) dialog.close();
+        dialog.remove();
+        nameDialogPromise = null;
+        resolve(value);
+      };
+      cancel.addEventListener('click', () => finish(null));
+      dialog.addEventListener('cancel', event => {
+        event.preventDefault();
+        finish(null);
+      });
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        finish(input.value);
+      });
+      dialog.showModal();
+      input.focus();
+      input.select();
+    });
+    return nameDialogPromise;
   }
 
   function createPane(id) {
@@ -362,6 +444,29 @@
       image.alt = tab.name;
       stage.append(image);
       panel.append(stage);
+    } else if (tab.kind === 'word') {
+      panel.append(pathToolbar(tab, false));
+      const state = document.createElement('div');
+      state.className = 'library-word-state';
+      const mark = document.createElement('span');
+      mark.className = 'library-word-mark';
+      mark.textContent = 'W';
+      const title = document.createElement('h2');
+      title.textContent = '需要转换后查看';
+      const message = document.createElement('p');
+      message.textContent = '请选择 Markdown 或 PDF 作为查看格式。';
+      const actions = document.createElement('div');
+      actions.className = 'library-word-actions';
+      ['转为 Markdown', '转为 PDF'].forEach(label => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.disabled = true;
+        button.textContent = label;
+        button.title = '转换入口将在资料处理工具中启用';
+        actions.append(button);
+      });
+      state.append(mark, title, message, actions);
+      panel.append(state);
     } else {
       const error = document.createElement('div');
       error.className = 'library-viewer-error';
@@ -427,7 +532,7 @@
       if (tab.kind !== 'blank') {
         const icon = document.createElement('span');
         icon.className = `library-file-icon is-${tab.kind}`;
-        icon.textContent = tab.kind === 'markdown' ? 'M' : tab.kind === 'pdf' ? 'P' : 'I';
+        icon.textContent = iconLetter(tab.kind);
         open.append(icon);
       }
       const label = document.createElement('span');
@@ -571,8 +676,7 @@
     if (entry.kind !== 'folder') {
       const icon = document.createElement('span');
       icon.className = `library-file-icon is-${entry.kind}`;
-      icon.textContent = entry.kind === 'handout' ? 'H' : entry.kind === 'markdown' ? 'M'
-        : entry.kind === 'pdf' ? 'P' : 'I';
+      icon.textContent = iconLetter(entry.kind);
       button.append(icon);
     }
     button.append(label);
@@ -586,7 +690,204 @@
     return node;
   }
 
+  function sortTreeHost(host) {
+    const nodes = [...host.querySelectorAll(':scope > .library-tree-node')];
+    nodes.sort((left, right) => {
+      const a = left.querySelector(':scope > .library-tree-entry');
+      const b = right.querySelector(':scope > .library-tree-entry');
+      const folderOrder = Number(b?.dataset.kind === 'folder')
+        - Number(a?.dataset.kind === 'folder');
+      if (folderOrder) return folderOrder;
+      return pathCollator.compare(
+        a?.querySelector('.library-tree-label')?.textContent || '',
+        b?.querySelector('.library-tree-label')?.textContent || '');
+    });
+    const more = host.querySelector(':scope > .library-tree-more');
+    nodes.forEach(node => host.insertBefore(node, more));
+  }
+
+  function appendTreeEntry(host, entry) {
+    const existing = [...host.querySelectorAll(':scope > .library-tree-node > .library-tree-entry')]
+      .find(node => node.dataset.path === entry.path);
+    if (!existing) host.append(entryNode(entry));
+    sortTreeHost(host);
+  }
+
+  function remapPath(path, oldPath, newPath) {
+    if (path === oldPath) return newPath;
+    return path.startsWith(`${oldPath}/`) ? `${newPath}${path.slice(oldPath.length)}` : path;
+  }
+
+  function remapOpenTabs(oldPath, newPath) {
+    tabs.forEach(tab => {
+      const nextPath = remapPath(tab.path, oldPath, newPath);
+      if (nextPath === tab.path) return;
+      const renamedFile = tab.path === oldPath;
+      tab.path = nextPath;
+      if (renamedFile) tab.name = pathName(nextPath);
+      if (!tab.panel) return;
+      tab.panel.dataset.path = nextPath;
+      const path = tab.panel.querySelector('.library-current-path');
+      if (path) {
+        path.textContent = displayPath(nextPath);
+        path.title = displayPath(nextPath);
+      }
+      if (tab.editor) tab.editor.setAttribute('aria-label', `编辑 ${tab.name}`);
+      // 已载入的 PDF／图片继续保留当前文档实例；重新赋 src 会清空原生 PDF
+      // 阅读器的页码、缩放和滚动。关闭后再次打开时自然使用新路径。
+      if (tab.kind === 'markdown') renderMarkdownContent(tab);
+    });
+    renderAll();
+  }
+
+  function remapTreeEntry(entry, oldPath, newPath) {
+    const node = entry.closest('.library-tree-node');
+    if (!node) return {node: null, hadPendingLoad: false};
+    const childHosts = [...node.querySelectorAll('.library-tree-children')];
+    const hadPendingLoad = childHosts.some(host => Boolean(host.dataset.loading));
+    childHosts.forEach(host => {
+      if (!host.dataset.loading) return;
+      host.dataset.loadVersion = String(Number(host.dataset.loadVersion || 0) + 1);
+      delete host.dataset.loading;
+      host.dataset.loaded = '0';
+    });
+    node.querySelectorAll('[data-path]').forEach(item => {
+      item.dataset.path = remapPath(item.dataset.path || '', oldPath, newPath);
+      if (item.classList.contains('library-tree-entry')) item.title = item.dataset.path;
+    });
+    entry.title = newPath;
+    const label = entry.querySelector('.library-tree-label');
+    if (label) label.textContent = pathName(newPath);
+    sortTreeHost(node.parentElement);
+    return {node, hadPendingLoad};
+  }
+
+  async function createLibraryFolder(parent = '') {
+    const name = await askLibraryName(
+      parent ? `在「${pathName(parent)}」中新建文件夹` : '新建顶层文件夹',
+      '新建文件夹');
+    if (name === null) return;
+    try {
+      const data = await fetchJson('/api/library/folder', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({parent, name}),
+      });
+      let host = tree;
+      if (parent) {
+        const parentEntry = [...tree.querySelectorAll('.library-tree-entry[data-path]')]
+          .find(item => item.dataset.path === parent);
+        const parentNode = parentEntry?.closest('.library-tree-node');
+        host = parentNode?.querySelector(':scope > .library-tree-children') || null;
+        if (!host) return;
+        host.hidden = false;
+        parentEntry.classList.add('is-open');
+        if (host.dataset.loaded !== '1') {
+          await loadChildren(host, parent, 0);
+          showLibraryToast('文件夹已新建');
+          return;
+        }
+      }
+      if (host.dataset.loading || host.dataset.hasMore === '1') {
+        await loadChildren(host, host.dataset.path || parent, 0);
+      } else {
+        appendTreeEntry(host, {...data.entry, name: pathName(data.entry.path)});
+      }
+      showLibraryToast('文件夹已新建');
+    } catch (error) {
+      showLibraryToast(error.message || '新建文件夹失败', true);
+    }
+  }
+
+  async function renameLibraryEntry(entry) {
+    const oldPath = entry.dataset.path;
+    const currentName = entry.querySelector('.library-tree-label')?.textContent || pathName(oldPath);
+    const name = await askLibraryName('重命名', currentName);
+    if (name === null || name === currentName) return;
+    const affected = [...tabs.values()].filter(tab =>
+      tab.path === oldPath || tab.path.startsWith(`${oldPath}/`));
+    if (affected.some(tab => tab.saving)) {
+      showLibraryToast('文件正在保存，请稍后重试', true);
+      return;
+    }
+    try {
+      const data = await fetchJson('/api/library/rename', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path: oldPath, name}),
+      });
+      const newPath = data.entry.path;
+      const host = entry.closest('.library-tree-node')?.parentElement;
+      const wasOpen = entry.classList.contains('is-open');
+      if (host && (host.dataset.loading || host.dataset.hasMore === '1')) {
+        await loadChildren(host, host.dataset.path || parentPath(oldPath), 0);
+        const freshEntry = [...host.querySelectorAll(':scope > .library-tree-node > .library-tree-entry')]
+          .find(item => item.dataset.path === newPath);
+        if (wasOpen && freshEntry?.dataset.kind === 'folder') {
+          const children = freshEntry.closest('.library-tree-node')
+            ?.querySelector(':scope > .library-tree-children');
+          if (children) {
+            children.hidden = false;
+            freshEntry.classList.add('is-open');
+            await loadChildren(children, newPath, 0);
+          }
+        }
+      } else {
+        const remapped = remapTreeEntry(entry, oldPath, newPath);
+        const children = remapped.node
+          ?.querySelector(':scope > .library-tree-children');
+        if (children && remapped.hadPendingLoad) {
+          await loadChildren(children, newPath, 0);
+        }
+      }
+      remapOpenTabs(oldPath, newPath);
+      showLibraryToast('已重命名');
+    } catch (error) {
+      showLibraryToast(error.message || '重命名失败', true);
+    }
+  }
+
+  let contextMenu = null;
+
+  function closeTreeMenu() {
+    contextMenu?.remove();
+    contextMenu = null;
+  }
+
+  function openTreeMenu(entry, clientX, clientY) {
+    closeTreeMenu();
+    if (!entry || isReadOnlyTreePath(entry.dataset.path)) return;
+    const menu = document.createElement('div');
+    menu.className = 'library-tree-menu';
+    menu.setAttribute('role', 'menu');
+    const actions = entry.dataset.kind === 'folder'
+      ? [['new-folder', '新建子文件夹'], ['rename', '重命名']]
+      : [['rename', '重命名']];
+    actions.forEach(([action, label]) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.libraryTreeAction = action;
+      button.textContent = label;
+      button.addEventListener('click', () => {
+        closeTreeMenu();
+        if (action === 'new-folder') createLibraryFolder(entry.dataset.path);
+        else renameLibraryEntry(entry);
+      });
+      menu.append(button);
+    });
+    document.body.append(menu);
+    const rect = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(6, Math.min(clientX, window.innerWidth - rect.width - 6))}px`;
+    menu.style.top = `${Math.max(6, Math.min(clientY, window.innerHeight - rect.height - 6))}px`;
+    contextMenu = menu;
+    menu.querySelector('button')?.focus();
+  }
+
   async function loadChildren(host, path, offset) {
+    host.dataset.path = path;
+    const loadVersion = String(Number(host.dataset.loadVersion || 0) + 1);
+    host.dataset.loadVersion = loadVersion;
+    host.dataset.loading = loadVersion;
     if (!offset) {
       host.replaceChildren();
       const loading = document.createElement('div');
@@ -596,6 +897,7 @@
     }
     try {
       const data = await fetchJson(`/api/library/children?path=${encodeURIComponent(path)}&offset=${offset || 0}`);
+      if (host.dataset.loadVersion !== loadVersion) return null;
       if (!offset) host.replaceChildren();
       data.entries.forEach(entry => host.append(entryNode(entry)));
       if (!data.done) {
@@ -608,15 +910,19 @@
         host.append(more);
       }
       host.dataset.loaded = '1';
+      host.dataset.hasMore = data.done ? '0' : '1';
       markActiveTree();
       return data;
     } catch (error) {
+      if (host.dataset.loadVersion !== loadVersion) return null;
       host.replaceChildren();
       const message = document.createElement('div');
       message.className = 'library-tree-error';
       message.textContent = error.message;
       host.append(message);
       return null;
+    } finally {
+      if (host.dataset.loading === loadVersion) delete host.dataset.loading;
     }
   }
 
@@ -662,6 +968,7 @@
   }
 
   tree.addEventListener('click', event => {
+    closeTreeMenu();
     const more = event.target.closest('.library-tree-more');
     if (more) {
       const host = more.parentElement || tree;
@@ -683,6 +990,20 @@
                     name: entry.querySelector('.library-tree-label')?.textContent});
     }
   });
+
+  tree.addEventListener('contextmenu', event => {
+    const entry = event.target.closest('.library-tree-entry');
+    if (!entry || isReadOnlyTreePath(entry.dataset.path)) return;
+    event.preventDefault();
+    openTreeMenu(entry, event.clientX, event.clientY);
+  });
+
+  newFolderButton?.addEventListener('click', () => createLibraryFolder(''));
+  document.addEventListener('pointerdown', event => {
+    if (contextMenu && !event.target.closest('.library-tree-menu')) closeTreeMenu();
+  });
+  window.addEventListener('blur', closeTreeMenu);
+  window.addEventListener('resize', closeTreeMenu);
 
   window.addEventListener('message', event => {
     if (event.origin !== window.location.origin || event.source !== window.parent
@@ -741,6 +1062,10 @@
   });
 
   document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && contextMenu) {
+      closeTreeMenu();
+      return;
+    }
     const active = focusedPane()?.active;
     const tab = active ? tabs.get(active) : null;
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's'

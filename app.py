@@ -14,6 +14,7 @@ from werkzeug.utils import safe_join
 
 import config
 import filestore
+import library_ops
 import importer
 import mechfix
 import exporter
@@ -444,11 +445,12 @@ def workspace_page():
 
 _LIBRARY_MARKDOWN_EXTS = frozenset({".md", ".markdown"})
 _LIBRARY_PDF_EXTS = frozenset({".pdf"})
+_LIBRARY_WORD_EXTS = frozenset({".doc", ".docx"})
 _LIBRARY_IMAGE_EXTS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
 })
 _LIBRARY_FILE_EXTS = (_LIBRARY_MARKDOWN_EXTS | _LIBRARY_PDF_EXTS
-                       | _LIBRARY_IMAGE_EXTS)
+                       | _LIBRARY_WORD_EXTS | _LIBRARY_IMAGE_EXTS)
 _LIBRARY_HISTORY_PREFIX = ".quizforge-history"
 _LIBRARY_PAGE_SIZE = 300
 _LIBRARY_TEXT_LIMIT = 8 * 1024 * 1024
@@ -476,6 +478,8 @@ def _library_kind(path: Path) -> str | None:
         return "markdown"
     if suffix in _LIBRARY_PDF_EXTS:
         return "pdf"
+    if suffix in _LIBRARY_WORD_EXTS:
+        return "word"
     if suffix in _LIBRARY_IMAGE_EXTS:
         return "image"
     return None
@@ -493,6 +497,30 @@ def _library_entry_kind(path: Path, rel: str) -> str | None:
 def _library_natural_key(name: str) -> tuple:
     return tuple(int(part) if part.isdigit() else part.casefold()
                  for part in re.split(r"(\d+)", name))
+
+
+def _library_operation_error_response(exc: Exception):
+    if isinstance(exc, library_ops.LibraryOperationError):
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+    return jsonify(
+        ok=False, error=f"资料库操作失败：{exc}", code="filesystem_error",
+    ), 400
+
+
+def _library_operation_payload() -> dict:
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise library_ops.LibraryOperationError(
+            "请求内容无效", code="invalid_request")
+    return payload
+
+
+def _library_reject_history_operation(raw: str) -> None:
+    value = str(raw or "").strip().replace("\\", "/")
+    parts = PurePosixPath(value).parts
+    if parts and parts[0] == _LIBRARY_HISTORY_PREFIX:
+        raise library_ops.LibraryOperationError(
+            "历史记录是只读虚拟目录", code="read_only")
 
 
 def _library_history_parts(raw: str) -> tuple[str, ...] | None:
@@ -622,6 +650,32 @@ def library_children():
     next_offset = offset + len(page)
     return jsonify(ok=True, path=rel, entries=page, total=len(entries),
                    next_offset=next_offset, done=next_offset >= len(entries))
+
+
+@app.route("/api/library/folder", methods=["POST"])
+def library_create_folder():
+    try:
+        payload = _library_operation_payload()
+        parent = payload.get("parent", "")
+        _library_reject_history_operation(parent)
+        result = library_ops.create_folder(
+            config.BANK_DIR, parent, payload.get("name", ""))
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, entry=result.as_dict()), 201
+
+
+@app.route("/api/library/rename", methods=["POST"])
+def library_rename():
+    try:
+        payload = _library_operation_payload()
+        path = payload.get("path", "")
+        _library_reject_history_operation(path)
+        result = library_ops.rename_entry(
+            config.BANK_DIR, path, payload.get("name", ""))
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, entry=result.as_dict())
 
 
 @app.route("/api/library/read")

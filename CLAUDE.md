@@ -91,6 +91,8 @@ import_defaults.py  新导入题目的图片位置、方向与逐图布局默认
                     ——只接收科目和配对判定，不读取 Flask 请求或题库
 handouts.py         讲义 schema、题目快照、Markdown 往返与安全原子存储
 handout_exporter.py 讲义题卡局部编译及 PDF/TeX/ZIP 导出适配
+library_ops.py      资料库文件／文件夹的新建、改名、移动与复制安全边界
+                    ——扩展名保真、保留目录只读、路径与符号链接防逃逸
 importer.py         Markdown 题目切分与题号提取
 dedup.py            题目去重检测（基于 SequenceMatcher）
 providers.py        LLM 配置管理（cc-switch 风格，多套可切换）

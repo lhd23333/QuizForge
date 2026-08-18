@@ -2041,10 +2041,17 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-sidebar-head h1 { margin: 0; font-size: 15px; }
 .library-sidebar-head p { margin: 1px 0 0; color: var(--muted); font-size: 11px; }
+.library-sidebar-actions { display: flex; align-items: center; gap: 6px; }
 .library-local-badge {
   padding: 2px 7px; color: var(--primary); background: var(--primary-soft);
   border-radius: 999px; font-size: 10px; font-weight: 700;
 }
+.library-sidebar-action {
+  width: 28px; height: 28px; display: grid; place-items: center; padding: 0;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  color: var(--text-2); font: 18px/1 "Segoe UI", sans-serif; cursor: pointer;
+}
+.library-sidebar-action:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
 .library-tree { flex: 1; overflow: auto; padding: 8px 6px 18px; }
 .library-tree-node { min-width: max-content; }
 .library-tree-entry {
@@ -2066,7 +2073,36 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-file-icon.is-markdown { background: #64748b; }
 .library-file-icon.is-pdf { background: #dc2626; }
+.library-file-icon.is-word { background: #2563eb; }
 .library-file-icon.is-image { background: #7c3aed; }
+.library-tree-menu {
+  position: fixed; z-index: 1200; min-width: 142px; padding: 4px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+.library-tree-menu button {
+  width: 100%; padding: 7px 9px; border: 0; border-radius: 4px; background: transparent;
+  color: var(--text); text-align: left; font: inherit; font-size: 12px; cursor: pointer;
+}
+.library-tree-menu button:hover, .library-tree-menu button:focus-visible { background: var(--surface-2); outline: 0; }
+.library-name-dialog {
+  width: min(360px, calc(100vw - 32px)); padding: 0; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg);
+}
+.library-name-dialog::backdrop { background: rgb(15 23 42 / 30%); }
+.library-name-dialog form { display: grid; gap: 14px; padding: 18px; }
+.library-name-dialog h2 { margin: 0; font-size: 15px; }
+.library-name-dialog input {
+  width: 100%; min-width: 0; padding: 8px 10px; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--surface); color: var(--text); font: inherit;
+}
+.library-name-dialog input:focus { border-color: var(--primary); outline: 2px solid var(--primary-soft); }
+.library-name-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.library-name-actions button {
+  min-width: 68px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); color: var(--text); font: inherit; cursor: pointer;
+}
+.library-name-actions button.is-primary { border-color: var(--primary); background: var(--primary); color: #fff; }
 .library-loading, .library-tree-error { padding: 12px 10px; color: var(--muted); font-size: 12px; }
 .library-tree-error { color: var(--danger); }
 .library-tree-more {
@@ -2138,6 +2174,21 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-empty h2 { margin: 14px 0 3px; color: var(--text); font-size: 18px; }
 .library-empty p { max-width: 470px; margin: 0; font-size: 13px; }
+.library-word-state {
+  height: 100%; display: grid; align-content: center; justify-items: center;
+  padding: 30px; color: var(--muted); text-align: center;
+}
+.library-word-mark {
+  width: 52px; height: 52px; display: grid; place-items: center; border-radius: 8px;
+  background: #2563eb; color: #fff; font-size: 22px; font-weight: 800;
+}
+.library-word-state h2 { margin: 14px 0 4px; color: var(--text); font-size: 18px; }
+.library-word-state p { margin: 0; font-size: 13px; }
+.library-word-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 16px; }
+.library-word-actions button {
+  min-width: 104px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12px;
+}
 .library-document-panel { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); }
 .library-document-panel[hidden] { display: none !important; }
 .library-view-toolbar {
