@@ -10,6 +10,7 @@ class SearchQueryTests(unittest.TestCase):
         self.record = {
             "body": "求二次函数的最小值",
             "solution": "使用配方法构造完全平方",
+            "note": "容易忽略定义域限制",
             "tags": ["高中数学", "函数"],
             "source": "2026 北京期中考试",
             "type": "解答题",
@@ -18,7 +19,7 @@ class SearchQueryTests(unittest.TestCase):
         }
 
     def test_plain_text_searches_body_solution_tags_and_source(self):
-        for text in ("二次函数", "配方法", "高中数学", "北京期中"):
+        for text in ("二次函数", "配方法", "定义域", "高中数学", "北京期中"):
             with self.subTest(text=text):
                 self.assertTrue(matches_search(self.record, parse_search_query(text)))
         self.assertFalse(matches_search(self.record, parse_search_query("立体几何")))
@@ -26,7 +27,7 @@ class SearchQueryTests(unittest.TestCase):
     def test_structured_fields_and_quoted_value_are_combined_with_and(self):
         query = parse_search_query(
             'content:"二次函数" solution:配方法 tag:函数 '
-            'source:期中 type:解答题 difficulty:3 starred:true')
+            'note:定义域 source:期中 type:解答题 difficulty:3 starred:true')
 
         self.assertTrue(query.structured)
         self.assertTrue(matches_search(self.record, query))

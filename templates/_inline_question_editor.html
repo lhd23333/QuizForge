@@ -29,12 +29,21 @@
         <textarea class="input inline-solution-source" rows="6" spellcheck="false"
                   placeholder="可选：输入答案或解析…">{{ q['solution'] or '' }}</textarea>
       </label>
+      <label class="inline-field">
+        <span>备注</span>
+        <textarea class="input inline-note-source" rows="4" spellcheck="false"
+                  placeholder="可选：记录易错点、讲法或使用提示…">{{ q['note'] or '' }}</textarea>
+      </label>
     </div>
     <div class="inline-preview-pane" aria-live="polite">
       <div class="inline-preview-status">{{ '输入题目后显示预览' if is_new_editor else '正在编译预览…' }}</div>
       <div class="inline-preview-body body-structured"></div>
       <div class="inline-preview-solution" hidden>
         <div class="inline-preview-solution-body body-structured"></div>
+      </div>
+      <div class="inline-preview-note" hidden>
+        <strong>备注</strong>
+        <div class="inline-preview-note-body body-structured"></div>
       </div>
     </div>
   </div>

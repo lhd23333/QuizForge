@@ -8,7 +8,7 @@ from typing import Any
 
 
 SUPPORTED_FIELDS = frozenset({
-    "tag", "content", "solution", "source", "type", "difficulty", "starred",
+    "tag", "content", "solution", "note", "source", "type", "difficulty", "starred",
 })
 _TRUE_VALUES = frozenset({"1", "true", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "off"})
@@ -108,6 +108,7 @@ def _matches_any(record: Mapping[str, Any], needle: str) -> bool:
     return (
         _contains(record.get("body"), needle)
         or _contains(record.get("solution"), needle)
+        or _contains(record.get("note"), needle)
         or _contains(record.get("source"), needle)
         or any(_contains(tag, needle) for tag in record.get("tags", []))
     )
@@ -134,6 +135,8 @@ def matches_search(
             matched = _contains(record.get("body"), str(value))
         elif field == "solution":
             matched = _contains(record.get("solution"), str(value))
+        elif field == "note":
+            matched = _contains(record.get("note"), str(value))
         elif field == "source":
             matched = _contains(record.get("source"), str(value))
         elif field in {"type", "difficulty"}:

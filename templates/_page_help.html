@@ -22,7 +22,7 @@
 {% endif %}
 <template id="page-help-content" data-help-title="{{ help_title }}">
   {% if endpoint == 'index' %}
-    <h3>题目范围</h3><p>左侧可按文件夹、标签、题型和难度筛选。搜索支持普通文本与结构化条件。</p>
+    <h3>题目范围</h3><p>左侧可按文件夹、标签、题型和难度筛选。普通搜索会查题干、解析、备注、题源和标签，也可用 <code>note:</code> 等结构化条件。</p>
     <h3>组卷</h3><p>勾选题目后打开选题篮，调整顺序与版式，再选择 HTML 近似预览、本机 PDF 或 TeX ZIP。</p>
     <h3>本地文件</h3><p>每道题都是题库目录中的 Markdown 文件。移动、重命名和编辑会直接写入当前题库。</p>
   {% elif endpoint.startswith('handouts') %}

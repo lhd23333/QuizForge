@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 from pathlib import Path
 from unittest import mock
 
@@ -1327,6 +1327,64 @@ class PageTests(unittest.TestCase):
             for call in export_mock.call_args_list
         ))
 
+    def test_html_preview_returns_registered_inline_document(self):
+        question = {
+            "id": "html-preview", "body": "近似预览题 $x^2$", "solution": "答案",
+            "type": "填空题", "difficulty": "3", "img_align": "",
+            "img_width": None, "img_split": None, "img_layouts": [],
+            "sol_img_split": None, "sol_img_layouts": [],
+        }
+        with (mock.patch.object(app_module, "_collect_questions",
+                                return_value=[question]),
+              mock.patch.object(
+                  app_module.service_ports, "export_document",
+                  side_effect=AssertionError("HTML 近似预览不应启动 TeX"))):
+            response = app_module.app.test_client().post(
+                "/preview", data={"preview_kind": "html", "title": "近似预览"},
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        preview = app_module.app.test_client().get(payload["url"])
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.mimetype, "text/html")
+        self.assertIn("近似预览题", preview.get_data(as_text=True))
+        self.assertIn("katex.min.js", preview.get_data(as_text=True))
+        preview.close()
+
+    def test_single_question_tex_zip_uses_one_record_and_download_name(self):
+        qid = app_module.filestore.create_question(
+            "单题导出正文", solution="单题导出解析", note="内部备注不应导出",
+            qtype="解答题", number=6)
+        produced = config.OUTPUT_DIR / "single-question.zip"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+
+        with (mock.patch.object(
+                app_module.filestore, "list_questions",
+                side_effect=AssertionError("单题导出不应扫描整座题库")),
+              mock.patch.object(
+                  app_module.service_ports, "export_document",
+                  return_value=produced) as export_mock):
+            response = app_module.app.test_client().post(
+                f"/question/{qid}/export-tex-zip",
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["filename"], "第6题.tex.zip")
+        self.assertEqual(export_mock.call_args.kwargs["fmt"], "zip")
+        self.assertEqual(export_mock.call_args.kwargs["solution_mode"], "inline")
+        exported_question = export_mock.call_args.args[0][0]
+        self.assertEqual(exported_question["body"], "单题导出正文")
+        self.assertNotIn("note", exported_question)
+        download = app_module.app.test_client().get(payload["url"])
+        download_status = download.status_code
+        disposition = unquote(download.headers["Content-Disposition"])
+        download.close()
+        self.assertEqual(download_status, 200)
+        self.assertIn("第6题.tex.zip", disposition)
+
     def test_homepage_exposes_docx_and_marks_pdf_only_controls(self):
         page = app_module.app.test_client().get("/?all=1")
 
@@ -1455,13 +1513,14 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
     def test_inline_preview_is_read_only_and_save_replaces_one_card(self):
         qid = app_module.filestore.create_question(
             "原正文 $x$", solution="【解析】原解析", qtype="单选题",
-            source="原题源", difficulty="2", tags=["旧标签"])
+            source="原题源", difficulty="2", tags=["旧标签"], note="原备注")
         rec = app_module.filestore.get_question(qid)
         path = config.BANK_DIR / rec["path"]
         before = path.read_bytes()
         payload = {
             "body": "新正文 $x^2$\n\nA. 1\n\nB. 2",
             "solution": "新解析 $2$",
+            "note": "新备注：注意定义域 $x>0$",
             "type": "单选题",
             "source": "新题源",
             "difficulty": "4",
@@ -1473,6 +1532,7 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
             f"/question/{qid}/preview", json=payload, headers=self.headers)
         self.assertEqual(preview.status_code, 200)
         self.assertIn("新正文", preview.get_json()["body_html"])
+        self.assertIn("注意定义域", preview.get_json()["note_html"])
         self.assertEqual(path.read_bytes(), before)
 
         saved = self.client.post(
@@ -1483,9 +1543,12 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertIn("源码模式", card_html)
         self.assertIn("实时编译", card_html)
         self.assertIn("阅读模式", card_html)
+        self.assertIn('<details class="q-note">', card_html)
+        self.assertIn("注意定义域", card_html)
         updated = app_module.filestore.get_question(qid)
         self.assertEqual(updated["body"], payload["body"])
         self.assertEqual(updated["solution"], payload["solution"])
+        self.assertEqual(updated["note"], payload["note"])
         self.assertEqual(updated["difficulty"], "4")
         self.assertEqual(updated["tags"], ["代数", "校内"])
 

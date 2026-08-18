@@ -11,6 +11,7 @@
     return {
       body: editor.querySelector('.inline-body-source'),
       solution: editor.querySelector('.inline-solution-source'),
+      note: editor.querySelector('.inline-note-source'),
       type: editor.querySelector('.inline-type'),
       difficulty: editor.querySelector('.inline-difficulty'),
       source: editor.querySelector('.inline-source'),
@@ -23,6 +24,7 @@
     return {
       body: fields.body.value,
       solution: fields.solution.value,
+      note: fields.note.value,
       type: fields.type.value,
       difficulty: fields.difficulty.value,
       source: fields.source.value,
@@ -59,12 +61,16 @@
     const body = editor.querySelector('.inline-preview-body');
     const solutionBox = editor.querySelector('.inline-preview-solution');
     const solutionBody = editor.querySelector('.inline-preview-solution-body');
+    const noteBox = editor.querySelector('.inline-preview-note');
+    const noteBody = editor.querySelector('.inline-preview-note-body');
     const generation = (previewGenerations.get(editor) || 0) + 1;
     previewGenerations.set(editor, generation);
     if (editor.dataset.new === '1' && !controls(editor).body.value.trim()) {
       body.innerHTML = '';
       solutionBody.innerHTML = '';
       solutionBox.hidden = true;
+      noteBody.innerHTML = '';
+      noteBox.hidden = true;
       status.hidden = false;
       status.textContent = '输入题目后显示预览';
       status.classList.remove('is-error');
@@ -89,6 +95,8 @@
       body.innerHTML = data.body_html || '';
       solutionBody.innerHTML = data.solution_html || '';
       solutionBox.hidden = !data.solution_html;
+      noteBody.innerHTML = data.note_html || '';
+      noteBox.hidden = !data.note_html;
       status.hidden = true;
       window.QMath?.typeset(editor.querySelector('.inline-preview-pane'));
     } catch (error) {

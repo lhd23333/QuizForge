@@ -196,6 +196,14 @@ def qsolution_filter(q):
                                    q.get("sol_img_split"))
 
 
+@app.template_filter("qnote")
+def qnote_filter(q):
+    """备注使用普通 Markdown/KaTeX 渲染，不套用题型或解析前缀规则。"""
+    if not q:
+        return Markup("")
+    return qrender.render_body(q.get("note") or "")
+
+
 @app.template_global("qfig_groups")
 def qfig_groups(q) -> str:
     """「连续两图」的分组，JSON 串（`[{"ids":[1,2],"row":true}, ...]`）。
@@ -1035,10 +1043,12 @@ def _inline_question_payload():
     data = request.get_json(silent=True) or {}
     body = str(data.get("body") or "").strip()
     solution = str(data.get("solution") or "").strip()
+    note = str(data.get("note") or "").strip()
     if not body:
         return None, (jsonify(ok=False, error="题目正文不能为空"), 400)
-    if len(body.encode("utf-8")) + len(solution.encode("utf-8")) > _MAX_INLINE_MARKDOWN_BYTES:
-        return None, (jsonify(ok=False, error="单题正文与解析不能超过 2 MB"), 413)
+    if (len(body.encode("utf-8")) + len(solution.encode("utf-8"))
+            + len(note.encode("utf-8")) > _MAX_INLINE_MARKDOWN_BYTES):
+        return None, (jsonify(ok=False, error="单题正文、解析与备注合计不能超过 2 MB"), 413)
     type_ = str(data.get("type") or "").strip()
     difficulty = str(data.get("difficulty") or "").strip()
     if type_ and type_ not in config.QUESTION_TYPES:
@@ -1053,6 +1063,7 @@ def _inline_question_payload():
     return {
         "body": body,
         "solution": solution,
+        "note": note,
         "type": type_,
         "difficulty": difficulty,
         "source": str(data.get("source") or "").strip(),
@@ -1076,8 +1087,9 @@ def question_inline_preview(qid):
         img_align=rec.get("img_align"), img_split=rec.get("img_split"))
     solution_html = qrender.render_solution(
         payload["solution"], rec.get("sol_img_layouts"), rec.get("sol_img_split"))
+    note_html = qrender.render_body(payload["note"])
     return jsonify(ok=True, body_html=str(body_html),
-                   solution_html=str(solution_html))
+                   solution_html=str(solution_html), note_html=str(note_html))
 
 
 @app.route("/question/inline-draft")
@@ -1088,7 +1100,7 @@ def question_inline_draft():
     if folder and not collection:
         return jsonify(ok=False, error="目标文件夹不存在"), 404
     q = {
-        "id": "", "body": "", "solution": "", "type": "", "source": "",
+        "id": "", "body": "", "solution": "", "note": "", "type": "", "source": "",
         "difficulty": "", "tags": [],
     }
     card_html = render_template(
@@ -1106,8 +1118,9 @@ def question_inline_create_preview():
         return error
     body_html = qrender.render_body(payload["body"], payload["type"])
     solution_html = qrender.render_solution(payload["solution"])
+    note_html = qrender.render_body(payload["note"])
     return jsonify(ok=True, body_html=str(body_html),
-                   solution_html=str(solution_html))
+                   solution_html=str(solution_html), note_html=str(note_html))
 
 
 @app.route("/question/inline-create", methods=["POST"])
@@ -1123,7 +1136,8 @@ def question_inline_create():
     qid = filestore.create_question(
         payload["body"], solution=payload["solution"],
         qtype=payload["type"], source=payload["source"],
-        difficulty=payload["difficulty"], tags=payload["tags"], folder=folder)
+        difficulty=payload["difficulty"], tags=payload["tags"], folder=folder,
+        note=payload["note"])
     rec = filestore.get_question(qid)
     card_html = render_template(
         "_question_card.html", q=rec, types=config.QUESTION_TYPES,
@@ -1142,7 +1156,8 @@ def question_inline_update(qid):
     filestore.update_question(
         qid, payload["body"], solution=payload["solution"],
         qtype=payload["type"], source=payload["source"],
-        difficulty=payload["difficulty"], tags=payload["tags"])
+        difficulty=payload["difficulty"], tags=payload["tags"],
+        note=payload["note"])
     rec = filestore.get_question(qid)
     card_html = render_template(
         "_question_card.html", q=rec, types=config.QUESTION_TYPES,
@@ -1166,6 +1181,7 @@ def _save_from_form(qid=None):
     """从表单读字段，新增或更新。返回题目 id（新增时是新生成的那个）。"""
     body = request.form.get("body", "").strip()
     solution = request.form.get("solution", "").strip()
+    note = request.form.get("note", "").strip()
     type_ = request.form.get("type") or ""
     source = request.form.get("source", "").strip()
     difficulty = request.form.get("difficulty") or ""
@@ -1173,10 +1189,10 @@ def _save_from_form(qid=None):
     if qid is None:
         return filestore.create_question(body, solution=solution, qtype=type_,
                                          source=source, difficulty=difficulty,
-                                         tags=tag_names)
+                                         tags=tag_names, note=note)
     filestore.update_question(qid, body, solution=solution, qtype=type_,
                               source=source, difficulty=difficulty,
-                              tags=tag_names)
+                              tags=tag_names, note=note)
     return qid
 
 
@@ -5599,6 +5615,24 @@ def import_md():
 # ---------------------------------------------------------------------------
 
 
+def _question_export_payload(record: dict) -> dict:
+    """题库记录收敛为导出器字段；备注是内部整理信息，不进入交付产物。"""
+    return {
+        "id": record["id"], "body": record["body"], "type": record["type"],
+        # 双栏刷题的解答题作答区会结合难度与一级小问数计算；漏传时
+        # exporter 只能把所有未知难度都按 3 处理，题卡上调的难度就失效。
+        "difficulty": record["difficulty"],
+        "solution": record["solution"], "img_align": record["img_align"],
+        "img_width": record["img_width"], "img_split": record["img_split"],
+        # 多图逐图排版设置（见 exporter._parse_layouts）；老题为空列表时导出
+        # 退回 img_width/img_align 的单图行为。
+        "img_layouts": record["img_layouts"],
+        # 解析里的图片排版设置，序号与题干各自独立编号。
+        "sol_img_split": record["sol_img_split"],
+        "sol_img_layouts": record["sol_img_layouts"],
+    }
+
+
 def _collect_questions(scope: str) -> list[dict]:
     """按 scope 从库里取题目 dict 列表（export 与 preview 共用）。"""
     tags = [t for t in request.form.get("tags", "").split(",") if t.strip()]
@@ -5610,21 +5644,27 @@ def _collect_questions(scope: str) -> list[dict]:
         rows = filestore.list_questions(tags=tags, match=match, qtype=type_)
     else:
         rows = filestore.list_questions()
-    return [{"id": r["id"], "body": r["body"], "type": r["type"],
-             # 双栏刷题的解答题作答区会结合难度与一级小问数计算；漏传时
-             # exporter 只能把所有未知难度都按 3 处理，题卡上调的难度就失效。
-             "difficulty": r["difficulty"],
-             "solution": r["solution"], "img_align": r["img_align"],
-             "img_width": r["img_width"], "img_split": r["img_split"],
-             # 多图逐图排版设置（见 exporter._parse_layouts）；
-             # 老题为空列表时导出退回 img_width/img_align 的单图行为
-             "img_layouts": r["img_layouts"],
-             # 解析里的图片排版设置，序号与题干各自独立编号。
-             # 漏传这一项时 exporter._img_fields 取到 None，解析里的图会退回
-             # 默认宽度/对齐——页面上调好的解析配图排版在导出里看不见。
-             "sol_img_split": r["sol_img_split"],
-             "sol_img_layouts": r["sol_img_layouts"]}
-            for r in rows]
+    return [_question_export_payload(record) for record in rows]
+
+
+@app.route("/question/<qid>/export-tex-zip", methods=["POST"])
+def question_export_tex_zip(qid):
+    """只导出当前题的便携 TeX ZIP，包含题干、图片和解析。"""
+    record = filestore.get_question(qid)
+    if not record:
+        return jsonify(ok=False, error="题目不存在"), 404
+    label = (f"第{record['number']}题" if record.get("number") is not None
+             else f"题目-{qid[:8]}")
+    try:
+        out_path = service_ports.export_document(
+            [_question_export_payload(record)], title=label, fmt="zip",
+            mode="list", solution_mode="inline", bank_subject=config.BANK_SUBJECT)
+    except exporter.ExportError as exc:
+        return jsonify(ok=False, error=f"单题导出失败：{exc}"), 500
+    name = (filestore.safe_folder_name(label) or "单题") + ".tex.zip"
+    token = _register_out_file(out_path, name)
+    return jsonify(ok=True, url=url_for("out_file", token=token, dl=1),
+                   filename=name)
 
 
 def _read_export_params():
@@ -5747,6 +5787,7 @@ def out_file(token):
     known_types = {
         ".pdf": "application/pdf",
         ".svg": "image/svg+xml",
+        ".html": "text/html",
         ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
     kwargs = {}
@@ -5776,13 +5817,15 @@ def preview():
 
     if request.form.get("preview_kind", "pdf") == "html":
         config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        token = secrets.token_urlsafe(24)
-        path = config.OUTPUT_DIR / f"html-preview-{token}.html"
+        filename_token = secrets.token_urlsafe(24)
+        path = config.OUTPUT_DIR / f"html-preview-{filename_token}.html"
         path.write_text(render_template(
             "preview_html.html", title=p["title"], questions=questions,
         ), encoding="utf-8")
-        _register_out_file(path, f"{p['title'] or '试卷'}-预览.html")
-        return jsonify(ok=True, url=url_for("out_file", token=token))
+        # 文件名随机串只负责避免磁盘重名；浏览器必须使用登记后返回的取件号。
+        # 两者混用时 POST 本身成功，但第二跳 `/outfile/...` 查不到记录并返回 404。
+        out_token = _register_out_file(path, f"{p['title'] or '试卷'}-预览.html")
+        return jsonify(ok=True, url=url_for("out_file", token=out_token))
 
     try:
         out_path = service_ports.export_document(

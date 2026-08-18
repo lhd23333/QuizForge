@@ -199,7 +199,7 @@
         <input type="hidden" name="{{ name }}" value="{{ value }}">
       {% endfor %}
       <input type="text" name="q" value="{{ search or '' }}" class="input"
-             placeholder="搜索，或输入 tag: / content: / source: …">
+             placeholder="搜索，或输入 tag: / content: / note: / source: …">
       <button type="submit" class="btn">搜索</button>
       {% if search %}<a href="{{ search_clear_url }}" class="btn btn-ghost" id="search-clear">清除</a>{% endif %}
     </form>
@@ -357,11 +357,11 @@
       </form>
     </div>
 
-    <!-- 预览弹层（真实 PDF，iframe 嵌入） -->
+    <!-- PDF 与 HTML 近似预览共用同源 iframe 弹层。 -->
     <div id="preview-overlay" class="preview-overlay hidden">
       <div class="preview-modal">
         <div class="preview-bar">
-          <b>PDF 预览</b>
+          <b id="preview-title">预览</b>
           <span id="preview-info" class="muted"></span>
           <div class="spacer"></div>
           {# 兜底出口：Obsidian 里这个 iframe 是嵌在插件的 iframe 里的（两层），
@@ -371,7 +371,7 @@
              rel="noopener" style="display:none">在新窗口打开</a>
           <button type="button" class="btn btn-ghost" id="preview-close">关闭</button>
         </div>
-        <iframe id="preview-frame" class="preview-frame" title="PDF 预览"></iframe>
+        <iframe id="preview-frame" class="preview-frame" title="预览"></iframe>
       </div>
     </div>
 
@@ -1277,6 +1277,7 @@ if (exportFormatSel) {
 const previewBtn = document.getElementById('preview-btn');
 const overlay = document.getElementById('preview-overlay');
 const frame = document.getElementById('preview-frame');
+const previewTitle = document.getElementById('preview-title');
 const previewInfo = document.getElementById('preview-info');
 const previewOpen = document.getElementById('preview-open');
 const embedded = window.parent !== window;   // 被 Obsidian 插件嵌着
@@ -1307,6 +1308,9 @@ if (previewBtn) {
     fd.set('fmt', 'pdf');
     const previewKind = document.getElementById('preview-kind')?.value || 'pdf';
     fd.set('preview_kind', previewKind);
+    const previewLabel = previewKind === 'html' ? 'HTML/KaTeX 近似预览' : 'PDF 预览';
+    previewTitle.textContent = previewLabel;
+    frame.title = previewLabel;
     previewInfo.textContent = previewKind === 'html' ? '正在生成 HTML/KaTeX 预览…' : '正在生成 PDF…';
     overlay.classList.remove('hidden');
     frame.src = 'about:blank';
@@ -1330,6 +1334,21 @@ if (previewBtn) {
 
 // 导出：接管表单提交（原先是普通 submit + as_attachment 附件响应）
 const exportForm = document.getElementById('export-form');
+function deliverExport(data) {
+  if (embedded) {
+    window.parent.postMessage({source: 'quizforge', type: 'download',
+                               url: new URL(data.url, location.href).href,
+                               filename: data.filename}, '*');
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = data.url;
+  a.download = data.filename || '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 if (exportForm) {
   exportForm.addEventListener('submit', async e => {
     e.preventDefault();
@@ -1338,20 +1357,8 @@ if (exportForm) {
     if (btn) { btn.disabled = true; btn.textContent = '正在生成…'; }
     try {
       const data = await postForExport('/export', new FormData(exportForm));
-      if (embedded) {
-        // Obsidian 里：地址交给插件，由它用主进程的 requestUrl 抓下来落盘。
-        // 这里不等回执——插件那边成功与否会自己弹 Notice，页面拿不到也管不着。
-        window.parent.postMessage({source: 'quizforge', type: 'download',
-                                   url: new URL(data.url, location.href).href,
-                                   filename: data.filename}, '*');
-      } else {
-        const a = document.createElement('a');
-        a.href = data.url;
-        a.download = data.filename || '';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-      }
+      // Obsidian/桌面壳由父页面落盘；普通浏览器使用原生下载。
+      deliverExport(data);
     } catch (err) {
       alert('导出失败：' + err.message);
     } finally {
@@ -1374,6 +1381,22 @@ function syncHiddenFormContext(formId, doc) {
     current.appendChild(source.cloneNode(true));
   });
 }
+
+// 单题 TeX ZIP 复用正式导出器，只读取当前题卡，不改选题篮或整页状态。
+listEl?.addEventListener('click', async event => {
+  const button = event.target.closest('.single-tex-export');
+  if (!button) return;
+  button.disabled = true;
+  try {
+    const data = await postForExport(button.dataset.url, new FormData());
+    deliverExport(data);
+    flashToast('单题 TeX ZIP 已生成');
+  } catch (error) {
+    flashToast(error.message || '单题导出失败', 'err');
+  } finally {
+    button.disabled = false;
+  }
+});
 
 function syncContextLink(linkId, doc) {
   const current = document.getElementById(linkId);

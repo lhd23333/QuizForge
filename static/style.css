@@ -928,6 +928,9 @@ html.desktop-host .papers-upload .input { padding: 5px 8px; }
 .q-solution > summary { width: fit-content; cursor: pointer; color: var(--success); font-size: 0.9em; user-select: none; }
 .q-solution .solution-body { margin-top: var(--sp-2); padding: 10px 12px; background: var(--surface-2); border-radius: var(--radius-sm); color: var(--text-2); }
 .q-solution .img-layout-bar + .solution-body { margin-top: var(--sp-2); }
+.q-note { margin-top: var(--sp-2); border-top: 1px dashed var(--border-strong); padding-top: var(--sp-2); }
+.q-note > summary { width: fit-content; cursor: pointer; color: var(--primary); font-size: 0.9em; user-select: none; }
+.q-note .note-body { margin-top: var(--sp-2); padding: 10px 12px; background: var(--primary-soft); border-radius: var(--radius-sm); color: var(--text-2); }
 .qcard-sol-wrap { margin-top: 6px; }
 .qcard-sol-wrap > summary { cursor: pointer; font-size: 0.85em; }
 .qcard-solution { margin-top: 6px; }
@@ -965,6 +968,8 @@ html.desktop-host .import-box { padding: 14px; border-radius: 8px; box-shadow: n
   padding: 0; border: 0; background: transparent; font-family: inherit;
 }
 .card-edit-button { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.single-tex-export { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.single-tex-export:disabled { opacity: .55; cursor: wait; }
 .card-control-group { position: relative; display: inline-flex; align-items: center; }
 .question-popover[hidden] { display: none !important; }
 html.desktop-host .card-head { gap: 6px; margin-bottom: 7px; flex-wrap: wrap; }
@@ -1143,6 +1148,7 @@ html.desktop-host .desktop-card-more { display: inline-flex; }
    且排版器量不到盒子尺寸（display:none 里的元素排版结果不可靠）。 */
 .math-pending .body,
 .math-pending .solution-body,
+.math-pending .note-body,
 .math-pending .qcard-render,
 .math-pending .qcard-solution { visibility: hidden; }
 
@@ -1837,6 +1843,8 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .inline-preview-status { color: var(--muted); font-size: 12px; }
 .inline-preview-status.is-error, .inline-save-status.is-error { color: var(--danger); }
 .inline-preview-solution { margin-top: 18px; border-top: 1px dashed var(--border); padding-top: 10px; }
+.inline-preview-note { margin-top: 18px; border-top: 1px dashed var(--border); padding-top: 10px; }
+.inline-preview-note > strong { display: block; margin-bottom: 6px; color: var(--primary); font-size: 12px; }
 .inline-editor-workbench[data-mode="source"] { grid-template-columns: 1fr; }
 .inline-editor-workbench[data-mode="source"] .inline-preview-pane { display: none; }
 .inline-editor-workbench[data-mode="read"] { grid-template-columns: 1fr; }

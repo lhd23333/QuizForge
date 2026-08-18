@@ -82,6 +82,11 @@
     <button type="button" class="link inline-edit-trigger card-edit-button" title="在当前题卡原地编辑">
       <span aria-hidden="true">✎</span><span>编辑</span>
     </button>
+    <button type="button" class="link single-tex-export"
+            data-url="{{ url_for('question_export_tex_zip', qid=q['id']) }}"
+            title="把当前题目、图片和解析导出为 TeX ZIP">
+      <span aria-hidden="true">⇩</span><span>TeX ZIP</span>
+    </button>
     <div class="desktop-card-more card-control-group">
       <button type="button" class="card-more-trigger" data-card-popover-trigger="more"
               aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>
@@ -196,6 +201,12 @@
         </div>
       {% endif %}
       <div class="solution-body body-structured">{{ q | qsolution }}</div>
+    </details>
+  {% endif %}
+  {% if q['note'] %}
+    <details class="q-note">
+      <summary>备注</summary>
+      <div class="note-body body-structured">{{ q | qnote }}</div>
     </details>
   {% endif %}
   <div class="tags">

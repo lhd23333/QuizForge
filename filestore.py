@@ -214,6 +214,23 @@ def _join_sections(stem: str, solution: str | None,
     return "\n\n".join(p for p in parts if p) + "\n"
 
 
+def _replace_note_section(extra: list[tuple[str, str]], note: str) -> list[tuple[str, str]]:
+    """替换首个备注分区并去掉重复备注，其余用户自定义分区保持原位。"""
+    clean_note = str(note or "").strip()
+    out: list[tuple[str, str]] = []
+    inserted = False
+    for heading, content in extra:
+        if heading != "备注":
+            out.append((heading, content))
+            continue
+        if not inserted and clean_note:
+            out.append(("备注", clean_note))
+        inserted = True
+    if not inserted and clean_note:
+        out.append(("备注", clean_note))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # frontmatter 读写
 # ---------------------------------------------------------------------------
@@ -370,11 +387,14 @@ def _write_raw(path: Path, meta: dict, body: str):
 def _to_record(path: Path, meta: dict, body: str) -> dict:
     stem, sections = _split_sections(body)
     solution = ""
+    note = ""
     extra = []
     for heading, content in sections:
         if heading == "解析" and not solution:
             solution = content
         else:
+            if heading == "备注" and not note:
+                note = content
             extra.append((heading, content))
     rel = path.relative_to(config.BANK_DIR)
     folder = str(PurePosixPath(rel.parent.as_posix())) if rel.parent != Path(".") else ""
@@ -385,6 +405,7 @@ def _to_record(path: Path, meta: dict, body: str) -> dict:
         "folder": folder,
         "body": stem,
         "solution": solution,
+        "note": note,
         "extra_sections": extra,
         "type": meta.get("type", ""),
         "difficulty": str(meta.get("difficulty", "") or ""),
@@ -1217,11 +1238,11 @@ def _question_filename(target_dir: Path, qid: str, number: int | None) -> Path:
 def create_question(body: str, solution: str = "", qtype: str = "",
                      source: str = "", difficulty: str = "",
                      tags: list[str] | None = None, folder: str = "",
-                     number: int | None = None) -> str:
+                     number: int | None = None, note: str = "") -> str:
     return create_questions_batch([{
         "body": body, "solution": solution, "type": qtype,
         "source": source, "difficulty": difficulty, "tags": tags or [],
-        "number": number,
+        "number": number, "note": note,
     }], folder)[0]
 
 
@@ -1293,9 +1314,11 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
                     meta["sol_img_split"] = item["sol_img_split"]
                 if isinstance(item.get("sol_img_layouts"), list):
                     meta["sol_img_layouts"] = list(item["sol_img_layouts"])
+                note = str(item.get("note") or "").strip()
+                extra = [("备注", note)] if note else []
                 full_body = _join_sections(
                     str(item.get("body") or ""),
-                    str(item.get("solution") or ""), [],)
+                    str(item.get("solution") or ""), extra)
 
                 existing = existing_by_id.get(qid)
                 if existing is not None:
@@ -1498,7 +1521,7 @@ def refresh_questions_batch(items: list[dict], previous_items: list[dict],
 
 def update_question(qid: str, body: str, solution: str = "", qtype: str = "",
                      source: str = "", difficulty: str = "",
-                     tags: list[str] | None = None):
+                     tags: list[str] | None = None, note: str | None = None):
     rec = get_question(qid)
     if not rec:
         raise KeyError(qid)
@@ -1511,7 +1534,10 @@ def update_question(qid: str, body: str, solution: str = "", qtype: str = "",
         "tags": list(tags) if tags is not None else rec["tags"],
         "updated": _now_iso(),
     })
-    full_body = _join_sections(body, solution, rec["extra_sections"])
+    extra = rec["extra_sections"]
+    if note is not None:
+        extra = _replace_note_section(extra, note)
+    full_body = _join_sections(body, solution, extra)
     with _write_lock:
         _write_raw(path, meta, full_body)
 

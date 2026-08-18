@@ -10,6 +10,27 @@ import filestore
 
 
 class FilestoreBatchCreateTests(unittest.TestCase):
+    def test_note_round_trip_and_body_update_preserves_existing_note(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            qid = filestore.create_question(
+                "原题干", solution="原解析", note="容易忽略定义域")
+            created = filestore.get_question(qid)
+            filestore.update_question(
+                qid, "修改后的题干", solution="修改后的解析")
+            preserved = filestore.get_question(qid)
+            filestore.update_question(
+                qid, preserved["body"], solution=preserved["solution"], note="新备注")
+            updated = filestore.get_question(qid)
+            raw = (Path(td) / updated["path"]).read_text(encoding="utf-8")
+
+        self.assertEqual(created["note"], "容易忽略定义域")
+        self.assertEqual(preserved["note"], "容易忽略定义域")
+        self.assertEqual(updated["note"], "新备注")
+        self.assertEqual(raw.count("## 备注"), 1)
+
     def test_batch_scans_order_once_and_keeps_sequence(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(config, "BANK_DIR", Path(td)):

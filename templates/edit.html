@@ -20,6 +20,12 @@
       placeholder="题目的解析 / 答案，留空则无">{{ q['solution'] if q and q['solution'] else '' }}</textarea>
   </div>
 
+  <div class="field">
+    <label>备注（可选，可通过普通搜索或 <code>note:</code> 查找）</label>
+    <textarea name="note" rows="4" class="input"
+      placeholder="记录易错点、讲法或使用提示">{{ q['note'] if q and q['note'] else '' }}</textarea>
+  </div>
+
   <div class="row">
     <div class="field">
       <label>题型</label>
