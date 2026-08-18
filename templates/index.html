@@ -1128,7 +1128,7 @@ function setDragGhost(event, icon, text) {
   dragGhost?.remove();
   dragGhost = document.createElement('div');
   dragGhost.className = 'folder-drag-ghost';
-  dragGhost.textContent = `${icon} ${text}`;
+  dragGhost.textContent = [icon, text].filter(Boolean).join(' ');
   document.body.appendChild(dragGhost);
   event.dataTransfer.setDragImage(dragGhost, 18, 16);
 }
@@ -1948,6 +1948,42 @@ listEl?.addEventListener('click', async event => {
   }
 });
 
+// 文件名就是 Obsidian 里看到的题卡名称；稳定 id 和图片物理名均不随改名变化。
+// 这里只更新标题与 data-path，避免为一个字符串变化重排整张题卡和公式树。
+listEl?.addEventListener('click', async event => {
+  const button = event.target.closest('.question-rename-trigger');
+  if (!button) return;
+  const card = button.closest('.card');
+  const titleNode = card?.querySelector('.card-head-title');
+  const current = titleNode?.textContent.trim() || button.dataset.title || '';
+  closeCardPopovers();
+  const requested = prompt('新题卡名称：', current);
+  const title = requested?.trim() || '';
+  if (!title || title === current || !card?.dataset.id) return;
+
+  button.disabled = true;
+  try {
+    const response = await fetch(`/question/${encodeURIComponent(card.dataset.id)}/rename`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || '题卡重命名失败');
+    if (titleNode) {
+      titleNode.textContent = data.title;
+      titleNode.title = `题卡名称：${data.title}`;
+    }
+    button.dataset.title = data.title;
+    card.dataset.path = data.path;
+    flashToast(data.message || '题卡已重命名');
+  } catch (error) {
+    flashToast(error.message || '题卡重命名失败', 'err');
+  } finally {
+    button.disabled = false;
+  }
+});
+
 function syncContextLink(linkId, doc) {
   const current = document.getElementById(linkId);
   const incoming = doc.getElementById(linkId);
@@ -2518,7 +2554,6 @@ function renderBulkFolderNode(node) {
   pick.className = 'bulk-folder-pick';
   pick.dataset.bulkFolderPick = '1';
   pick.title = node.id;
-  pick.innerHTML = '<span aria-hidden="true">▰</span>';
   const label = document.createElement('span');
   label.textContent = node.name;
   pick.appendChild(label);
@@ -3069,7 +3104,7 @@ folderTree?.addEventListener('dragstart', e => {
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData(FOLDER_DRAG_MIME, dragFolderId);
   e.dataTransfer.setData('text/plain', `folder:${dragFolderId}`);
-  setDragGhost(e, '▰', li.dataset.folderName || '移动文件夹');
+  setDragGhost(e, '', li.dataset.folderName || '移动文件夹');
 });
 
 folderTree?.addEventListener('dragend', e => {

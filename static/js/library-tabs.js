@@ -564,14 +564,18 @@
     const twist = document.createElement('span');
     twist.className = 'library-tree-twist';
     twist.textContent = entry.kind === 'folder' ? '›' : '';
-    const icon = document.createElement('span');
-    icon.className = `library-file-icon is-${entry.kind}`;
-    icon.textContent = entry.kind === 'folder' ? '▰' : entry.kind === 'handout' ? 'H' : entry.kind === 'markdown' ? 'M'
-      : entry.kind === 'pdf' ? 'P' : 'I';
     const label = document.createElement('span');
     label.className = 'library-tree-label';
     label.textContent = entry.name;
-    button.append(twist, icon, label);
+    button.append(twist);
+    if (entry.kind !== 'folder') {
+      const icon = document.createElement('span');
+      icon.className = `library-file-icon is-${entry.kind}`;
+      icon.textContent = entry.kind === 'handout' ? 'H' : entry.kind === 'markdown' ? 'M'
+        : entry.kind === 'pdf' ? 'P' : 'I';
+      button.append(icon);
+    }
+    button.append(label);
     node.append(button);
     if (entry.kind === 'folder') {
       const children = document.createElement('div');

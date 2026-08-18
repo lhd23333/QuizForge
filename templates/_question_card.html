@@ -11,6 +11,7 @@
       <input type="checkbox" name="fullpage" value="{{ q['id'] }}" form="export-form">
       独占整页
     </label>
+    <strong class="card-head-title" title="题卡名称：{{ q['title'] }}">{{ q['title'] }}</strong>
     <span class="meta card-meta">
       <span class="legacy-card-controls">
         <span class="type-chips" data-id="{{ q['id'] }}" title="点击设题型，再点当前项清除">
@@ -95,6 +96,8 @@
       <button type="button" class="card-more-trigger" data-card-popover-trigger="more"
               aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>
       <div class="question-popover card-action-menu" data-card-popover="more" role="menu" hidden>
+        <button type="button" class="card-menu-action question-rename-trigger"
+                data-title="{{ q['title'] }}" role="menuitem">重命名题卡</button>
         <form method="post" action="{{ url_for('question_delete', qid=q['id']) }}"
               class="question-delete-form">
           <button type="submit" class="card-menu-danger" role="menuitem">删除题目</button>

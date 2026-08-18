@@ -401,6 +401,10 @@ def _to_record(path: Path, meta: dict, body: str) -> dict:
     qid = str(meta.get("id") or path.stem)
     rec = {
         "id": qid,
+        # 文件名是题卡名称唯一真源。frontmatter 的 title 可能是用户在 Obsidian
+        # 自定义的字段，不能占用；外部改文件名后界面也应立即跟着变化。
+        "title": path.stem,
+        "name": path.stem,
         "path": str(rel.as_posix()),
         "folder": folder,
         "body": stem,
@@ -1224,43 +1228,111 @@ def _top_order(folder: str) -> float:
     return (max(orders) + 1.0) if orders else 1.0
 
 
-def _question_filename(target_dir: Path, qid: str, number: int | None) -> Path:
-    """题目 .md 的落盘路径：有原卷题号就用题号命名，没有才退回 uuid。
+_WINDOWS_RESERVED_STEMS = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
 
-    「第3题.md」在文件夹里一眼就能找到，uuid 名字（`2933dfa52b8a.md`）在 Obsidian
-    的文件列表里等于没有名字。前缀「第…题」而不是裸数字：Obsidian 的文件列表按名
-    排序，裸 `10.md` 会排到 `2.md` 前面，加了汉字前缀至少能看出是题号；真正的顺序
-    仍由 frontmatter 的 `order` 决定（见 `list_questions`）。
 
-    **文件名不参与身份认定**：`_to_record` 取 `meta["id"]`，`path.stem` 只是没有
-    frontmatter 时的兜底。所以撞名加后缀是安全的，改名也不会让引用断——`_assets`
-    里的图片名嵌的是 qid，不跟着文件名走。
+def safe_question_title(title: str) -> str:
+    """把题卡名称收敛成安全、可读的单段 Markdown 文件名（不含扩展名）。"""
+    value = normalize_newlines(str(title or "")).replace("\n", " ").strip()
+    if value.casefold().endswith(".md"):
+        value = value[:-3].rstrip()
+    value = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
+    while ".." in value:
+        value = value.replace("..", "_")
+    value = re.sub(r"\s+", " ", value).strip(" .")
+    # Windows 按最后一个点前的主文件名判保留设备名，CON.md / CON.any 都不能创建。
+    if value and value.split(".", 1)[0].upper() in _WINDOWS_RESERVED_STEMS:
+        value = f"_{value}"
+    # 给扩展名、冲突后缀和较深的题集路径留余量，避免组件名逼近 Windows 上限。
+    return value[:180].rstrip(" .")
 
-    撞名（同一文件夹里两份卷子都有第 3 题，或者重复导入同一份）时缀上 qid 而不是
-    覆盖：覆盖会让先入库的那道题无声消失。
+
+def default_question_title(source: str = "", number: int | None = None,
+                           sequence: int | None = None, *,
+                           temporary: bool = False) -> str:
+    """按导入语义生成默认题卡名，不访问磁盘。
+
+    ``number`` 是可靠原题号，优先于本批 ``sequence``；散题/快捷制卡由调用方传
+    ``temporary=True``，生成“临时卡x”。没有题源也没有序号时返回空串，让旧入口
+    继续以稳定 qid 命名。
     """
-    if number is None:
-        return target_dir / f"{qid}.md"
-    stem = safe_folder_name(f"第{number}题") or qid
-    path = target_dir / f"{stem}.md"
-    if path.exists():
-        path = target_dir / f"{stem}_{qid}.md"
-    return path
+    number = _as_number(number)
+    sequence = _as_number(sequence)
+    ordinal = number if number is not None else sequence
+    if temporary:
+        return safe_question_title(
+            f"临时卡{ordinal}" if ordinal is not None else "临时卡")
+    safe_source = safe_question_title(source)
+    if safe_source:
+        return (safe_question_title(f"{safe_source}第{ordinal}题")
+                if ordinal is not None else safe_source)
+    return safe_question_title(f"第{number}题") if number is not None else ""
+
+
+_TEMPORARY_TITLE_RE = re.compile(r"^临时卡(\d+)(?:_\d+)?$")
+
+
+def _next_temporary_question_index(target_dir: Path) -> int:
+    """在已持有 `_write_lock` 时计算下一个临时卡编号。"""
+    maximum = 0
+    if target_dir.is_dir():
+        for path in target_dir.glob("*.md"):
+            match = _TEMPORARY_TITLE_RE.fullmatch(path.stem)
+            if match:
+                maximum = max(maximum, int(match.group(1)))
+    return maximum + 1
+
+
+def next_temporary_question_title(folder_id: str = "临时卡片") -> str:
+    """返回指定题集内下一个“临时卡x”名称，仅供展示或预填。"""
+    target_dir = _checked_folder_path(folder_id, allow_root=True)
+    with _write_lock:
+        index = _next_temporary_question_index(target_dir)
+    return default_question_title(sequence=index, temporary=True)
+
+
+def _question_filename(target_dir: Path, qid: str, number: int | None,
+                       title: str = "", *, exclude: Path | None = None) -> Path:
+    """返回题目 .md 的唯一落盘路径，重名时使用可读的 ``_2``、``_3`` 后缀。
+
+    新题优先使用显式/生成后的 title；旧调用没有 title 时仍按“第x题 → qid”回退。
+    文件名不参与身份认定，稳定身份始终来自 frontmatter 的 id。
+
+    ``exclude`` 用于原文件就地改名：目标仍是本题当前路径时不视为冲突。
+    """
+    fallback = f"第{number}题" if number is not None else qid
+    stem = safe_question_title(title) or safe_question_title(fallback) or qid
+    excluded = exclude.resolve() if exclude is not None else None
+    suffix = 1
+    while True:
+        candidate_stem = stem if suffix == 1 else f"{stem}_{suffix}"
+        candidate = target_dir / f"{candidate_stem}.md"
+        if excluded is not None and candidate.resolve() == excluded:
+            return candidate
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def create_question(body: str, solution: str = "", qtype: str = "",
                      source: str = "", difficulty: str = "",
                      tags: list[str] | None = None, folder: str = "",
-                     number: int | None = None, note: str = "") -> str:
+                     number: int | None = None, note: str = "",
+                     title: str = "", *, temporary: bool = False) -> str:
     return create_questions_batch([{
         "body": body, "solution": solution, "type": qtype,
         "source": source, "difficulty": difficulty, "tags": tags or [],
-        "number": number, "note": note,
-    }], folder)[0]
+        "number": number, "note": note, "title": title,
+    }], folder, temporary=temporary)[0]
 
 
 def create_questions_batch(items: list[dict], folder: str = "", *,
-                           idempotency_scope: str = "") -> list[str]:
+                           idempotency_scope: str = "",
+                           temporary: bool = False) -> list[str]:
     """同一文件夹批量建题，只扫描一次现有 order。
 
     ``idempotency_scope`` 只供后台自动入库使用。作用域会和题目在本批中的下标一起
@@ -1273,6 +1345,10 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
     target_dir = _folder_abspath(folder)
     created: list[str] = []
     scope = str(idempotency_scope or "").strip()
+    if temporary and scope:
+        # 自动任务可能在崩溃后认回部分既有题；临时卡的递增编号没有持久化批次基准，
+        # 不能在重试时重新猜编号。异常快照宁可停下，也不能生成一组漂移名称。
+        raise ValueError("自动入库缺少题源，无法安全生成临时卡名称")
     written_paths: list[tuple[Path, str, int]] = []
     with _write_lock:
         # 取名、算序号、落盘必须在同一把锁里。批量导入若逐题调用
@@ -1290,6 +1366,8 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
         #    `_SORT_KEYS["custom"]` 只按 order 排，并列项的先后就交给 `rglob` 的
         #    返回顺序（文件系统决定，与题号无关）——表现正是「题目顺序乱掉」。
         next_order = _top_order(folder)
+        next_temporary_index = (
+            _next_temporary_question_index(target_dir) if temporary else None)
         # 稳定 qid 在调用前即可算出。按这些 id 定向读取能保留“题目被外部移动后仍不
         # 重复创建”的幂等语义，同时避免为了几十道题解析整座题库。
         expected_ids = [
@@ -1303,14 +1381,27 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
                 qid = (_stable_import_qid(scope, item_index)
                        if scope else _new_id())
                 now = _now_iso()
+                source = str(item.get("source") or "")
+                number = _as_number(item.get("number"))
+                explicit_title = safe_question_title(item.get("title") or "")
+                if temporary and not explicit_title and not source:
+                    generated_title = default_question_title(
+                        sequence=next_temporary_index, temporary=True)
+                    next_temporary_index += 1
+                else:
+                    generated_title = default_question_title(
+                        source, number,
+                        item_index + 1 if source and number is None and len(items) > 1
+                        else None)
+                question_title = explicit_title or generated_title or qid
                 meta = dict(_KNOWN_DEFAULTS)
                 meta.update({
                     "id": qid,
                     "type": str(item.get("type") or ""),
-                    "source": str(item.get("source") or ""),
+                    "source": source,
                     "difficulty": str(item.get("difficulty") or ""),
                     "tags": list(item.get("tags") or []),
-                    "number": _as_number(item.get("number")),
+                    "number": number,
                     "created": now,
                     "updated": now,
                     "order": next_order,
@@ -1357,7 +1448,8 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
                     created.append(qid)
                     continue
 
-                path = _question_filename(target_dir, qid, meta["number"])
+                path = _question_filename(
+                    target_dir, qid, meta["number"], question_title)
                 if path.exists():
                     # 正常随机 qid 几乎不会走到这里；稳定 qid 若对应文件损坏到无法
                     # 解析，也不能把它当成空位覆盖，交给用户保留现场处理。
@@ -1557,6 +1649,32 @@ def update_question(qid: str, body: str, solution: str = "", qtype: str = "",
     full_body = _join_sections(body, solution, extra)
     with _write_lock:
         _write_raw(path, meta, full_body)
+
+
+def rename_question(qid: str, new_title: str) -> dict:
+    """只重命名 Markdown 文件，正文、frontmatter、稳定 id 与图片均不改写。"""
+    requested = safe_question_title(new_title)
+    if not requested:
+        raise ValueError("题卡名称不能为空")
+    with _write_lock:
+        rec = get_question(qid)
+        if not rec:
+            raise KeyError(qid)
+        src = config.BANK_DIR / rec["path"]
+        dst = _question_filename(
+            src.parent, str(rec["id"]), rec.get("number"), requested,
+            exclude=src)
+        if dst.resolve() != src.resolve():
+            # Windows 的同目录 rename 不覆盖既有目标；正文始终由文件系统直接移动，
+            # 不存在“读出旧正文后覆盖 Obsidian 新保存内容”的窗口。
+            src.rename(dst)
+            _cache.pop(str(src), None)
+            _cache.pop(str(dst), None)
+            invalidate_scan_cache()
+    renamed = get_question(qid)
+    if renamed is None:  # 文件已成功写入但无法重新读取时保留明确故障，不伪造结果。
+        raise OSError("题卡重命名后无法重新读取")
+    return renamed
 
 
 def _update_meta_fields(qid: str, fields: dict):
@@ -1970,10 +2088,8 @@ def collections_of(qid: str) -> list[str]:
 def add_to_collection(qid: str, folder_id: str, *, target_order: float | None = None) -> bool:
     """把题目移动到指定文件夹（一题只能在一个目录下，与目录语义一致）。
 
-    知道题号的题在落地时按题号重新取名（`第3题.md`），不知道的沿用原文件名。
-    重新取名而不是死守旧名：uuid 命名的老题被拖进文件夹时，正是「同一个文件夹里
-    摊着一排题」的场景——那时文件名才开始起作用。文件名不参与身份认定
-    （`_to_record` 取 `meta["id"]`），改名不会断任何引用。
+    落地时沿用当前文件名，目标目录撞名则添加可读数字后缀。文件名不参与身份认定，
+    改名不会改变 id 或图片引用。
     """
     rec = get_question(qid)
     if not rec:
@@ -1988,10 +2104,8 @@ def add_to_collection(qid: str, folder_id: str, *, target_order: float | None = 
     dst_dir.mkdir(parents=True, exist_ok=True)
     with _write_lock:
         # 同一把锁内取名 + 移动，理由同 create_question。
-        dst = (_question_filename(dst_dir, qid, rec["number"])
-               if rec["number"] is not None else dst_dir / src.name)
-        if dst.exists():
-            dst = dst_dir / f"{dst.stem}_{_new_id()}{dst.suffix}"
+        dst = _question_filename(
+            dst_dir, qid, rec["number"], src.stem)
         # 移入题目应当按本批原顺序追加到目标目录末尾，不能沿用来源目录的 order。
         # 否则两份卷子的第 1 题都带 order=1，目标目录会交错显示。先完整序列化新
         # frontmatter，再移动；写入失败时把原始字节移回来源，避免留下半份题目。
@@ -2069,7 +2183,9 @@ def copy_to_collection(ids: list[str], folder_id: str) -> list[str]:
                         "_quizforge_import_scope", "_quizforge_import_index",
                         "_trash_original_path", "_trash_deleted_at"):
                     meta.pop(key, None)
-                target = _question_filename(target_dir, new_id, record.get("number"))
+                target = _question_filename(
+                    target_dir, new_id, record.get("number"),
+                    source_path.stem)
                 _write_raw(target, meta, body)
                 written.append(target)
                 created.append(new_id)

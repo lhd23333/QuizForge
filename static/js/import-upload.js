@@ -366,13 +366,9 @@
       twist.className = 'batch-folder-twist';
       twist.setAttribute('aria-hidden', 'true');
       twist.textContent = folder.has_children ? '›' : '';
-      const icon = document.createElement('span');
-      icon.className = 'batch-folder-icon';
-      icon.setAttribute('aria-hidden', 'true');
-      icon.textContent = '▰';
       const label = document.createElement('span');
       label.textContent = folder.name;
-      row.append(twist, icon, label);
+      row.append(twist, label);
       wrap.append(row);
       if (folder.has_children) {
         const children = document.createElement('div');

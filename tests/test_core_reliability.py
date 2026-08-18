@@ -929,6 +929,8 @@ class PageTests(unittest.TestCase):
         self.assertEqual(len(names), 2)
         self.assertEqual(rec["img_split"], "after")
         self.assertEqual(rec["img_layouts"], [{"i": 0, "stack": True}])
+        self.assertEqual(rec["folder"], "临时卡片")
+        self.assertRegex(rec["title"], r"^临时卡\d+$")
         self.assertTrue(all((config.ASSETS_DIR / name).is_file() for name in names))
 
     def test_loaded_question_layout_and_type_actions_do_not_scan_vault(self):
@@ -2030,6 +2032,25 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertIn('id="new-question-fab"', page)
         self.assertIn("QOpenNewQuestionCard", page)
         self.assertNotIn('href="/question/new"', page)
+
+    def test_question_rename_returns_updated_title_and_path(self):
+        folder = app_module.filestore.get_or_create_collection("题卡改名路由", "")
+        qid = app_module.filestore.create_question(
+            "改名题干", folder=folder, title="旧题卡名")
+        old_path = app_module.filestore.get_question(qid)["path"]
+
+        response = self.client.post(
+            f"/question/{qid}/rename",
+            json={"title": "新题卡名"}, headers=self.headers)
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        renamed = app_module.filestore.get_question(qid)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["id"], qid)
+        self.assertEqual(data["title"], "新题卡名")
+        self.assertEqual(data["path"], renamed["path"])
+        self.assertNotEqual(data["path"], old_path)
 
     def test_library_lists_and_reads_only_supported_visible_files(self):
         folder = config.BANK_DIR / "资料阅读测试"

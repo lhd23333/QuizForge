@@ -1117,17 +1117,18 @@ def index():
 @app.route("/question/new", methods=["GET", "POST"])
 def question_new():
     if request.method == "POST":
-        qid = _save_from_form()
-        # 来自文件夹右键「新增题目」时表单里带着落点，建好直接归入该文件夹
+        # 明确从题集里新建时沿用该题集；独立新增的散题统一进入“临时卡片”，
+        # 避免再把随机 id 文件散落在题库根目录。
         target_col = (request.form.get("collection") or "").strip()
-        if qid and target_col:
-            col = filestore.get_collection(target_col)
-            if col:
-                filestore.add_to_collection(qid, target_col)
+        if target_col and not filestore.get_collection(target_col):
+            abort(404, description="目标文件夹不存在")
+        if not target_col:
+            target_col = filestore.get_or_create_collection("临时卡片", "")
+        source = request.form.get("source", "").strip()
+        qid = _save_from_form(
+            folder=target_col, temporary=not bool(source))
         flash("题目已新增", "ok")
-        if target_col:
-            return redirect(url_for("index", collection=target_col))
-        return redirect(url_for("index"))
+        return redirect(url_for("index", collection=target_col))
     # GET：?collection=<id> 预设落点文件夹（右键「新增题目」带过来）
     return render_template("edit.html", q=None, q_tags=[],
                            preset_collection=request.args.get("collection", ""),
@@ -1248,11 +1249,13 @@ def question_inline_create():
     folder = str(data.get("collection") or "").strip("/")
     if folder and not filestore.get_collection(folder):
         return jsonify(ok=False, error="目标文件夹不存在"), 404
+    if not folder:
+        folder = filestore.get_or_create_collection("临时卡片", "")
     qid = filestore.create_question(
         payload["body"], solution=payload["solution"],
         qtype=payload["type"], source=payload["source"],
         difficulty=payload["difficulty"], tags=payload["tags"], folder=folder,
-        note=payload["note"])
+        note=payload["note"], temporary=not bool(payload["source"]))
     rec = filestore.get_question(qid)
     card_html = render_template(
         "_question_card.html", q=rec, types=config.QUESTION_TYPES,
@@ -1280,6 +1283,23 @@ def question_inline_update(qid):
     return jsonify(ok=True, card_html=card_html, message="题目已保存")
 
 
+@app.route("/question/<qid>/rename", methods=["POST"])
+def question_rename(qid):
+    """重命名题卡与 Markdown 文件；稳定题目 id 和图片引用保持不变。"""
+    data = request.get_json(silent=True) or request.form
+    title = str(data.get("title") or "").strip()
+    if not title:
+        return jsonify(ok=False, error="题卡名称不能为空"), 400
+    try:
+        record = filestore.rename_question(qid, title)
+    except KeyError:
+        return jsonify(ok=False, error="题目不存在"), 404
+    except (OSError, ValueError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, id=qid, title=record["title"],
+                   path=record["path"], message=f"已重命名为「{record['title']}」")
+
+
 @app.route("/question/<qid>/delete", methods=["POST"])
 def question_delete(qid):
     deleted = filestore.delete_question(qid)
@@ -1292,7 +1312,7 @@ def question_delete(qid):
     return redirect(request.referrer or url_for("index"))
 
 
-def _save_from_form(qid=None):
+def _save_from_form(qid=None, *, folder: str = "", temporary: bool = False):
     """从表单读字段，新增或更新。返回题目 id（新增时是新生成的那个）。"""
     body = request.form.get("body", "").strip()
     solution = request.form.get("solution", "").strip()
@@ -1304,7 +1324,8 @@ def _save_from_form(qid=None):
     if qid is None:
         return filestore.create_question(body, solution=solution, qtype=type_,
                                          source=source, difficulty=difficulty,
-                                         tags=tag_names, note=note)
+                                         tags=tag_names, note=note,
+                                         folder=folder, temporary=temporary)
     filestore.update_question(qid, body, solution=solution, qtype=type_,
                               source=source, difficulty=difficulty,
                               tags=tag_names, note=note)
@@ -5774,6 +5795,9 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
             if chosen:
                 source = Path(grp.get("filename") or "").stem or ""
                 folder = _auto_import_folder(current, grp)
+                temporary_import = not folder and not source
+                if temporary_import:
+                    folder = filestore.get_or_create_collection("临时卡片", "")
                 import_items = _auto_import_items(chosen, source)
                 # 必须整组调用批量接口。逐题 create_question 会为每道题重新递归遍历
                 # 整座 vault 计算最大 order；1.3 万题下一卷 20 题会白扫 20 遍。
@@ -5784,11 +5808,15 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
                         import_items, previous_items, folder,
                         idempotency_scope=scope)
                 else:
-                    created = filestore.create_questions_batch(
-                        import_items, folder,
+                    create_options = {
                         # 不含 attempt：同一组因崩溃/任务快照写失败而重转时必须认回
                         # 已写入的那部分；新上传会得到新的 batch_id，仍可明确再导一份。
-                        idempotency_scope=scope)
+                        "idempotency_scope": scope,
+                    }
+                    if temporary_import:
+                        create_options["temporary"] = True
+                    created = filestore.create_questions_batch(
+                        import_items, folder, **create_options)
                 imported_count = len(created)
                 # 一并保存原卷：落点跟题目同一个目录。没有落点文件夹（两个开关都没勾）
                 # 时不存——原卷摊在题库根会跟题目混在一起，而且再也认不出属于哪一批。
@@ -6077,6 +6105,10 @@ def import_md():
         folder_note = f"并打包到文件夹「{exam_folder_name}」" if final_col else ""
     elif target_col:
         folder_note = "并加入所选题集"
+    temporary_import = not final_col and not batch_source
+    if temporary_import:
+        final_col = filestore.get_or_create_collection("临时卡片", "")
+        folder_note = "并加入「临时卡片」"
     pending_questions = []
     pending_starred = []
     saved_image_names: set[str] = set()
@@ -6111,7 +6143,8 @@ def import_md():
         })
         pending_starred.append(starred)
     try:
-        new_ids = filestore.create_questions_batch(pending_questions, final_col)
+        new_ids = filestore.create_questions_batch(
+            pending_questions, final_col, temporary=temporary_import)
     except Exception:
         # 资产先落盘是为了让 Markdown 一次原子写入；若建题失败，立即清掉本次尚未
         # 被任何题引用的图片，避免校对失败制造孤儿文件。

@@ -758,11 +758,10 @@ main.bulk-active-page { max-width: 1500px; }
 .bulk-folder-node[aria-expanded="true"] > .bulk-folder-row .bulk-folder-twist { transform: rotate(90deg); }
 .bulk-folder-twist.is-empty { cursor: default; }
 .bulk-folder-pick {
-  display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1;
+  display: flex; align-items: center; min-width: 0; flex: 1;
   min-height: 32px; padding: 5px 8px 5px 2px; text-align: left; line-height: 1.35;
 }
-.bulk-folder-pick > span:first-child { flex: none; color: var(--warn); font-size: 11px; }
-.bulk-folder-pick > span:last-child { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+.bulk-folder-pick > span { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
 .bulk-folder-empty { margin: 8px; font-size: 12px; }
 .bulk-action-section { width: 100%; border-top: 1px solid var(--border); }
 .bulk-action-section > summary {
@@ -1086,6 +1085,11 @@ html.desktop-host .import-box { padding: 14px; border-radius: 8px; box-shadow: n
 .card-head { display: flex; align-items: center; gap: var(--sp-3); font-size: 13px; margin-bottom: var(--sp-2); flex-wrap: wrap; }
 .sel-box { cursor: pointer; user-select: none; }
 .desktop-card-controls, .desktop-card-more { display: none; }
+.card-head-title {
+  min-width: 0; max-width: min(300px, 32vw); overflow: hidden;
+  color: var(--text); font-size: 14px; font-weight: 600;
+  text-overflow: ellipsis; white-space: nowrap;
+}
 .card-meta {
   display: inline-flex; align-items: center; flex-wrap: wrap; gap: 6px;
   min-width: 0; max-width: 100%;
@@ -1142,6 +1146,13 @@ html.desktop-host .desktop-card-more { display: inline-flex; }
 .card-menu-source { padding: 7px 8px; border-bottom: 1px solid var(--border); color: var(--muted); font-size: 11px; }
 .card-menu-source span { display: block; margin-bottom: 2px; }
 .card-menu-source strong { display: block; overflow: hidden; color: var(--text-2); font-size: 12px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.card-action-menu .card-menu-action {
+  width: 100%; padding: 7px 8px; border: 0; border-radius: 5px;
+  background: transparent; color: var(--text-2); font-family: inherit;
+  font-size: 12px; line-height: 1.2; text-align: left; cursor: pointer;
+}
+.card-action-menu .card-menu-action:hover { background: var(--surface-2); }
+.card-action-menu .card-menu-action:disabled { opacity: .55; cursor: wait; }
 .card-action-menu form { margin: 4px 0 0; }
 .card-action-menu button[type="submit"] {
   width: 100%; padding: 7px 8px; border: 0; border-radius: 5px;
@@ -2053,7 +2064,6 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
   border-radius: 4px; font-size: 9px; line-height: 1; font-weight: 800;
   color: #fff; background: #64748b;
 }
-.library-file-icon.is-folder { color: #d97706; background: transparent; font-size: 15px; }
 .library-file-icon.is-markdown { background: #64748b; }
 .library-file-icon.is-pdf { background: #dc2626; }
 .library-file-icon.is-image { background: #7c3aed; }
@@ -2190,7 +2200,6 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 .batch-folder-row.is-selected { color: var(--primary); background: var(--primary-soft); }
 .batch-folder-twist { width: 12px; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .12s; }
 .batch-folder-row.is-open .batch-folder-twist { transform: rotate(90deg); }
-.batch-folder-icon { color: #d97706; }
 .batch-folder-children { padding-left: 18px; }
 .batch-folder-loading { padding: 7px 12px; font-size: 12px; }
 .batch-folder-loading.is-error { color: var(--danger); }

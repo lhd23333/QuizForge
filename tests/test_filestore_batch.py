@@ -10,6 +10,103 @@ import filestore
 
 
 class FilestoreBatchCreateTests(unittest.TestCase):
+    def test_filename_is_title_and_custom_frontmatter_is_not_claimed(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            path = Path(td) / "用户旧名称.md"
+            filestore._write_raw(path, {
+                "id": "legacy-id", "source": "旧题源",
+                "title": "用户自己的 frontmatter 标题",
+            }, "旧题干")
+            before = path.read_text(encoding="utf-8")
+
+            row = filestore.get_question("legacy-id")
+            after = path.read_text(encoding="utf-8")
+
+        self.assertEqual(row["title"], "用户旧名称")
+        self.assertEqual(row["name"], "用户旧名称")
+        self.assertEqual(before, after)
+        self.assertIn("title: 用户自己的 frontmatter 标题", after)
+
+    def test_default_titles_follow_source_number_and_batch_sequence(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            batch = filestore.create_questions_batch([
+                {"body": "无题号一", "source": "函数专题"},
+                {"body": "无题号二", "source": "函数专题"},
+            ], "题集")
+            numbered = filestore.create_question(
+                "原卷第八题", source="北京卷", number=8, folder="题集")
+            single = filestore.create_question(
+                "单题", source="校本例题", folder="题集")
+            explicit = filestore.create_question(
+                "显式名称", source="不会覆盖名称", number=9,
+                folder="题集", title="自定义题卡")
+            rows = {row["id"]: row for row in
+                    filestore.collection_records_snapshot("题集", recursive=False)}
+
+        self.assertEqual(rows[batch[0]]["title"], "函数专题第1题")
+        self.assertEqual(rows[batch[1]]["title"], "函数专题第2题")
+        self.assertEqual(rows[numbered]["title"], "北京卷第8题")
+        self.assertEqual(rows[single]["title"], "校本例题")
+        self.assertEqual(rows[explicit]["title"], "自定义题卡")
+        self.assertEqual(
+            {Path(rows[qid]["path"]).stem for qid in rows},
+            {row["title"] for row in rows.values()})
+
+    def test_title_conflicts_use_readable_suffix_and_temp_index_only_grows(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            first = filestore.create_question(
+                "一", folder="临时卡片", temporary=True)
+            second = filestore.create_question(
+                "二", folder="临时卡片", temporary=True)
+            conflict = filestore.create_question(
+                "重名", folder="临时卡片", title="临时卡2")
+            filestore.create_question("三", folder="临时卡片", title="临时卡4")
+            rows = {row["id"]: row for row in
+                    filestore.collection_records_snapshot(
+                        "临时卡片", recursive=False)}
+            next_title = filestore.next_temporary_question_title()
+
+        self.assertEqual(rows[first]["title"], "临时卡1")
+        self.assertEqual(rows[second]["title"], "临时卡2")
+        self.assertEqual(rows[conflict]["title"], "临时卡2_2")
+        self.assertEqual(next_title, "临时卡5")
+
+    def test_rename_question_keeps_id_and_references_and_avoids_collision(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            filestore.create_question("占位", folder="题集", title="目标名称")
+            qid = filestore.create_question(
+                "题干\n\n![[q-stable_1.png]]", solution="解析",
+                source="原题源", folder="题集", title="旧名称")
+            old_path = Path(td) / filestore.get_question(qid)["path"]
+            before = old_path.read_bytes()
+
+            renamed = filestore.rename_question(qid, "目标名称")
+            new_path = Path(td) / renamed["path"]
+            old_exists = old_path.exists()
+            new_exists = new_path.is_file()
+            after = new_path.read_bytes()
+
+        self.assertEqual(renamed["id"], qid)
+        self.assertEqual(renamed["title"], "目标名称_2")
+        self.assertEqual(renamed["name"], "目标名称_2")
+        self.assertEqual(renamed["source"], "原题源")
+        self.assertIn("![[q-stable_1.png]]", renamed["body"])
+        self.assertFalse(old_exists)
+        self.assertTrue(new_exists)
+        self.assertEqual(after, before)
+
     def test_note_round_trip_and_body_update_preserves_existing_note(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(config, "BANK_DIR", Path(td)):
