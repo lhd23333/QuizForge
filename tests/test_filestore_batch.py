@@ -781,6 +781,98 @@ class FilestoreBatchCreateTests(unittest.TestCase):
 
         self.assertEqual([row["id"] for row in rows], [expected])
 
+    def test_relative_reorder_writes_only_dragged_card_with_midpoint(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            ids = filestore.create_questions_batch([
+                {"body": "第一题"}, {"body": "第二题"},
+                {"body": "第三题"}, {"body": "第四题"},
+            ], "甲卷")
+            other = filestore.create_question("其它题", folder="乙卷")
+            original_write = filestore._write_raw
+            with mock.patch.object(
+                    filestore, "_all_records",
+                    side_effect=AssertionError("局部排序不应扫描整座题库")), \
+                    mock.patch.object(
+                        filestore, "_write_raw", wraps=original_write) as write:
+                result = filestore.reorder_relative(
+                    ids[3], "甲卷", ids[1], "before")
+
+            rows = filestore.list_questions(records=
+                filestore.collection_records_snapshot(
+                    "甲卷", recursive=False))
+            other_row = filestore.get_question(other)
+
+        self.assertTrue(result["changed"])
+        self.assertFalse(result["normalized"])
+        self.assertEqual(result["order"], 1.5)
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual([row["id"] for row in rows],
+                         [ids[0], ids[3], ids[1], ids[2]])
+        self.assertEqual(other_row["order"], 1.0)
+
+    def test_relative_reorder_normalizes_only_target_when_gap_is_exhausted(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            ids = filestore.create_questions_batch([
+                {"body": "第一题"}, {"body": "第二题"},
+                {"body": "第三题"},
+            ], "甲卷")
+            for qid, order in zip(ids, (1.0, 1.0 + 5e-10, 3.0)):
+                row = filestore.get_question(qid)
+                path = Path(td) / row["path"]
+                meta, body = filestore._read_raw(path)
+                meta["order"] = order
+                filestore._write_raw(path, meta, body)
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            original_write = filestore._write_raw
+            with mock.patch.object(
+                    filestore, "_all_records",
+                    side_effect=AssertionError("归一化不应扫描其它题集")), \
+                    mock.patch.object(
+                        filestore, "_write_raw", wraps=original_write) as write:
+                result = filestore.reorder_relative(
+                    ids[2], "甲卷", ids[1], "before")
+
+            rows = filestore.list_questions(records=
+                filestore.collection_records_snapshot(
+                    "甲卷", recursive=False))
+            written_parents = {
+                Path(call.args[0]).parent.resolve()
+                for call in write.call_args_list
+            }
+
+        self.assertTrue(result["normalized"])
+        self.assertEqual([row["id"] for row in rows],
+                         [ids[0], ids[2], ids[1]])
+        self.assertEqual([row["order"] for row in rows], [1.0, 2.0, 3.0])
+        self.assertEqual(written_parents, {(Path(td) / "甲卷").resolve()})
+
+    def test_relative_reorder_rejects_parent_and_non_direct_anchor(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            parent_q = filestore.create_question("父级题", folder="父级")
+            parent_anchor = filestore.create_question("父级锚点", folder="父级")
+            filestore.create_question("子级题", folder="父级/子级")
+            leaf_q = filestore.create_question("叶子题", folder="叶子")
+            other_anchor = filestore.create_question("其它锚点", folder="其它")
+            with mock.patch.object(filestore, "_write_raw") as write:
+                with self.assertRaisesRegex(ValueError, "叶子题集"):
+                    filestore.reorder_relative(
+                        parent_q, "父级", parent_anchor, "after")
+                with self.assertRaisesRegex(ValueError, "必须直属"):
+                    filestore.reorder_relative(
+                        leaf_q, "叶子", other_anchor, "after")
+
+        write.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

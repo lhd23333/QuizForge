@@ -382,6 +382,7 @@
     </div>
 
     <div id="q-list" data-custom-sort="{{ '1' if question_card_sort == 'custom' else '' }}"
+         data-reorder-enabled="{{ '1' if question_reorder_enabled else '' }}"
          data-page-token="{{ question_page_token }}" data-total="{{ question_total }}"
          data-loaded="{{ questions|length }}" data-inline-created="0"
          data-blank="{{ '1' if blank else '0' }}"
@@ -533,6 +534,7 @@
 // 勾选切换只改变选题篮状态，不改变题卡顺序。
 const listEl = document.getElementById('q-list');
 let isCustom = listEl?.dataset.customSort === '1';
+let isQuestionReorderEnabled = listEl?.dataset.reorderEnabled === '1';
 
 // 桌面端侧栏页签：状态只落 localStorage，不进入 URL、更不会上传后端。
 // 浏览器与 Obsidian 保持原来的上下连续布局，因此这里不设置它们的 hidden 状态。
@@ -1137,11 +1139,12 @@ function clearDragGhost() {
   dragGhost = null;
 }
 
-// 拖题：custom 模式下在列表内重排，任何模式下都能拖到左侧文件夹上归类。
-// dragQuestionId 是这两端共享的状态（文件夹树的 drop 要用它），所以两段代码
-// 挨在一起写、不拆到别处。
+// 拖题：只有明确的叶子题集、无搜索筛选且为 custom 排序时才能在列表内重排；
+// 任何浏览模式都能拖到左侧文件夹。dragQuestionId 和 questionDragSession 是两端
+// 共享状态，文件夹 drop 必须先接管 session，不能让 dragend 把它误当成排序提交。
 const list = document.getElementById('q-list');
 let dragQuestionId = null;
+let questionDragSession = null;
 
 // HTML5 拖拽不会替页面做可靠的边缘滚动，长列表里把题目拖出当前视口后就会卡住。
 // 用最后一次 dragover 的纵坐标驱动 rAF：停在上下边缘也能连续滚，速度随贴边程度
@@ -1186,50 +1189,125 @@ document.addEventListener('dragover', e => {
 }, true);
 document.addEventListener('drop', stopQuestionDragAutoScroll, true);
 window.addEventListener('blur', stopQuestionDragAutoScroll);
-if (list) {
-  let dragging = null;
 
+function clearQuestionDropAnchor(session) {
+  session?.anchor?.classList.remove('question-drop-before', 'question-drop-after');
+  if (session) session.anchor = null;
+}
+
+function restoreQuestionOrigin(session) {
+  const {card, parent, previous, next} = session || {};
+  if (!card?.isConnected || !parent?.isConnected) return;
+  if (next?.parentElement === parent) parent.insertBefore(card, next);
+  else if (previous?.parentElement === parent) previous.after(card);
+  else parent.prepend(card);
+}
+
+if (list) {
   list.addEventListener('dragstart', e => {
-    dragging = e.target.closest('.card');
-    if (!dragging) return;
-    dragQuestionId = dragging.dataset.id;
-    dragging.classList.add('dragging');
-    e.dataTransfer.effectAllowed = 'move';
+    const card = e.target.closest('.card[data-id]');
+    if (!card || card.parentElement !== list) return;
+    dragQuestionId = card.dataset.id;
+    questionDragSession = {
+      card,
+      id: dragQuestionId,
+      parent: list,
+      previous: card.previousElementSibling,
+      next: card.nextElementSibling,
+      originalOrder: [...list.querySelectorAll(':scope > .card[data-id]')]
+        .map(node => node.dataset.id),
+      reorderEnabled: isQuestionReorderEnabled,
+      anchor: null,
+      anchorId: '',
+      placement: '',
+      handled: false,
+    };
+    card.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'copyMove';
+    e.dataTransfer.setData('application/x-quizforge-question', dragQuestionId);
     e.dataTransfer.setData('text/plain', `q:${dragQuestionId}`);
-    setDragGhost(e, '📄', '移动题目');
+    setDragGhost(e, '', '拖动题目');
   });
 
-  list.addEventListener('dragend', () => {
-    if (dragging) dragging.classList.remove('dragging');
-    const reorder = isCustom && dragging;
-    dragging = null;
-    dragQuestionId = null;
+  function clearQuestionDrag(session) {
+    clearQuestionDropAnchor(session);
+    session?.card?.classList.remove('dragging');
+    if (questionDragSession === session) {
+      questionDragSession = null;
+      dragQuestionId = null;
+    }
     stopQuestionDragAutoScroll();
     clearDragGhost();
     clearFolderDragOver();
-    if (reorder) saveOrder();
+  }
+
+  function previewRelativeQuestionDrop(event, session) {
+    // 高频 dragover 只读取鼠标当前命中的锚点卡片，不扫描整列几何信息。
+    const anchor = event.target.closest('.card[data-id]');
+    if (!anchor || anchor === session.card || anchor.parentElement !== list) return false;
+    const box = anchor.getBoundingClientRect();
+    const placement = event.clientY < box.top + box.height / 2 ? 'before' : 'after';
+    if (session.anchor === anchor && session.placement === placement) return true;
+    clearQuestionDropAnchor(session);
+    session.anchor = anchor;
+    session.anchorId = anchor.dataset.id;
+    session.placement = placement;
+    anchor.classList.add(`question-drop-${placement}`);
+    if (placement === 'before') list.insertBefore(session.card, anchor);
+    else list.insertBefore(session.card, anchor.nextElementSibling);
+    return true;
+  }
+
+  list.addEventListener('dragend', () => {
+    const session = questionDragSession;
+    if (!session) return;
+    // 没有任何 drop 接管就视为取消，撤回 dragover 期间的临时 DOM 位移。
+    if (!session.handled) restoreQuestionOrigin(session);
+    clearQuestionDrag(session);
   });
 
   list.addEventListener('dragover', e => {
-    if (!isCustom || !dragging) return;   // 非 custom 排序不做列表内重排
+    const session = questionDragSession;
+    if (!session?.reorderEnabled || session.handled) return;
+    if (!previewRelativeQuestionDrop(e, session) && !session.anchorId) return;
     e.preventDefault();
-    // 找到当前指针位置下、应插入到其前面的那张卡
-    const after = [...list.querySelectorAll('.card:not(.dragging)')].find(card => {
-      const box = card.getBoundingClientRect();
-      return e.clientY < box.top + box.height / 2;
-    });
-    if (after) list.insertBefore(dragging, after);
-    else list.appendChild(dragging);
+    e.dataTransfer.dropEffect = 'move';
   });
 
-  async function saveOrder() {
-    const ids = [...list.querySelectorAll('.card[data-id]')].map(c => c.dataset.id);
-    await fetch('/reorder', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ids})
-    });
-  }
+  list.addEventListener('drop', async e => {
+    const session = questionDragSession;
+    if (!session?.reorderEnabled || session.handled) return;
+    previewRelativeQuestionDrop(e, session);
+    if (!session.anchorId || !session.placement) return;
+    e.preventDefault();
+    e.stopPropagation();
+    session.handled = true;
+    clearQuestionDropAnchor(session);
+
+    const currentOrder = [...list.querySelectorAll(':scope > .card[data-id]')]
+      .map(node => node.dataset.id);
+    const unchanged = currentOrder.length === session.originalOrder.length
+      && currentOrder.every((id, index) => id === session.originalOrder[index]);
+    if (unchanged) return;
+
+    const payload = {
+      question_id: session.id,
+      collection: list.dataset.collection || '',
+      anchor_id: session.anchorId,
+      placement: session.placement,
+    };
+    try {
+      const response = await fetch('/reorder/relative', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || '题目排序失败');
+    } catch (error) {
+      restoreQuestionOrigin(session);
+      flashToast(error.message || '题目排序失败', 'err');
+    }
+  });
 }
 
 // 题型按钮：点击切换题型，再点当前项清除（AJAX）
@@ -2060,6 +2138,7 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
     }
     listEl.innerHTML = incoming.innerHTML;
     listEl.dataset.customSort = incoming.dataset.customSort || '';
+    listEl.dataset.reorderEnabled = incoming.dataset.reorderEnabled || '';
     listEl.dataset.pageToken = incoming.dataset.pageToken || '';
     listEl.dataset.total = incoming.dataset.total || '0';
     listEl.dataset.loaded = incoming.dataset.loaded || '0';
@@ -2069,6 +2148,7 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
     listEl.dataset.collectionName = incoming.dataset.collectionName || '题库根目录';
     const blankPage = listEl.dataset.blank === '1';
     isCustom = listEl.dataset.customSort === '1';
+    isQuestionReorderEnabled = listEl.dataset.reorderEnabled === '1';
     const count = Number(incoming.dataset.total || 0);
     const countEl = document.getElementById('q-count');
     if (countEl) countEl.textContent = count;
@@ -3120,9 +3200,14 @@ folderTree?.addEventListener('dragover', e => {
   if (!li) return;
   e.preventDefault();
   const row = li.querySelector(':scope > .folder-row');
-  const invalid = !!dragFolderId && isInvalidFolderDrop(
-    dragFolderId, li.dataset.folderId || '');
-  if (e.dataTransfer) e.dataTransfer.dropEffect = invalid ? 'none' : 'move';
+  const cid = li.dataset.folderId || '';
+  const invalid = (!!dragFolderId && isInvalidFolderDrop(dragFolderId, cid))
+    || (!!dragQuestionId && !cid);
+  if (e.dataTransfer) {
+    e.dataTransfer.dropEffect = invalid
+      ? 'none'
+      : (dragQuestionId && e.shiftKey ? 'copy' : 'move');
+  }
   if (row === folderDragOverRow
       && row?.classList.contains('drag-invalid') === invalid) return;
   clearFolderDragOver();
@@ -3140,6 +3225,7 @@ folderTree?.addEventListener('drop', async e => {
   const li = folderDropItem(e.target);
   if (!li || (!dragQuestionId && !dragFolderId)) return;
   e.preventDefault();
+  e.stopPropagation();
   clearFolderDragOver();
   const cid = li.dataset.folderId || '';
 
@@ -3184,19 +3270,56 @@ folderTree?.addEventListener('drop', async e => {
 
   // 根行没有真实文件夹 id：题目不能写到虚拟根，仍维持原有行为。
   if (!cid) return;
-  const qid = dragQuestionId;   // dragend 会在响应回来前清空，先留副本
+  const session = questionDragSession;
+  if (!session || session.id !== dragQuestionId) return;
+  // 在第一个 await 前接管这次 drop，并撤销可能发生过的临时列表排序。这样文件夹
+  // 操作无论成功或失败都绝不会顺带提交 reorder。
+  session.handled = true;
+  const qid = session.id;
+  const mode = e.shiftKey ? 'copy' : 'move';
+  const viewGeneration = folderLoadGeneration;
+  const viewHref = location.href;
+  const viewCollection = listEl?.dataset.collection || '';
+  restoreQuestionOrigin(session);
+  clearQuestionDropAnchor(session);
   try {
     const res = await fetch(`/collections/${encodeURIComponent(cid)}/add_one`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({question_id: qid})
+      body: JSON.stringify({question_id: qid, mode})
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.ok === false) throw new Error(data.error || '移动失败');
-    flashToast(`已移入「${li.dataset.folderName}」`);
-    // 一题只能在一个目录下，移动后局部重取题目列表；导航树和整页不销毁。
-    await loadFolderFragment(location.href, false);
+    const message = data.message
+      || `${mode === 'copy' ? '已复制到' : '已移入'}「${li.dataset.folderName}」`;
+    if (viewGeneration !== folderLoadGeneration || location.href !== viewHref
+        || (listEl?.dataset.collection || '') !== viewCollection) {
+      flashToast(message);
+      return;
+    }
+    const currentCollection = listEl?.dataset.collection || '';
+    const allValue = new URL(location.href).searchParams.get('all');
+    const allScope = ['1', 'true', 'on'].includes(allValue);
+    const targetVisible = allScope || (!!currentCollection && (
+      cid === currentCollection || cid.startsWith(currentCollection + '/')));
+    const moved = Array.isArray(data.moved) && data.moved.includes(qid);
+    if (mode === 'move' && moved && !targetVisible) {
+      const removedInline = session.card.dataset.inlineCreated === '1' ? 1 : 0;
+      session.card.remove();
+      syncQuestionCountAfterRemoval(1, removedInline);
+      // 分页快照需要补足当前页；最后一题移出后也要取回标准空状态。
+      if (listEl?.dataset.pageToken || !listEl?.querySelector('.card[data-id]')) {
+        await loadFolderFragment(location.href, false);
+      }
+    } else if ((mode === 'copy' && targetVisible)
+               || (mode === 'move' && moved
+                   && data.source_collection !== data.target_collection)) {
+      // 复制进入当前范围、或在当前汇总范围内移动时，局部重取题目区以保持真实排序。
+      await loadFolderFragment(location.href, false);
+    }
+    flashToast(message);
   } catch (err) {
+    restoreQuestionOrigin(session);
     flashToast(err.message, 'err');
   }
 });

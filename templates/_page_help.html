@@ -25,6 +25,7 @@
 <template id="page-help-content" data-help-title="{{ help_title }}">
   {% if endpoint == 'index' %}
     <h3>题目范围</h3><p>左侧可按文件夹、标签、题型和难度筛选。普通搜索会查题干、解析、备注、题源和标签，也可用 <code>note:</code> 等结构化条件。</p>
+    <h3>拖动题卡</h3><p>在未筛选的叶子题集中选择“自定义”排序后，可上下拖动题卡调整顺序。拖到左侧题集会移动题卡；按住 Shift 再拖入则复制一份到目标题集。</p>
     <h3>组卷</h3><p>勾选题目后打开选题篮，调整顺序与版式，再选择 HTML 近似预览、本机 PDF 或 TeX ZIP。</p>
     <h3>本地文件</h3><p>每道题都是题库目录中的 Markdown 文件，文件名就是题卡名称，可从题卡“更多”菜单重命名，也可在 Obsidian 中直接改名。题目身份和图片引用不会随文件名变化；没有题源和目标题集的散题会进入“临时卡片”。</p>
   {% elif endpoint.startswith('handouts') %}

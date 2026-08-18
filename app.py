@@ -1053,9 +1053,15 @@ def index():
     # 首屏仍只读取 30 道题，后续随滚动按批加载，不能退回一次创建整年题卡的旧实现。
     collection_children = (filestore.list_collection_children(collection_id)
                            if collection_id else [])
-    recursive = bool(collection_children) or (
+    collection_exists = bool(
+        collection_id and filestore.get_collection(collection_id))
+    explicit_recursive = (
         request.args.get("recursive") in ("1", "true", "on"))
+    recursive = bool(collection_children) or explicit_recursive
     explicit_filter = bool(tags or type_ or difficulty or starred_only or search)
+    question_reorder_enabled = bool(
+        collection_exists and not collection_children and sort == "custom"
+        and not explicit_all and not explicit_recursive and not explicit_filter)
     # 保留模板参数兼容文件夹局部切换协议；父文件夹导航概览已由递归汇总取代。
     collection_overview = False
 
@@ -1064,7 +1070,8 @@ def index():
     tags_deferred = blank
     question_total = 0
     question_page_token = ""
-    question_card_sort = sort
+    question_card_sort = (
+        sort if question_reorder_enabled or sort != "custom" else "browse")
     if blank:
         records = []
         questions = []
@@ -1134,6 +1141,7 @@ def index():
         question_total=question_total,
         question_page_token=question_page_token,
         question_card_sort=question_card_sort,
+        question_reorder_enabled=question_reorder_enabled,
         all_tags=all_tags,
         tags_deferred=tags_deferred,
         active_tags=tags,
@@ -2174,23 +2182,37 @@ def collection_add(cid):
 
 @app.route("/collections/<path:cid>/add_one", methods=["POST"])
 def collection_add_one(cid):
-    """把一道题放进文件夹（AJAX，拖题进文件夹用）。
-
-    与上面的 `/add` 区别只在数据来源：那个收的是勾选篮里的一批，这个收的是
-    拖拽带来的单个 question_id。软件版一题只能在一个目录下（见
-    filestore.add_to_collection），所以这个动作是**移动**而不是「加一份引用」。
-    """
-    qid = (request.get_json(silent=True) or {}).get("question_id")
+    """把拖来的一道题移动或复制到文件夹，并返回局部更新所需结果。"""
+    data = request.get_json(silent=True) or {}
+    qid = data.get("question_id")
     qid = str(qid or "").strip()
+    mode = str(data.get("mode") or "move").strip().lower()
     if not qid:
         return jsonify(ok=False, error="题目 id 无效"), 400
+    if mode not in ("move", "copy"):
+        return jsonify(ok=False, error="mode 只能是 move 或 copy"), 400
     col = filestore.get_collection(cid)
     if not col:
         return jsonify(ok=False, error="题集不存在"), 404
-    if not filestore.get_question(qid):
+    source = filestore.get_question(qid)
+    if not source:
         return jsonify(ok=False, error="题目不存在"), 404
-    filestore.add_to_collection(qid, cid)
-    return jsonify(ok=True)
+    source_collection = source.get("folder") or ""
+    if mode == "copy":
+        created = filestore.copy_to_collection([qid], cid)
+        moved = []
+        message = f"已复制题目到「{col['name']}」"
+    else:
+        moved = filestore.move_to_collection([qid], cid)
+        created = []
+        message = (f"已移动题目到「{col['name']}」" if moved
+                   else f"题目已在「{col['name']}」中")
+    return jsonify(
+        ok=True, mode=mode, question_id=qid,
+        moved=moved, created=created,
+        created_id=(created[0] if created else ""),
+        source_collection=source_collection, target_collection=cid,
+        message=message)
 
 
 @app.route("/collections/<path:cid>/remove", methods=["POST"])
@@ -2391,6 +2413,19 @@ def reorder():
         return jsonify(ok=False, error="empty"), 400
     filestore.reorder(ids)
     return jsonify(ok=True, count=len(ids))
+
+
+@app.route("/reorder/relative", methods=["POST"])
+def reorder_relative():
+    """只在明确的直属叶子题集内相对移动一道题，保留旧全量接口兼容性。"""
+    data = request.get_json(silent=True) or {}
+    try:
+        result = filestore.reorder_relative(
+            data.get("question_id"), data.get("collection"),
+            data.get("anchor_id"), data.get("placement"))
+    except ValueError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, **result)
 
 
 # ---------------------------------------------------------------------------

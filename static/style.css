@@ -647,6 +647,14 @@ select option { background: var(--surface); color: var(--text); }
 .card[draggable="true"] { cursor: default; }
 .drag-handle { cursor: grab; color: var(--muted); font-size: 16px; user-select: none; padding: 0 2px; }
 .drag-handle:active { cursor: grabbing; }
+#q-list:not([data-reorder-enabled="1"]) .drag-handle { display: none; }
+.card.question-drop-before::after,
+.card.question-drop-after::after {
+  content: ""; position: absolute; left: 0; right: 0; height: 2px;
+  background: var(--primary); border-radius: 2px; pointer-events: none;
+}
+.card.question-drop-before::after { top: -7px; }
+.card.question-drop-after::after { bottom: -7px; }
 .sort-label { font-size: 13px; color: var(--text-2); }
 .sort-label select { margin-left: var(--sp-1); padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-size: 13px; }
 .hint { font-size: 13px; margin-top: var(--sp-2); }

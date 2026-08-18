@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -2073,6 +2074,138 @@ def selected_ids() -> list[str]:
 def reorder(ids: list[str]):
     for i, qid in enumerate(ids):
         _update_meta_fields(qid, {"order": float(i)})
+
+
+_ORDER_RENORMALIZE_GAP = 1e-9
+
+
+def _write_record_order(record: dict, target_dir: Path, order: float) -> None:
+    """只改一份已确认直属当前题集的题卡顺序。调用方必须持有写锁。"""
+    path = config.BANK_DIR / record["path"]
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise ValueError("题卡路径无法读取") from exc
+    if (resolved.parent != target_dir or not path.is_file()
+            or path.is_symlink()):
+        raise ValueError("题卡已不在指定题集中，请刷新后重试")
+    meta, body = _read_raw(path)
+    actual_id = str(meta.get("id") or path.stem)
+    if actual_id != str(record["id"]):
+        raise ValueError("题卡身份已变化，请刷新后重试")
+    meta["order"] = float(order)
+    meta["updated"] = _now_iso()
+    _write_raw(path, meta, body)
+
+
+def reorder_relative(question_id: str, collection: str, anchor_id: str,
+                     placement: str) -> dict:
+    """在一个明确的叶子题集内，把题卡放到锚点前或后。
+
+    常规拖动只给被拖题写相邻顺序的中点；相邻值并列、非有限或浮点间隙即将
+    耗尽时，才在同一把锁内把这个题集归一为 1..N。整个过程只枚举并写入目标
+    目录的直属 Markdown，不扫描或改写其它题集。
+    """
+    qid = str(question_id or "").strip()
+    anchor = str(anchor_id or "").strip()
+    folder_id = str(collection or "").strip("/")
+    side = str(placement or "").strip().lower()
+    if not qid or not anchor:
+        raise ValueError("题目 id 和锚点 id 不能为空")
+    if qid == anchor:
+        raise ValueError("题目不能以自身作为排序锚点")
+    if side not in ("before", "after"):
+        raise ValueError("placement 只能是 before 或 after")
+
+    with _write_lock:
+        target_dir = _checked_folder_path(folder_id, allow_root=False)
+        if not target_dir.is_dir():
+            raise ValueError("题集不存在")
+        try:
+            has_child_collection = any(
+                child.is_dir()
+                and not child.name.startswith(".")
+                and child.name not in _RESERVED_BANK_DIRS
+                for child in target_dir.iterdir())
+        except OSError as exc:
+            raise ValueError("题集无法读取") from exc
+        if has_child_collection:
+            raise ValueError("只能在叶子题集内调整题目顺序")
+
+        records = collection_records_snapshot(folder_id, recursive=False)
+        matches = {
+            wanted: [record for record in records
+                     if str(record.get("id") or "") == wanted
+                     and record.get("folder") == folder_id]
+            for wanted in (qid, anchor)
+        }
+        if len(matches[qid]) != 1 or len(matches[anchor]) != 1:
+            raise ValueError("拖动题目和锚点必须直属当前题集")
+
+        ordered = sorted(records, key=_SORT_KEYS["custom"])
+        original_ids = [str(record["id"]) for record in ordered]
+        dragged = matches[qid][0]
+        remaining = [record for record in ordered
+                     if str(record.get("id") or "") != qid]
+        anchor_index = next(
+            index for index, record in enumerate(remaining)
+            if str(record.get("id") or "") == anchor)
+        insert_at = anchor_index if side == "before" else anchor_index + 1
+        desired = remaining[:insert_at] + [dragged] + remaining[insert_at:]
+        desired_ids = [str(record["id"]) for record in desired]
+        if desired_ids == original_ids:
+            return {
+                "question_id": qid, "collection": folder_id,
+                "anchor_id": anchor, "placement": side,
+                "order": float(dragged["order"]), "normalized": False,
+                "changed": False,
+            }
+
+        previous = desired[insert_at - 1] if insert_at else None
+        following = (desired[insert_at + 1]
+                     if insert_at + 1 < len(desired) else None)
+        left = float(previous["order"]) if previous else None
+        right = float(following["order"]) if following else None
+        normalize = (
+            (left is not None and not math.isfinite(left))
+            or (right is not None and not math.isfinite(right))
+            or (left is not None and right is not None
+                and (right - left <= _ORDER_RENORMALIZE_GAP
+                     or not math.isfinite((left + right) / 2.0)))
+        )
+
+        if normalize:
+            new_order = 0.0
+            for index, record in enumerate(desired, start=1):
+                candidate = float(index)
+                if float(record["order"]) != candidate:
+                    _write_record_order(record, target_dir, candidate)
+                if str(record["id"]) == qid:
+                    new_order = candidate
+        else:
+            if left is None:
+                new_order = right - 1.0
+            elif right is None:
+                new_order = left + 1.0
+            else:
+                new_order = (left + right) / 2.0
+            if not math.isfinite(new_order):
+                # 单侧极值溢出同样回到有界整数序列。
+                for index, record in enumerate(desired, start=1):
+                    candidate = float(index)
+                    if float(record["order"]) != candidate:
+                        _write_record_order(record, target_dir, candidate)
+                    if str(record["id"]) == qid:
+                        new_order = candidate
+                normalize = True
+            else:
+                _write_record_order(dragged, target_dir, new_order)
+
+    return {
+        "question_id": qid, "collection": folder_id,
+        "anchor_id": anchor, "placement": side,
+        "order": new_order, "normalized": normalize, "changed": True,
+    }
 
 
 # ---------------------------------------------------------------------------
