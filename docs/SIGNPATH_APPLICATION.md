@@ -2,14 +2,21 @@
 
 本页记录 QuizForge 的非个人申请信息。真实姓名、邮箱、协议勾选和最终提交必须由维护者本人在 [SignPath Foundation 申请页](https://signpath.org/apply) 完成，不写入仓库。
 
-## 提交前检查
+## 申请状态
 
-- [ ] GitHub 账号已启用多因素认证。
-- [x] [`Windows release candidate` #3](https://github.com/lhd23333/QuizForge/actions/runs/32049277954) 已在公开 `master` 提交上完整通过。
+维护者已于 2026-08-18 本人完成表单、协议确认和人机验证并提交申请，当前等待 SignPath Foundation 审核。申请页面未提供或尚未记录申请编号；后续以申请邮箱收到的审核邮件为准。
+
+审核通过前不创建 `v1.0.0` tag、不公开未签名安装包，也不发布生产更新清单。若审核方要求补充材料，只提供公开仓库、成功的候选构建、签名政策和可核验的实际采用情况，不补造下载量或社区规模。
+
+## 提交检查
+
+- [x] GitHub 账号已启用多因素认证。
+- [x] [`Windows release candidate` #4](https://github.com/lhd23333/QuizForge/actions/runs/32050050144) 已在公开 `master` 提交上完整通过。
 - [x] 仓库首页和下载入口能看到 `Code signing policy` 链接与 SignPath 署名。
 - [x] 代码签名政策列明构建来源、签名范围、角色、人工批准和隐私声明。
 - [x] 隐私政策准确描述更新检查和用户自选第三方 OCR／模型服务。
-- [ ] 已准备可核验的公开发布或采用情况证据；不虚构 Star、下载量、媒体报道或社区规模。
+- [x] 表单已由维护者本人提交，真实姓名、邮箱和协议选择未写入仓库。
+- [ ] 尚无公开 Release 或广泛采用证据；不虚构 Star、下载量、媒体报道或社区规模。
 
 SignPath 条款要求项目已经发布、持续维护并具有可核验信誉。QuizForge 当前属于新公开项目，即使技术材料齐全，是否满足信誉门槛仍由 SignPath Foundation 独立审核。
 
