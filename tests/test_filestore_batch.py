@@ -50,6 +50,143 @@ class FilestoreBatchCreateTests(unittest.TestCase):
         self.assertEqual([row["number"] for row in rows], [1, 2, 3])
         self.assertEqual([row["order"] for row in rows], [1.0, 2.0, 3.0])
 
+    def test_batch_order_only_reads_target_folder(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            filestore.create_questions_batch(
+                [{"body": "其它年份题", "number": 1}], "高考卷/2025/卷甲")
+            with mock.patch.object(
+                    filestore, "_all_records",
+                    side_effect=AssertionError("导入排序不应解析整座题库")):
+                ids = filestore.create_questions_batch([
+                    {"body": "第一题", "number": 1},
+                    {"body": "第二题", "number": 2},
+                ], "高考卷/2026/卷乙")
+                rows = filestore.collection_records_snapshot(
+                    "高考卷/2026/卷乙", recursive=False)
+
+        self.assertEqual([row["id"] for row in rows], ids)
+        self.assertEqual([row["order"] for row in rows], [1.0, 2.0])
+
+    def test_source_sort_is_natural_stable_and_puts_empty_source_last(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            ids = filestore.create_questions_batch([
+                {"body": "卷10第二题", "source": "模拟卷10", "number": 99},
+                {"body": "卷2第二题", "source": "模拟卷2", "number": 88},
+                {"body": "卷2第一题", "source": "模拟卷2", "number": 77},
+                {"body": "无题源", "source": "", "number": 1},
+                {"body": "卷10第一题", "source": "模拟卷10", "number": 66},
+            ], "来源")
+            # 自定义顺序才是题源组内基准，题号故意逆向设置，防止回退为按题号排序。
+            filestore.reorder([
+                ids[2], ids[1], ids[0], ids[4], ids[3]])
+
+            rows = filestore.list_questions(
+                sort="source", records=filestore.all_records_snapshot())
+
+        self.assertEqual(
+            [(row["source"], row["body"]) for row in rows],
+            [
+                ("模拟卷2", "卷2第一题"),
+                ("模拟卷2", "卷2第二题"),
+                ("模拟卷10", "卷10第二题"),
+                ("模拟卷10", "卷10第一题"),
+                ("", "无题源"),
+            ])
+        self.assertEqual(rows[-1]["id"], ids[3])
+
+    def test_cold_single_question_lookup_does_not_parse_whole_bank(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            qid = filestore.create_question("冷启动定向读取", folder="试卷")
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            with mock.patch.object(
+                    filestore, "_all_records",
+                    side_effect=AssertionError("读取单题不应解析整座题库")):
+                row = filestore.get_question(qid)
+
+        self.assertEqual(row["id"], qid)
+        self.assertEqual(row["body"], "冷启动定向读取")
+
+    def test_batch_move_appends_in_source_order_without_global_scan(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            source_ids = filestore.create_questions_batch([
+                {"body": "第一题", "number": 1},
+                {"body": "第二题", "number": 2},
+                {"body": "第三题", "number": 3},
+            ], "来源")
+            seed = filestore.create_question("目标既有题", folder="目标", number=9)
+
+            with mock.patch.object(
+                    filestore, "_all_records",
+                    side_effect=AssertionError("批量移动不应解析整座题库")):
+                moved = filestore.move_to_collection(
+                    [source_ids[2], source_ids[0]], "目标")
+                target = filestore.list_questions(records=
+                    filestore.collection_records_snapshot(
+                        "目标", recursive=False))
+
+        self.assertEqual(moved, [source_ids[0], source_ids[2]])
+        self.assertEqual([row["id"] for row in target],
+                         [seed, source_ids[0], source_ids[2]])
+        self.assertEqual([row["order"] for row in target], [1.0, 2.0, 3.0])
+
+    def test_copy_keeps_content_metadata_and_creates_independent_ids(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache(folder_structure=True)
+            first = filestore.create_question(
+                "第一题 ![[图.png]]", solution="第一题解析", note="第一题备注",
+                qtype="单选题", source="原卷", difficulty="3", tags=["重点"],
+                folder="来源", number=1)
+            second = filestore.create_question(
+                "第二题", solution="第二题解析", folder="来源", number=2)
+            first_path = Path(td) / filestore.get_question(first)["path"]
+            meta, body = filestore._read_raw(first_path)
+            meta.update({
+                "img_split": "opts", "img_layouts": [{"i": 0, "w": 40}],
+                "custom_field": "保留我", "_quizforge_import_scope": "旧任务",
+                "_quizforge_import_index": 0,
+            })
+            filestore._write_raw(first_path, meta, body)
+            (Path(td) / "目标").mkdir()
+
+            with mock.patch.object(
+                    filestore, "_all_records",
+                    side_effect=AssertionError("批量复制不应解析整座题库")):
+                created = filestore.copy_to_collection([second, first], "目标")
+                copies = filestore.list_questions(records=
+                    filestore.collection_records_snapshot(
+                        "目标", recursive=False))
+
+            original = filestore.get_question(first)
+            copied_meta, _copied_body = filestore._read_raw(
+                Path(td) / copies[0]["path"])
+
+        self.assertEqual(len(created), 2)
+        self.assertEqual([row["number"] for row in copies], [1, 2])
+        self.assertEqual([row["id"] for row in copies], created)
+        self.assertNotIn(first, created)
+        self.assertEqual(original["folder"], "来源")
+        for key in ("body", "solution", "note", "type", "source", "difficulty",
+                    "tags", "img_split", "img_layouts"):
+            self.assertEqual(copies[0][key], original[key], key)
+        self.assertEqual(copied_meta["custom_field"], "保留我")
+        self.assertNotIn("_quizforge_import_scope", copied_meta)
+        self.assertNotIn("_quizforge_import_index", copied_meta)
+
     def test_automatic_batch_scope_is_persistent_and_idempotent(self):
         items = [
             {"body": "第一题", "solution": "第一题解析",

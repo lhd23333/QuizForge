@@ -407,6 +407,8 @@ def selected_question_summaries() -> list[dict]:
             "id": str(record.get("id") or ""),
             "type": record.get("type") or "未分类",
             "source": record.get("source") or "未记录题源",
+            "number": record.get("number"),
+            "folder": record.get("folder") or "题库根目录",
             "excerpt": plain[:180],
             "path": record.get("path") or "",
             # qrender 与题库正式题卡、PDF 共用选项和图片布局规则；它会先转义外来

@@ -1,10 +1,9 @@
-// 本地资料库工作区：文件标签对应常驻 DOM 面板。切换时只隐藏/显示，不销毁 PDF
-// iframe，因此阅读位置和 WebView2 内置阅读器状态会一直保留到用户真正关闭标签。
+// 本地资料库工作区：每个标签是一个页面槽位。文件点击只替换当前槽位，只有
+// 加号会增加空白页；已打开槽位继续保留 DOM，切换时不销毁 PDF 阅读位置。
 (function () {
   'use strict';
 
-  const SESSION_KEY = 'quizforge:library-workspace:v2';
-  const LEGACY_SESSION_KEY = 'quizforge:library-tabs:v1';
+  const SESSION_KEY = 'quizforge:library-workspace:v3';
   const MAX_TABS = 20;
   const tree = document.getElementById('library-tree');
   const panesHost = document.getElementById('library-panes');
@@ -129,17 +128,17 @@
     if (secondary) panesHost.insertBefore(splitter, secondary.root);
   }
 
-  function moveTab(path, destinationId, activateMoved) {
-    const tab = tabs.get(path);
+  function moveTab(tabKey, destinationId, activateMoved) {
+    const tab = tabs.get(tabKey);
     const source = tab ? panes.get(tab.paneId) : null;
     const destination = panes.get(destinationId);
     if (!tab || !source || !destination || source === destination) return;
-    source.order = source.order.filter(item => item !== path);
-    if (source.active === path) source.active = source.order[source.order.length - 1] || '';
-    destination.order.push(path);
+    source.order = source.order.filter(item => item !== tabKey);
+    if (source.active === tabKey) source.active = source.order[source.order.length - 1] || '';
+    destination.order.push(tabKey);
     tab.paneId = destination.id;
     if (tab.panel) destination.content.append(tab.panel);
-    if (activateMoved) destination.active = path;
+    if (activateMoved) destination.active = tabKey;
   }
 
   function setLayout(next, options) {
@@ -175,24 +174,16 @@
   function saveSession() {
     try {
       sessionStorage.setItem(SESSION_KEY, JSON.stringify({
-        version: 2,
+        version: 3,
         layout,
         focused: focusedPaneId,
         split: splitRatio,
-        panes: [...panes.values()].map(pane => ({
-          id: pane.id,
-          active: pane.active,
-          tabs: pane.order.map(path => {
-            const tab = tabs.get(path);
-            return {path: tab.path, name: tab.name, kind: tab.kind, mode: tab.mode};
-          }),
-        })),
       }));
     } catch (error) { /* 存储不可用时，本次页面生命周期仍正常保活。 */ }
   }
 
   function markActiveTree() {
-    const activePath = focusedPane()?.active || '';
+    const activePath = tabs.get(focusedPane()?.active || '')?.path || '';
     tree.querySelectorAll('.library-tree-entry.is-active').forEach(node =>
       node.classList.remove('is-active'));
     tree.querySelectorAll('.library-tree-entry[data-path]').forEach(node => {
@@ -216,7 +207,7 @@
         button.type = 'button';
         button.className = `library-md-mode${tab.mode === mode ? ' is-active' : ''}`;
         button.dataset.libraryMode = mode;
-        button.dataset.path = tab.path;
+        button.dataset.tabKey = tab.key;
         button.textContent = label;
         modes.append(button);
       });
@@ -228,7 +219,7 @@
       const save = document.createElement('button');
       save.type = 'button';
       save.className = 'library-md-save';
-      save.dataset.librarySave = tab.path;
+      save.dataset.librarySave = tab.key;
       save.textContent = '保存';
       saveArea.append(status, save);
       toolbar.append(saveArea);
@@ -380,33 +371,75 @@
     return panel;
   }
 
+  function addBlankDocumentTab(pane = focusedPane(), activateTab = true) {
+    if (!pane || tabs.size >= MAX_TABS) return null;
+    const serial = ++tabSerial;
+    const key = `page-${Date.now().toString(36)}-${serial.toString(36)}`;
+    const tab = {
+      key, path: '', kind: 'blank', name: '空白页', mode: 'read',
+      paneId: pane.id, panel: null, dirty: false, saving: false,
+      discardArmedUntil: 0, serial,
+    };
+    tabs.set(key, tab);
+    pane.order.push(key);
+    if (activateTab) pane.active = key;
+    return tab;
+  }
+
+  function replaceTabDocument(tab, entry) {
+    const path = validPath(entry.path);
+    const kind = entry.kind || kindFromPath(path);
+    if (!tab || !path || !kind) return false;
+    if (tab.dirty) {
+      updateMarkdownState(tab, '请先保存当前修改，再打开其他文件', true);
+      return false;
+    }
+    tab.panel?.remove();
+    ['content', 'editor', 'saveButton', 'saveStatus', 'text', 'savedText',
+      'mtime', 'loadError'].forEach(name => delete tab[name]);
+    Object.assign(tab, {
+      path,
+      kind,
+      name: entry.name || pathName(path),
+      mode: entry.mode === 'source' ? 'source' : 'read',
+      panel: null,
+      dirty: false,
+      saving: false,
+      discardArmedUntil: 0,
+    });
+    return true;
+  }
+
   function drawTabs(pane) {
     pane.tabsBar.replaceChildren();
-    pane.order.forEach(path => {
-      const tab = tabs.get(path);
+    pane.order.forEach(tabKey => {
+      const tab = tabs.get(tabKey);
       if (!tab) return;
       const item = document.createElement('div');
-      item.className = `library-tab${path === pane.active ? ' is-active' : ''}`;
+      item.className = `library-tab${tabKey === pane.active ? ' is-active' : ''}`;
       const open = document.createElement('button');
       open.type = 'button';
       open.className = 'library-tab-open';
-      open.dataset.path = path;
+      open.dataset.tabKey = tabKey;
       open.setAttribute('role', 'tab');
-      open.setAttribute('aria-selected', String(path === pane.active));
-      open.title = path;
-      const icon = document.createElement('span');
-      icon.className = `library-file-icon is-${tab.kind}`;
-      icon.textContent = tab.kind === 'markdown' ? 'M' : tab.kind === 'pdf' ? 'P' : 'I';
+      open.setAttribute('aria-selected', String(tabKey === pane.active));
+      open.title = tab.path || tab.name;
+      if (tab.kind !== 'blank') {
+        const icon = document.createElement('span');
+        icon.className = `library-file-icon is-${tab.kind}`;
+        icon.textContent = tab.kind === 'markdown' ? 'M' : tab.kind === 'pdf' ? 'P' : 'I';
+        open.append(icon);
+      }
       const label = document.createElement('span');
       label.className = 'library-tab-label';
       label.textContent = tab.name;
-      open.append(icon, label);
+      open.append(label);
       item.append(open);
       if (layout !== 'single') {
         const move = document.createElement('button');
         move.type = 'button';
         move.className = 'library-tab-move';
-        move.dataset.movePath = path;
+        move.dataset.moveTab = tabKey;
         move.title = pane.id === 'primary' ? '移到另一栏' : '移到第一栏';
         move.setAttribute('aria-label', move.title);
         move.textContent = layout === 'vertical' ? '⇄' : '⇅';
@@ -415,24 +448,34 @@
       const close = document.createElement('button');
       close.type = 'button';
       close.className = 'library-tab-close';
-      close.dataset.closePath = path;
+      close.dataset.closeTab = tabKey;
       close.title = `关闭 ${tab.name}`;
       close.setAttribute('aria-label', close.title);
       close.textContent = '×';
+      close.hidden = pane.order.length <= 1;
       item.append(close);
       pane.tabsBar.append(item);
     });
-    pane.tabsBar.hidden = !pane.order.length;
+    const add = document.createElement('button');
+    add.type = 'button';
+    add.className = 'library-tab-add';
+    add.dataset.libraryTabAdd = pane.id;
+    add.title = '新建空白页';
+    add.setAttribute('aria-label', '新建空白页');
+    add.textContent = '＋';
+    pane.tabsBar.append(add);
+    pane.tabsBar.hidden = false;
   }
 
   function renderPane(pane) {
     drawTabs(pane);
-    if (pane.active && tabs.has(pane.active)) ensurePanel(tabs.get(pane.active));
-    pane.order.forEach(path => {
-      const panel = tabs.get(path)?.panel;
-      if (panel) panel.hidden = path !== pane.active;
+    const activeTab = tabs.get(pane.active);
+    if (activeTab && activeTab.kind !== 'blank') ensurePanel(activeTab);
+    pane.order.forEach(tabKey => {
+      const panel = tabs.get(tabKey)?.panel;
+      if (panel) panel.hidden = tabKey !== pane.active;
     });
-    pane.empty.hidden = Boolean(pane.active);
+    pane.empty.hidden = Boolean(activeTab && activeTab.kind !== 'blank');
   }
 
   function renderAll() {
@@ -440,18 +483,14 @@
     markActiveTree();
   }
 
-  function activate(path) {
-    const tab = tabs.get(path);
+  function activate(tabKey) {
+    const tab = tabs.get(tabKey);
     if (!tab) return;
     const pane = panes.get(tab.paneId);
-    pane.active = path;
+    pane.active = tabKey;
     setFocusedPane(pane.id);
     renderPane(pane);
     saveSession();
-  }
-
-  function oldestTabPath() {
-    return [...tabs.values()].sort((a, b) => a.serial - b.serial)[0]?.path || '';
   }
 
   function openDocument(entry) {
@@ -467,33 +506,18 @@
       }
       return;
     }
-    if (tabs.has(path)) {
-      activate(path);
-      return;
-    }
-    if (tabs.size >= MAX_TABS) closeDocument(oldestTabPath());
     const pane = focusedPane();
-    tabs.set(path, {
-      path,
-      kind,
-      name: entry.name || pathName(path),
-      mode: entry.mode === 'source' ? 'source' : 'read',
-      paneId: pane.id,
-      panel: null,
-      dirty: false,
-      saving: false,
-      discardArmedUntil: 0,
-      serial: ++tabSerial,
-    });
-    pane.order.push(path);
-    pane.active = path;
+    let tab = tabs.get(pane.active);
+    if (!tab) tab = addBlankDocumentTab(pane, true);
+    if (!replaceTabDocument(tab, {...entry, path, kind})) return;
+    pane.active = tab.key;
     renderPane(pane);
     markActiveTree();
     saveSession();
   }
 
-  function closeDocument(path) {
-    const tab = tabs.get(path);
+  function closeDocument(tabKey) {
+    const tab = tabs.get(tabKey);
     if (!tab) return;
     if (tab.dirty && Date.now() > (tab.discardArmedUntil || 0)) {
       tab.discardArmedUntil = Date.now() + 4000;
@@ -501,22 +525,26 @@
       return;
     }
     const pane = panes.get(tab.paneId);
-    const index = pane.order.indexOf(path);
+    const index = pane.order.indexOf(tabKey);
     pane.order.splice(index, 1);
     tab.panel?.remove();
-    tabs.delete(path);
-    if (pane.active === path) pane.active = pane.order[index] || pane.order[index - 1] || '';
+    tabs.delete(tabKey);
+    if (!pane.order.length) addBlankDocumentTab(pane, true);
+    else if (pane.active === tabKey) {
+      pane.active = pane.order[index] || pane.order[index - 1] || pane.order[0];
+    }
     renderPane(pane);
     markActiveTree();
     saveSession();
   }
 
-  function moveDocument(path) {
-    const tab = tabs.get(path);
+  function moveDocument(tabKey) {
+    const tab = tabs.get(tabKey);
     if (!tab || layout === 'single') return;
     const destinationId = tab.paneId === 'primary' ? 'secondary' : 'primary';
     const source = panes.get(tab.paneId);
-    moveTab(path, destinationId, true);
+    moveTab(tabKey, destinationId, true);
+    if (!source.order.length) addBlankDocumentTab(source, true);
     setFocusedPane(destinationId);
     renderPane(source);
     renderPane(panes.get(destinationId));
@@ -662,24 +690,33 @@
   panesHost.addEventListener('click', event => {
     const paneRoot = event.target.closest('[data-library-pane]');
     if (paneRoot) setFocusedPane(paneRoot.dataset.paneId);
+    const add = event.target.closest('.library-tab-add');
+    if (add) {
+      const pane = panes.get(add.dataset.libraryTabAdd) || focusedPane();
+      addBlankDocumentTab(pane, true);
+      setFocusedPane(pane.id);
+      renderPane(pane);
+      saveSession();
+      return;
+    }
     const close = event.target.closest('.library-tab-close');
     if (close) {
-      closeDocument(close.dataset.closePath);
+      closeDocument(close.dataset.closeTab);
       return;
     }
     const move = event.target.closest('.library-tab-move');
     if (move) {
-      moveDocument(move.dataset.movePath);
+      moveDocument(move.dataset.moveTab);
       return;
     }
     const open = event.target.closest('.library-tab-open');
     if (open) {
-      activate(open.dataset.path);
+      activate(open.dataset.tabKey);
       return;
     }
     const mode = event.target.closest('.library-md-mode');
     if (mode) {
-      const tab = tabs.get(mode.dataset.path);
+      const tab = tabs.get(mode.dataset.tabKey);
       if (!tab || tab.kind !== 'markdown') return;
       tab.mode = mode.dataset.libraryMode;
       renderMarkdownContent(tab);
@@ -714,50 +751,24 @@
     }
   });
 
-  function restoreTab(item, pane) {
-    const path = validPath(item.path);
-    const kind = item.kind || kindFromPath(path);
-    if (!path || !kind || tabs.has(path) || tabs.size >= MAX_TABS) return;
-    tabs.set(path, {
-      path,
-      kind,
-      name: item.name || pathName(path),
-      mode: item.mode === 'source' ? 'source' : 'read',
-      paneId: pane.id,
-      panel: null,
-      dirty: false,
-      saving: false,
-      discardArmedUntil: 0,
-      serial: ++tabSerial,
-    });
-    pane.order.push(path);
-  }
-
   createPane('primary');
   try {
     const saved = JSON.parse(sessionStorage.getItem(SESSION_KEY) || '{}');
-    if (saved.version === 2 && Array.isArray(saved.panes)) {
+    if (saved.version === 3) {
       splitRatio = Number.isFinite(Number(saved.split))
         ? Math.max(20, Math.min(80, Number(saved.split))) : 50;
-      setLayout(saved.layout, {restore: true});
-      saved.panes.forEach(savedPane => {
-        const pane = panes.get(savedPane.id === 'secondary' ? 'secondary' : 'primary');
-        if (!pane) return;
-        (Array.isArray(savedPane.tabs) ? savedPane.tabs : []).forEach(item => restoreTab(item, pane));
-        pane.active = pane.order.includes(savedPane.active) ? savedPane.active : pane.order[0] || '';
-      });
-      focusedPaneId = panes.has(saved.focused) ? saved.focused : 'primary';
-    } else {
-      const legacy = JSON.parse(sessionStorage.getItem(LEGACY_SESSION_KEY) || '{}');
-      const pane = panes.get('primary');
-      (Array.isArray(legacy.tabs) ? legacy.tabs : []).forEach(item => restoreTab(item, pane));
-      pane.active = pane.order.includes(legacy.active) ? legacy.active : pane.order[0] || '';
+      layout = ['single', 'vertical', 'horizontal'].includes(saved.layout)
+        ? saved.layout : 'single';
+      focusedPaneId = saved.focused === 'secondary' ? 'secondary' : 'primary';
     }
   } catch (error) {
-    // 损坏会话只丢状态，不影响继续打开本地文件。
+    // 损坏会话只丢布局，不影响继续打开本地文件。
   }
 
   setLayout(layout, {restore: true});
+  panes.forEach(pane => {
+    if (!pane.order.length) addBlankDocumentTab(pane, true);
+  });
   renderAll();
   setFocusedPane(focusedPaneId);
   initialTreePromise = loadChildren(tree, '', 0);

@@ -1187,33 +1187,47 @@ class PageTests(unittest.TestCase):
         html = app_module.app.test_client().get("/?all=1").get_data(as_text=True)
         folder_markup = re.search(
             rf'data-folder-id="{re.escape(folder_id)}".*?'
-            r'<div class="folder-row" draggable="true">',
+            r'<div class="folder-row" draggable="true">(.*?)</div>',
             html, re.S)
         self.assertIsNotNone(folder_markup)
-        self.assertRegex(
-            html,
-            r'class="folder-item folder-root[^\"]*" data-folder-id="">\s*'
-            r'<div class="folder-row">')
+        self.assertNotIn('▰', folder_markup.group(1))
+        self.assertNotIn('class="folder-item folder-root', html)
+        self.assertNotIn('>全部题目</a>', html)
 
         template = (config.BASE_DIR / "templates" / "index.html").read_text(
             encoding="utf-8")
+        lazy_renderer = re.search(
+            r"function renderLazyFolder\(node\) \{(.*?)"
+            r"function insertFolderNodeSorted",
+            template, re.S)
+        self.assertIsNotNone(lazy_renderer)
+        self.assertNotIn("▰", lazy_renderer.group(1))
         self.assertIn("row.draggable = true", template)
+        self.assertIn("const row = event.target.closest('.folder-row')", template)
+        self.assertIn(
+            "row.querySelector(':scope > a.folder-link[data-ajax=\"1\"]')",
+            template)
         self.assertIn("application/x-quizforge-folder", template)
         self.assertIn("isInvalidFolderDrop(sourceId, cid)", template)
         self.assertIn("remapActiveCollection(sourceId, data.id, true)", template)
         self.assertIn("loadFolderFragment(location.href, false, true)", template)
 
-    def test_question_page_has_folder_tabs_with_independent_browse_state(self):
+    def test_question_page_tabs_replace_current_page_and_add_only_on_plus(self):
         folder_id = app_module.filestore.get_or_create_collection("多标签目录", "")
         html = app_module.app.test_client().get(
             "/", query_string={"collection": folder_id}).get_data(as_text=True)
         self.assertIn('id="collection-tabs"', html)
         self.assertIn('role="tablist" aria-label="已打开的题集"', html)
         self.assertIn('class="collection-tab-label">多标签目录</span>', html)
+        self.assertIn('data-collection-tab-add', html)
 
         template = (config.BASE_DIR / "templates" / "index.html").read_text(
             encoding="utf-8")
-        self.assertIn("quizforge:collection-tabs:v1", template)
+        self.assertIn("quizforge:collection-tabs:v2", template)
+        self.assertIn("function addBlankCollectionTab()", template)
+        self.assertIn("let tab = activeCollectionTab()", template)
+        self.assertIn("tab.id = id", template)
+        self.assertNotIn("collectionTabsState.tabs.find(row => row.id === id)", template)
         self.assertIn("captureCollectionTabPosition", template)
         self.assertIn("restoreCollectionTabPosition", template)
         self.assertIn("await loadNextQuestionPage()", template)
@@ -1221,10 +1235,57 @@ class PageTests(unittest.TestCase):
         self.assertIn("closeCollectionTab", template)
         self.assertIn("remapCollectionTabs(fid, data.id, true)", template)
         self.assertIn("removeCollectionTabs(fid)", template)
+        self.assertIn("const next = deletedCollectionFallback(fid, data.parent_id || '')", template)
+        self.assertIn("history.replaceState({qfFragment: true}, '', next.url)", template)
+        deleted_fallback = re.search(
+            r"function deletedCollectionFallback\(.*?\n\}", template, re.S)
+        self.assertIsNotNone(deleted_fallback)
+        self.assertNotIn("searchParams.set('all', '1')", deleted_fallback.group(0))
+        self.assertIn("removeFolderTreeItem(li)", template)
+        self.assertIn("function remapFolderTreeItem(", template)
+        self.assertIn("function moveFolderTreeItem(", template)
+        self.assertIn("remapFolderTreeItem(li, fid, data.id", template)
+        self.assertIn("moveFolderTreeItem(li, fid, data.id, parentId)", template)
+        self.assertNotIn("await loadFolderFragment(next.url, next.changed, true);\n    flashToast(data.message || '题集已移入回收站')", template)
         self.assertIn("insertCreatedFolder(data)", template)
         self.assertNotIn("await loadFolderFragment(location.href, false, true);\n    flashToast(data.message || '文件夹已新建')", template)
         self.assertIn('id="bulk-folder-tree" role="tree"', template)
         self.assertIn("loadBulkFolderChildren", template)
+        self.assertIn("function positionBulkFolderPopover()", template)
+        self.assertIn("bulkFolderTrigger.getBoundingClientRect()", template)
+        self.assertIn("window.addEventListener('resize', scheduleBulkFolderPopoverPosition)", template)
+        self.assertIn("bulk-folder-twist${node.has_children ? '' : ' is-empty'}", template)
+        self.assertNotIn("bulk-folder-twist${node.has_children ? '' : ' empty'}", template)
+        self.assertIn("class=\"bulk-selected-list\"", html)
+        self.assertIn("body.className = 'bulk-selected-body'", template)
+        self.assertIn("event.submitter?.matches('button[type=\"submit\"]')", template)
+
+        stylesheet = (config.BASE_DIR / "static" / "style.css").read_text(
+            encoding="utf-8")
+        popover_rule = re.search(
+            r"\.bulk-folder-popover\s*\{([^}]*)\}", stylesheet, re.S)
+        self.assertIsNotNone(popover_rule)
+        self.assertIn("position: fixed", popover_rule.group(1))
+        self.assertIn("width: min(380px, calc(100vw - 24px))", popover_rule.group(1))
+        self.assertIn("overflow: auto", popover_rule.group(1))
+
+        tabs_rules = re.findall(
+            r"(?:^|\n)\.collection-tabs\s*\{([^}]*)\}", stylesheet, re.S)
+        self.assertEqual(len(tabs_rules), 1)
+        self.assertIn("position: sticky", tabs_rules[0])
+        self.assertIn("top: 12px", tabs_rules[0])
+        self.assertRegex(
+            stylesheet,
+            r"html\.desktop-host \.collection-tabs,\s*"
+            r"html\.desktop-host\.embedded-view \.collection-tabs\s*"
+            r"\{\s*top:\s*10px;")
+        self.assertRegex(
+            stylesheet,
+            r"html\.desktop-host \.toolbar\s*\{\s*top:\s*54px;")
+        self.assertRegex(
+            stylesheet,
+            r"html\.desktop-host\.embedded-view \.toolbar\s*"
+            r"\{\s*top:\s*54px;")
 
     def test_question_drag_has_viewport_edge_auto_scroll(self):
         template = (config.BASE_DIR / "templates" / "index.html").read_text(
@@ -1233,6 +1294,96 @@ class PageTests(unittest.TestCase):
         self.assertIn("window.scrollBy(0, delta)", template)
         self.assertIn("if (dragQuestionId) updateQuestionDragAutoScroll", template)
         self.assertIn("stopQuestionDragAutoScroll();", template)
+
+    def test_selection_only_changes_state_and_never_reorders_cards(self):
+        template = (config.BASE_DIR / "templates" / "index.html").read_text(
+            encoding="utf-8")
+        handler = re.search(
+            r"listEl\?\.addEventListener\('change', (?:async )?event => \{"
+            r"(.*?)\n\}\);",
+            template, re.S)
+        self.assertIsNotNone(handler)
+        self.assertIn("card?.classList.toggle('selected'", handler.group(1))
+        self.assertNotIn("after(card)", handler.group(1))
+        self.assertNotIn("prepend(card)", handler.group(1))
+
+    def test_selection_mutations_are_serialized_and_clear_all_visible_cards(self):
+        template = (config.BASE_DIR / "templates" / "index.html").read_text(
+            encoding="utf-8")
+        self.assertIn("let selectionMutationTail = Promise.resolve()", template)
+        self.assertIn("const run = selectionMutationTail.then(task, task)", template)
+
+        clear_start = template.index(
+            "bulkbar?.addEventListener('submit', async event => {")
+        clear_end = template.index("function syncBulkPropertyInputs()", clear_start)
+        clear_handler = template[clear_start:clear_end]
+        self.assertIn("selectionClearInFlight = true", clear_handler)
+        self.assertIn("setVisibleCardsSelected(false)", clear_handler)
+        self.assertIn("await enqueueSelectionMutation(performRequest)",
+                      clear_handler)
+        self.assertNotIn("querySelectorAll('.card.selected')",
+                         clear_handler)
+
+    def test_single_question_toggle_reports_json_success(self):
+        qid = app_module.filestore.create_question("单题勾选响应测试")
+        app_module.filestore.clear_selected()
+        try:
+            response = app_module.app.test_client().post(
+                f"/question/{qid}/toggle",
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
+        self.assertEqual(response.get_json()["selected"], 1)
+
+    def test_collection_add_exposes_copy_and_move_semantics(self):
+        source = app_module.filestore.get_or_create_collection("移动复制来源", "")
+        target = app_module.filestore.get_or_create_collection("移动复制目标", "")
+        first = app_module.filestore.create_question(
+            "保留原题", solution="保留解析", note="保留备注", folder=source,
+            number=1)
+        second = app_module.filestore.create_question(
+            "移动原题", folder=source, number=2)
+        client = app_module.app.test_client()
+        headers = {
+            "X-CSRF-Token": app_module._WRITE_TOKEN,
+            "Accept": "application/json",
+        }
+        app_module.filestore.clear_selected()
+        try:
+            app_module.filestore.select_ids([first])
+            with mock.patch.object(
+                    app_module.filestore, "_all_records",
+                    side_effect=AssertionError("复制路由不应扫描整座题库")):
+                copied = client.post(
+                    f"/collections/{target}/add", data={"mode": "copy"},
+                    headers=headers)
+            app_module.filestore.clear_selected()
+            app_module.filestore.select_ids([second])
+            with mock.patch.object(
+                    app_module.filestore, "_all_records",
+                    side_effect=AssertionError("移动路由不应扫描整座题库")):
+                moved = client.post(
+                    f"/collections/{target}/add", data={"mode": "move"},
+                    headers=headers)
+            source_rows = app_module.filestore.collection_records_snapshot(
+                source, recursive=False)
+            target_rows = app_module.filestore.collection_records_snapshot(
+                target, recursive=False)
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual(copied.status_code, 200)
+        self.assertEqual(copied.get_json()["mode"], "copy")
+        self.assertEqual(len(copied.get_json()["created"]), 1)
+        self.assertEqual(moved.status_code, 200)
+        self.assertEqual(moved.get_json()["moved"], [second])
+        self.assertEqual([row["id"] for row in source_rows], [first])
+        self.assertEqual(len(target_rows), 2)
+        self.assertEqual(target_rows[0]["body"], "保留原题")
+        self.assertEqual(target_rows[1]["id"], second)
 
     def test_image_toolbar_explains_export_width_and_offers_presets(self):
         card = (config.BASE_DIR / "templates" / "_question_card.html").read_text(
@@ -1310,14 +1461,23 @@ class PageTests(unittest.TestCase):
         self.assertEqual(data["pid"], os.getpid())
         self.assertEqual(Path(data["project"]), config.BASE_DIR)
 
-    def test_home_defaults_to_first_question_page(self):
+    def test_home_starts_blank_without_scanning_global_questions(self):
         app_module.filestore.create_question(
             "首页默认题卡回归", qtype="填空题", folder="首页回归")
         client = app_module.app.test_client()
-        page = client.get("/")
+        with (mock.patch.object(
+                app_module.filestore, "list_question_paths",
+                side_effect=AssertionError("空白首页不应枚举全库路径")),
+              mock.patch.object(
+                  app_module.filestore, "all_records_snapshot",
+                  side_effect=AssertionError("空白首页不应解析全库题目"))):
+            page = client.get("/")
         self.assertEqual(page.status_code, 200)
-        self.assertNotIn("从一个题集开始".encode("utf-8"), page.data)
-        self.assertRegex(page.get_data(as_text=True), r'data-total="[1-9]\d*"')
+        self.assertIn("未选择题集".encode("utf-8"), page.data)
+        self.assertIn(b'data-total="0"', page.data)
+        self.assertIn(b'data-blank="1"', page.data)
+        self.assertIn(b'class="search-bar hidden"', page.data)
+        self.assertIn(b'class="toolbar hidden"', page.data)
         self.assertIn(b'<option value="practice">', page.data)
         self.assertIn(b'<select name="paper_tone">', page.data)
         self.assertIn('米黄护眼'.encode("utf-8"), page.data)
@@ -1888,6 +2048,15 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertIn('data-library-layout="vertical"', page.get_data(as_text=True))
         self.assertIn('data-help-title="资料库帮助"', page.get_data(as_text=True))
         self.assertIn("Markdown 保存前会核对磁盘版本", page.get_data(as_text=True))
+        self.assertIn("未选择文件", page.get_data(as_text=True))
+        library_script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
+            encoding="utf-8")
+        self.assertIn("quizforge:library-workspace:v3", library_script)
+        self.assertIn("function addBlankDocumentTab(", library_script)
+        self.assertIn("let tab = tabs.get(pane.active)", library_script)
+        self.assertIn("replaceTabDocument(tab,", library_script)
+        self.assertIn("add.dataset.libraryTabAdd = pane.id", library_script)
+        self.assertNotIn("if (tabs.has(path))", library_script)
         listing = self.client.get(
             "/api/library/children", query_string={"path": "资料阅读测试"})
         self.assertEqual(listing.status_code, 200)

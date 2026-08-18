@@ -517,8 +517,12 @@ def all_records_snapshot() -> list[dict]:
     return _all_records()
 
 
-def collection_records_snapshot(folder_id: str) -> list[dict]:
-    """只扫描一个文件夹子树，供进入单卷/单年份时避免遍历整座题库。"""
+def collection_records_snapshot(folder_id: str, *, recursive: bool = True) -> list[dict]:
+    """只扫描一个文件夹，供局部浏览和写入排序避免遍历整座题库。
+
+    默认包含后代目录，符合父文件夹汇总和筛选语义；计算新题 ``order`` 时只需要
+    当前目录的直属题目，传 ``recursive=False`` 可避免一次导入误读整棵年份目录。
+    """
     root = config.BANK_DIR.resolve()
     target = _folder_abspath(folder_id).resolve()
     if target != root and not target.is_relative_to(root):
@@ -527,7 +531,8 @@ def collection_records_snapshot(folder_id: str) -> list[dict]:
         return []
     records = []
     with _scan_lock:
-        for path in target.rglob("*.md"):
+        paths = target.rglob("*.md") if recursive else target.glob("*.md")
+        for path in paths:
             try:
                 rel = path.relative_to(config.BANK_DIR)
             except ValueError:
@@ -560,14 +565,16 @@ def collection_records_snapshot(folder_id: str) -> list[dict]:
 _NATURAL_PART_RE = re.compile(r"(\d+)")
 
 
+def _natural_text_key(text: str) -> tuple:
+    """按人眼习惯比较文本中的数字片段，例如卷2排在卷10前面。"""
+    return tuple(
+        (0, int(token)) if token.isdigit() else (1, token.casefold())
+        for token in _NATURAL_PART_RE.split(str(text or "")) if token)
+
+
 def _natural_rel_key(rel_path: str) -> tuple:
     """文件夹与题号按人眼顺序排列，避免第10题排在第2题前面。"""
-    out = []
-    for part in PurePosixPath(rel_path).parts:
-        out.append(tuple(
-            (0, int(token)) if token.isdigit() else (1, token.casefold())
-            for token in _NATURAL_PART_RE.split(part) if token))
-    return tuple(out)
+    return tuple(_natural_text_key(part) for part in PurePosixPath(rel_path).parts)
 
 
 def list_question_paths(folder_id: str = "") -> list[str]:
@@ -767,9 +774,12 @@ def _find_path_by_id(qid: str) -> Path | None:
             path = Path(key)
             if path.is_file():
                 return path
-    for rec in _all_records():
-        if str(rec["id"]) == needle:
-            return config.BANK_DIR / rec["path"]
+    # 冷启动或 Obsidian 外部移动后只查看各文件的 frontmatter 头部；正常题卡的简单
+    # id 无需把三万份正文和 YAML 全部解析。复杂旧 frontmatter 才由 records_from_ids
+    # 内部回退完整扫描，以兼容历史题库。
+    rows = records_from_ids([needle])
+    if rows:
+        return config.BANK_DIR / rows[0]["path"]
     return None
 
 
@@ -1207,7 +1217,10 @@ def add_tags_to(ids: list[str], tags: list[str]):
 
 def _top_order(folder: str) -> float:
     """文件夹里的下一个 `order`。**必须在 `_write_lock` 里调用**，见 create_question。"""
-    orders = [r["order"] for r in _all_records() if r["folder"] == folder]
+    orders = [
+        record["order"]
+        for record in collection_records_snapshot(folder, recursive=False)
+    ]
     return (max(orders) + 1.0) if orders else 1.0
 
 
@@ -1277,10 +1290,14 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
         #    `_SORT_KEYS["custom"]` 只按 order 排，并列项的先后就交给 `rglob` 的
         #    返回顺序（文件系统决定，与题号无关）——表现正是「题目顺序乱掉」。
         next_order = _top_order(folder)
-        # _top_order 已经取过一次全库快照；这里复用其缓存建索引。只在自动入库时
-        # 需要，手动导入不为幂等性多做任何扫描。
-        existing_by_id = ({str(rec["id"]): rec for rec in _all_records()}
-                          if scope else {})
+        # 稳定 qid 在调用前即可算出。按这些 id 定向读取能保留“题目被外部移动后仍不
+        # 重复创建”的幂等语义，同时避免为了几十道题解析整座题库。
+        expected_ids = [
+            _stable_import_qid(scope, index) for index in range(len(items))
+        ] if scope else []
+        existing_by_id = {
+            str(rec["id"]): rec for rec in records_from_ids(expected_ids)
+        }
         try:
             for item_index, item in enumerate(items):
                 qid = (_stable_import_qid(scope, item_index)
@@ -1950,7 +1967,7 @@ def collections_of(qid: str) -> list[str]:
     return [rec["folder"]] if rec and rec["folder"] else []
 
 
-def add_to_collection(qid: str, folder_id: str):
+def add_to_collection(qid: str, folder_id: str, *, target_order: float | None = None) -> bool:
     """把题目移动到指定文件夹（一题只能在一个目录下，与目录语义一致）。
 
     知道题号的题在落地时按题号重新取名（`第3题.md`），不知道的沿用原文件名。
@@ -1967,7 +1984,7 @@ def add_to_collection(qid: str, folder_id: str):
     # 靠 `exists()` 判撞名，而「本题自己」就摊在那儿，会被当成撞名，把
     # `第3题.md` 改成 `第3题_<qid>.md`，每点一次「加入本文件夹」就多一截后缀。
     if src.parent.resolve() == dst_dir.resolve():
-        return
+        return False
     dst_dir.mkdir(parents=True, exist_ok=True)
     with _write_lock:
         # 同一把锁内取名 + 移动，理由同 create_question。
@@ -1975,8 +1992,97 @@ def add_to_collection(qid: str, folder_id: str):
                if rec["number"] is not None else dst_dir / src.name)
         if dst.exists():
             dst = dst_dir / f"{dst.stem}_{_new_id()}{dst.suffix}"
+        # 移入题目应当按本批原顺序追加到目标目录末尾，不能沿用来源目录的 order。
+        # 否则两份卷子的第 1 题都带 order=1，目标目录会交错显示。先完整序列化新
+        # frontmatter，再移动；写入失败时把原始字节移回来源，避免留下半份题目。
+        meta, body = _read_raw(src)
+        meta["order"] = float(
+            _top_order(folder_id) if target_order is None else target_order)
+        updated_text = _render_raw(meta, body)
+        original = src.read_bytes()
         shutil.move(str(src), str(dst))
+        try:
+            dst.write_text(updated_text, encoding="utf-8", newline="\n")
+        except Exception:
+            try:
+                dst.write_bytes(original)
+                shutil.move(str(dst), str(src))
+            except OSError:
+                logger.exception("移动题目回滚失败：%s -> %s", dst, src)
+            invalidate_scan_cache()
+            raise
         invalidate_scan_cache()
+    return True
+
+
+def move_to_collection(ids: list[str], folder_id: str) -> list[str]:
+    """按题库当前顺序把若干题追加到目标文件夹，返回实际移动的 id。"""
+    unique_ids = list(dict.fromkeys(str(qid) for qid in ids if qid))
+    if not unique_ids:
+        return []
+    with _write_lock:
+        records = records_from_ids(unique_ids)
+        records.sort(key=lambda record: (record["order"],) + _tiebreak(record))
+        next_order = _top_order(folder_id)
+        moved = []
+        for record in records:
+            if record.get("folder") == folder_id:
+                continue
+            qid = str(record["id"])
+            if add_to_collection(qid, folder_id, target_order=next_order):
+                moved.append(qid)
+                next_order += 1.0
+    return moved
+
+
+def copy_to_collection(ids: list[str], folder_id: str) -> list[str]:
+    """把若干题复制到目标文件夹，返回新题目的 id，原题保持不变。
+
+    副本沿用题干、解析、备注、标签、图片布局和未知自定义 frontmatter；身份、时间、
+    排序及自动入库幂等字段必须重新生成。图片位于题库共享资源目录，正文引用可以安全
+    共用；孤儿清理会检查全部活跃引用，不会因删除其中一份而误删另一份仍在用的图片。
+    """
+    unique_ids = list(dict.fromkeys(str(qid) for qid in ids if qid))
+    if not unique_ids:
+        return []
+    target_dir = _folder_abspath(folder_id)
+    created: list[str] = []
+    written: list[Path] = []
+    with _write_lock:
+        records = records_from_ids(unique_ids)
+        records.sort(key=lambda record: (record["order"],) + _tiebreak(record))
+        next_order = _top_order(folder_id)
+        try:
+            for record in records:
+                source_path = config.BANK_DIR / record["path"]
+                meta, body = _read_raw(source_path)
+                new_id = _new_id()
+                now = _now_iso()
+                meta = dict(meta)
+                meta.update({
+                    "id": new_id,
+                    "created": now,
+                    "updated": now,
+                    "order": next_order,
+                })
+                for key in (
+                        "_quizforge_import_scope", "_quizforge_import_index",
+                        "_trash_original_path", "_trash_deleted_at"):
+                    meta.pop(key, None)
+                target = _question_filename(target_dir, new_id, record.get("number"))
+                _write_raw(target, meta, body)
+                written.append(target)
+                created.append(new_id)
+                next_order += 1.0
+        except Exception:
+            for path in reversed(written):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("复制题目回滚失败：%s", path)
+            invalidate_scan_cache()
+            raise
+    return created
 
 
 def remove_from_collection(qid: str, folder_id: str = ""):
@@ -2593,6 +2699,19 @@ _SORT_KEYS = {
 _SORT_REVERSE = {"created_desc": True}
 
 
+def _source_key(r: dict) -> tuple:
+    """题源自然排序；空题源统一放在所有具名题源之后。"""
+    source = str(r.get("source") or "").strip()
+    return (0, _natural_text_key(source)) if source else (1, ())
+
+
+def _source_inner_order_key(r: dict) -> tuple:
+    """题源组内沿用题目在各自题集中的自定义顺序。"""
+    order = r.get("order")
+    return (_natural_rel_key(str(r.get("folder") or "")),
+            order if isinstance(order, (int, float)) else float("inf")) + _tiebreak(r)
+
+
 def _folder_subtree_ids(folder_id: str) -> set[str]:
     ids = {folder_id}
     for f in all_collections():
@@ -2634,6 +2753,12 @@ def list_questions(tags: list[str] | None = None, match: str = "and",
                  if isinstance(search, str) else search)
         recs = [r for r in recs if matches_search(r, query)]
 
-    key = _SORT_KEYS.get(sort, _SORT_KEYS["custom"])
-    recs = sorted(recs, key=key, reverse=_SORT_REVERSE.get(sort, False))
+    if sort == "source":
+        # 先恢复每个原题集的自定义顺序，再做一次稳定的题源分组；最终排序不附加
+        # 题号等二级条件，所以同题源内部不会被重新洗牌。
+        recs = sorted(recs, key=_source_inner_order_key)
+        recs = sorted(recs, key=_source_key)
+    else:
+        key = _SORT_KEYS.get(sort, _SORT_KEYS["custom"])
+        recs = sorted(recs, key=key, reverse=_SORT_REVERSE.get(sort, False))
     return recs

@@ -788,6 +788,12 @@ def handouts_selected():
     return jsonify(ok=True, questions=handouts.selected_question_summaries())
 
 
+@app.route("/api/selection")
+def selection_summaries():
+    """题库右栏使用的轻量选题篮；按 id 定向读取，不解析整座题库。"""
+    return jsonify(ok=True, questions=handouts.selected_question_summaries())
+
+
 @app.route("/api/handouts/question/<qid>")
 def handouts_question_snapshot(qid):
     try:
@@ -983,13 +989,11 @@ def index():
         except SearchQueryError as exc:
             search_error = str(exc)
 
-    has_filter = bool(collection_id or tags or type_ or difficulty
-                      or starred_only or search)
-    # 默认首页直接展示首批题卡。这里只建立轻量路径快照并读取 30 道题，不会恢复
-    # 旧版一次解析整库 Markdown 的性能问题；空白欢迎页反而让已有题库看起来像丢题。
-    show_all = (request.args.get("all") in ("1", "true", "on")
-                or not has_filter)
-    blank = False
+    explicit_all = request.args.get("all") in ("1", "true", "on")
+    # 无参数首页只渲染目录和空白页，不能在程序启动时枚举全库路径并读取首批题目。
+    # 具体题集由 collection 明确选择；all=1 仅保留给已有的显式“全部题目”入口。
+    show_all = explicit_all
+    blank = not collection_id and not explicit_all
 
     # 父文件夹默认汇总所有后代题目和原卷。这里的“汇总”只递归建立轻量路径快照，
     # 首屏仍只读取 30 道题，后续随滚动按批加载，不能退回一次创建整年题卡的旧实现。
@@ -1102,9 +1106,6 @@ def index():
         filter_context_fields=filter_context_fields,
         filter_reset_url=filter_reset_url,
         folder_scope_url=folder_scope_url,
-        all_questions_url=_question_scope_url(
-            scope_pairs, set_values={"all": "1"},
-            remove={"collection", "recursive"}),
     )
 
 
@@ -1319,7 +1320,7 @@ def _save_from_form(qid=None):
 def question_toggle(qid):
     new_val = filestore.toggle_selected(qid)
     count = filestore.count_selected()
-    return jsonify(selected=new_val, count=count)
+    return jsonify(ok=True, selected=new_val, count=count)
 
 
 @app.route("/question/<qid>/difficulty", methods=["POST"])
@@ -2064,12 +2065,15 @@ def collection_delete(cid):
 
 @app.route("/collections/<path:cid>/add", methods=["POST"])
 def collection_add(cid):
-    """把当前已勾选的题加入题集。"""
+    """把当前已勾选的题移动或复制到题集。"""
     ids = _selected_ids()
+    mode = (request.form.get("mode") or "move").strip().lower()
+    if mode not in ("move", "copy"):
+        return jsonify(ok=False, error="未知的题集操作"), 400
     if not ids:
         if request.accept_mimetypes.best == "application/json":
-            return jsonify(ok=False, error="请先勾选题目再加入题集"), 400
-        flash("请先勾选题目再加入题集", "err")
+            return jsonify(ok=False, error="请先勾选题目"), 400
+        flash("请先勾选题目", "err")
     else:
         col = filestore.get_collection(cid)
         if not col:
@@ -2077,11 +2081,17 @@ def collection_add(cid):
                 return jsonify(ok=False, error="题集不存在"), 404
             flash("题集不存在", "err")
             return redirect(request.referrer or url_for("index"))
-        for qid in ids:
-            filestore.add_to_collection(qid, cid)
-        message = f"已把 {len(ids)} 道题加入「{col['name']}」"
+        if mode == "copy":
+            created = filestore.copy_to_collection(ids, cid)
+            message = f"已复制 {len(created)} 道题到「{col['name']}」"
+        else:
+            moved = filestore.move_to_collection(ids, cid)
+            created = []
+            message = f"已移动 {len(moved)} 道题到「{col['name']}」"
         if request.accept_mimetypes.best == "application/json":
             return jsonify(ok=True, ids=ids, count=filestore.count_selected(),
+                           mode=mode, created=created,
+                           moved=(moved if mode == "move" else []),
                            message=message)
         flash(message, "ok")
     return redirect(request.referrer or url_for("index"))

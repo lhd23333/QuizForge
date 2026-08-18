@@ -756,6 +756,7 @@ class DesktopApi:
         self._taskbar_rect_thread: threading.Thread | None = None
         self._taskbar_button_rect = None
         self._taskbar_rect_lock = threading.Lock()
+        self._native_handle: int | None = None
         self.restart_requested = False
         self.restart_bank_dir: Path | None = None
         self.restart_subject: str | None = None
@@ -941,8 +942,8 @@ class DesktopApi:
             was_pressed = False
             pending_click = False
             while not self._taskbar_monitor_stop.wait(0.025):
-                native = getattr(self._window, "native", None)
-                if native is None:
+                handle = self._native_handle
+                if handle is None:
                     continue
                 with self._taskbar_rect_lock:
                     rect = self._taskbar_button_rect
@@ -954,7 +955,6 @@ class DesktopApi:
                         rect[0] <= point.x < rect[2]
                         and rect[1] <= point.y < rect[3]
                     )
-                    handle = int(native.Handle.ToInt64())
                     is_foreground = user32.GetForegroundWindow() == handle
                     is_minimized = bool(user32.IsIconic(handle))
                     pending_click = in_button and is_foreground and not is_minimized
@@ -972,12 +972,13 @@ class DesktopApi:
                         and rect[0] <= point.x < rect[2]
                         and rect[1] <= point.y < rect[3]
                     )
-                    handle = int(native.Handle.ToInt64())
                     if (still_in_button
                             and user32.GetForegroundWindow() == handle
                             and not user32.IsIconic(handle)):
                         logging.getLogger(__name__).info("任务栏按钮抬起：执行最小化")
-                        self._window.minimize()
+                        # 监测线程不能读取或调用 WinForms 对象：同步跨线程调用会与
+                        # GUI 线程争抢 Python GIL，造成窗口和本地 HTTP 一起死锁。
+                        user32.PostMessageW(handle, 0x0112, 0xF020, 0)
                     pending_click = False
                 was_pressed = pressed
         except Exception:
@@ -987,9 +988,10 @@ class DesktopApi:
     def _taskbar_rect_monitor(self) -> None:
         """低频刷新任务栏按钮位置，不阻塞短周期鼠标点击检测。"""
         while not self._taskbar_monitor_stop.is_set():
-            native = getattr(self._window, "native", None)
-            if native is not None:
-                rect = self._find_taskbar_button_rect(str(native.Text or APP_NAME))
+            if self._native_handle is not None:
+                # 窗口标题固定为 APP_NAME。后台线程读取 native.Text 会触发 WinForms
+                # SendMessageW，同 GUI 线程形成 GIL/消息泵互等，必须使用纯 Python 值。
+                rect = self._find_taskbar_button_rect(APP_NAME)
                 with self._taskbar_rect_lock:
                     changed = rect != self._taskbar_button_rect
                     self._taskbar_button_rect = rect
@@ -1046,6 +1048,7 @@ class DesktopApi:
                 native.MinimizeBox = True
                 native.MaximizeBox = True
                 native.MaximizedBounds = Screen.FromHandle(native.Handle).WorkingArea
+                self._native_handle = int(native.Handle.ToInt64())
 
             if native.InvokeRequired:
                 native.Invoke(Action(apply_bounds))

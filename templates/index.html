@@ -17,7 +17,6 @@
         {% else %}
           <span class="folder-twist folder-twist-empty"></span>
         {% endif %}
-        <span class="folder-ico" aria-hidden="true">▰</span>
         <a class="folder-link" data-ajax="1" href="{{ folder_scope_url(n['id']) }}" title="{{ n['name'] }}">
           {{ n['name'] }}
         </a>
@@ -147,13 +146,6 @@
         <button type="button" class="folder-newbtn" id="folder-newbtn" title="新建顶级文件夹">＋</button>
       </div>
       <ul class="folder-list" id="folder-tree">
-        <li class="folder-item folder-root {% if not active_collection and not blank %}active{% endif %}" data-folder-id="">
-          <div class="folder-row">
-            <span class="folder-twist folder-twist-empty"></span>
-            <span class="folder-ico" aria-hidden="true">☷</span>
-            <a class="folder-link" data-ajax="1" href="{{ all_questions_url }}">全部题目</a>
-          </div>
-        </li>
         {% if folder_tree %}
           {{ render_folder_tree(folder_tree, active_collection) }}
         {% endif %}
@@ -195,17 +187,18 @@
   <!-- 主区：题目列表 -->
   <section class="content">
     <div class="collection-tabs" id="collection-tabs" role="tablist" aria-label="已打开的题集">
-      <div class="collection-tab active" data-collection="{{ active_collection or '' }}">
+      <div class="collection-tab active">
         <button type="button" class="collection-tab-switch" role="tab" aria-selected="true"
-                title="{{ active_collection or '全部题目' }}">
-          <span class="collection-tab-icon" aria-hidden="true">▰</span>
-          <span class="collection-tab-label">{{ active_collection_name or '全部题目' }}</span>
+                title="{{ active_collection or ('空白页' if blank else '全部题目') }}">
+          <span class="collection-tab-label">{{ active_collection_name or ('空白页' if blank else '全部题目') }}</span>
         </button>
         <button type="button" class="collection-tab-close" hidden
-                aria-label="关闭 {{ active_collection_name or '全部题目' }}" title="关闭">×</button>
+                aria-label="关闭当前页" title="关闭">×</button>
       </div>
+      <button type="button" class="collection-tab-add" data-collection-tab-add
+              aria-label="新建空白页" title="新建空白页">＋</button>
     </div>
-    <form method="get" action="{{ url_for('index') }}" class="search-bar" id="search-form">
+    <form method="get" action="{{ url_for('index') }}" class="search-bar{% if blank %} hidden{% endif %}" id="search-form">
       {% for name, value in search_scope_fields %}
         <input type="hidden" name="{{ name }}" value="{{ value }}">
       {% endfor %}
@@ -225,7 +218,7 @@
     <div id="collection-overview-host" data-overview="0"></div>
     <div id="papers-host">{% if active_collection %}{% include "_papers_pane.html" %}{% endif %}</div>
     <!-- 常驻工具栏：只留高频、始终有用的控件；批量操作移到底部浮动条 -->
-    <div class="toolbar" id="q-toolbar">
+    <div class="toolbar{% if blank %} hidden{% endif %}" id="q-toolbar">
       <span><b id="q-count">{{ question_total }}</b> 题 · 已选 <b id="sel-count">{{ selected_count }}</b></span>
       <label class="sort-label">排序
         <select id="sort-select">
@@ -235,6 +228,7 @@
           <option value="difficulty" {% if sort=='difficulty' %}selected{% endif %}>按难度</option>
           <option value="starred" {% if sort=='starred' %}selected{% endif %}>标星优先</option>
           <option value="type" {% if sort=='type' %}selected{% endif %}>按题型</option>
+          <option value="source" {% if sort=='source' %}selected{% endif %}>按题源</option>
         </select>
       </label>
       <div class="spacer"></div>
@@ -390,6 +384,7 @@
     <div id="q-list" data-custom-sort="{{ '1' if question_card_sort == 'custom' else '' }}"
          data-page-token="{{ question_page_token }}" data-total="{{ question_total }}"
          data-loaded="{{ questions|length }}" data-inline-created="0"
+         data-blank="{{ '1' if blank else '0' }}"
          data-collection="{{ active_collection }}"
          data-collection-name="{{ active_collection_name or '题库根目录' }}">
     {% for q in questions %}
@@ -398,11 +393,7 @@
       {% if blank %}
         <div class="empty-state">
           <div class="empty-state-mark" aria-hidden="true">QF</div>
-          <h2>从一个题集开始</h2>
-          <div class="empty-state-actions">
-            <a class="btn btn-primary" href="{{ url_for('index', all=1) }}">浏览全部题目</a>
-            <a class="btn" href="{{ url_for('import_md') }}">导入试卷</a>
-          </div>
+          <h2>未选择题集</h2>
         </div>
       {% else %}
         <div class="empty-state">
@@ -426,7 +417,7 @@
     </div>
   </section>
 
-  <button type="button" class="new-question-fab" id="new-question-fab"
+  <button type="button" class="new-question-fab{% if blank %} hidden{% endif %}" id="new-question-fab"
           data-open-new-question
           title="在“{{ active_collection_name or '题库根目录' }}”末尾添加题目"
           aria-label="在当前文件夹末尾添加题目">＋</button>
@@ -446,88 +437,100 @@
     <h3>已选题目</h3>
     <span class="bulk-count"><b id="bulk-count">{{ selected_count }}</b> 题</span>
   </div>
+  <div class="bulk-selected-list" id="bulk-selected-list" aria-live="polite">
+    <p class="bulk-selected-empty">正在读取…</p>
+  </div>
   <span class="divider"></span>
 
-  <!-- 加入题集 -->
+  <!-- 移动和复制是选题篮最高频动作，始终露出，不收进折叠栏。 -->
   <form method="post" id="add-coll-form">
     <input type="hidden" name="cid" value="">
     <div class="bulk-folder-picker" id="bulk-folder-picker">
       <button type="button" class="bulk-folder-trigger" id="bulk-folder-trigger"
-              aria-haspopup="tree" aria-expanded="false">选择目标文件夹…</button>
+              aria-haspopup="tree" aria-controls="bulk-folder-popover"
+              aria-expanded="false">选择目标文件夹…</button>
       <div class="bulk-folder-popover" id="bulk-folder-popover" hidden>
         <ul class="bulk-folder-tree" id="bulk-folder-tree" role="tree"
             aria-label="选择目标文件夹"></ul>
         <p class="bulk-folder-empty muted" id="bulk-folder-empty" hidden>还没有文件夹</p>
       </div>
     </div>
-    <button type="submit" class="btn" id="bulk-folder-submit" disabled>加入</button>
+    <div class="bulk-transfer-actions">
+      <button type="submit" class="btn" id="bulk-folder-submit"
+              name="mode" value="move" disabled>移动到</button>
+      <button type="submit" class="btn" id="bulk-folder-copy"
+              name="mode" value="copy" disabled>复制到</button>
+    </div>
   </form>
 
-  <!-- 批量打标签 -->
-  <form method="post" action="{{ url_for('tag_selected') }}">
-    <input type="text" name="tags" class="input" placeholder="批量标签(逗号)">
-    <button type="submit" class="btn">打标签</button>
-  </form>
-
-  <details class="bulk-properties" open>
-    <summary>批量属性</summary>
-    <form method="post" action="{{ url_for('questions_bulk_update') }}"
-          id="bulk-properties-form">
-      <select name="type" aria-label="批量题型">
-        <option value="__keep__">题型：不修改</option>
-        {% for ty in types %}<option value="{{ ty }}">题型：{{ ty|qtype_label }}</option>{% endfor %}
-        <option value="__clear__">题型：清空</option>
-      </select>
-      <select name="difficulty" aria-label="批量难度">
-        <option value="__keep__">难度：不修改</option>
-        {% for d in difficulties %}<option value="{{ d }}">难度：{{ d }}</option>{% endfor %}
-        <option value="__clear__">难度：清空</option>
-      </select>
-      <select name="starred" aria-label="批量标星">
-        <option value="__keep__">标星：不修改</option>
-        <option value="on">全部标星</option>
-        <option value="off">取消标星</option>
-      </select>
-      <select name="source_mode" data-bulk-field-mode="source" aria-label="批量题源操作">
-        <option value="keep">题源：不修改</option>
-        <option value="set">覆盖题源</option>
-        <option value="clear">清空题源</option>
-      </select>
-      <input type="text" name="source" class="input" data-bulk-field-value="source"
-             placeholder="题源" disabled>
-      <select name="note_mode" data-bulk-field-mode="note" aria-label="批量备注操作">
-        <option value="keep">备注：不修改</option>
-        <option value="append">追加备注</option>
-        <option value="replace">覆盖备注</option>
-        <option value="clear">清空备注</option>
-      </select>
-      <textarea name="note" class="input bulk-note-input" rows="3"
-                data-bulk-field-value="note" placeholder="备注（支持 Markdown）" disabled></textarea>
-      <button type="submit" class="btn">应用属性</button>
-    </form>
+  <details class="bulk-action-section">
+    <summary>批量编辑</summary>
+    <div class="bulk-action-body">
+      <form method="post" action="{{ url_for('tag_selected') }}">
+        <input type="text" name="tags" class="input" placeholder="批量标签（逗号分隔）">
+        <button type="submit" class="btn">打标签</button>
+      </form>
+      <form method="post" action="{{ url_for('questions_bulk_update') }}"
+            id="bulk-properties-form">
+        <select name="type" aria-label="批量题型">
+          <option value="__keep__">题型：不修改</option>
+          {% for ty in types %}<option value="{{ ty }}">题型：{{ ty|qtype_label }}</option>{% endfor %}
+          <option value="__clear__">题型：清空</option>
+        </select>
+        <select name="difficulty" aria-label="批量难度">
+          <option value="__keep__">难度：不修改</option>
+          {% for d in difficulties %}<option value="{{ d }}">难度：{{ d }}</option>{% endfor %}
+          <option value="__clear__">难度：清空</option>
+        </select>
+        <select name="starred" aria-label="批量标星">
+          <option value="__keep__">标星：不修改</option>
+          <option value="on">全部标星</option>
+          <option value="off">取消标星</option>
+        </select>
+        <select name="source_mode" data-bulk-field-mode="source" aria-label="批量题源操作">
+          <option value="keep">题源：不修改</option>
+          <option value="set">覆盖题源</option>
+          <option value="clear">清空题源</option>
+        </select>
+        <input type="text" name="source" class="input" data-bulk-field-value="source"
+               placeholder="题源" disabled>
+        <select name="note_mode" data-bulk-field-mode="note" aria-label="批量备注操作">
+          <option value="keep">备注：不修改</option>
+          <option value="append">追加备注</option>
+          <option value="replace">覆盖备注</option>
+          <option value="clear">清空备注</option>
+        </select>
+        <textarea name="note" class="input bulk-note-input" rows="3"
+                  data-bulk-field-value="note" placeholder="备注（支持 Markdown）" disabled></textarea>
+        <button type="submit" class="btn">应用属性</button>
+      </form>
+    </div>
   </details>
 
-  {% if active_collection %}
-    <form method="post" action="{{ url_for('collection_remove', cid=active_collection) }}">
-      <button type="submit" class="btn">移出本集</button>
-    </form>
-  {% endif %}
-
-  <span class="divider"></span>
-  <form method="post" action="{{ url_for('clear') }}">
-    <button type="submit" class="btn">清空</button>
-  </form>
-  <form method="post" action="{{ url_for('delete_selected') }}"
-        data-confirm="确定删除所有已勾选的题目？题目会进入回收站。">
-    <button type="submit" class="btn btn-danger">删除勾选</button>
-  </form>
+  <details class="bulk-action-section">
+    <summary>更多操作</summary>
+    <div class="bulk-action-body">
+      {% if active_collection %}
+        <form method="post" action="{{ url_for('collection_remove', cid=active_collection) }}">
+          <button type="submit" class="btn">移出本集</button>
+        </form>
+      {% endif %}
+      <form method="post" action="{{ url_for('clear') }}">
+        <button type="submit" class="btn">清空选择</button>
+      </form>
+      <form method="post" action="{{ url_for('delete_selected') }}"
+            data-confirm="确定删除所有已勾选的题目？题目会进入回收站。">
+        <button type="submit" class="btn btn-danger">删除勾选</button>
+      </form>
+    </div>
+  </details>
 </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-// 勾选切换（AJAX，不刷新页面）；custom 排序下勾选题实时置顶
+// 勾选切换只改变选题篮状态，不改变题卡顺序。
 const listEl = document.getElementById('q-list');
 let isCustom = listEl?.dataset.customSort === '1';
 
@@ -560,15 +563,96 @@ if (document.documentElement.classList.contains('desktop-host')) {
 // .layout 和外层 <main> 加类——不然中间题卡会被凭空多出来的一列挤窄。
 const bulkbar = document.getElementById('bulkbar');
 const bulkCount = document.getElementById('bulk-count');
+const bulkSelectedList = document.getElementById('bulk-selected-list');
 const bulkLayout = bulkbar ? bulkbar.closest('.layout') : null;
 const bulkMain = bulkLayout ? bulkLayout.closest('main') : null;
+let bulkSelectedGeneration = 0;
+function renderBulkSelectedQuestions(rows) {
+  if (!bulkSelectedList) return;
+  if (!rows.length) {
+    const empty = document.createElement('p');
+    empty.className = 'bulk-selected-empty';
+    empty.textContent = '还没有已选题目';
+    bulkSelectedList.replaceChildren(empty);
+    return;
+  }
+  const items = rows.map((row, index) => {
+    const item = document.createElement('article');
+    item.className = 'bulk-selected-item';
+    item.dataset.id = row.id;
+    const meta = document.createElement('div');
+    meta.className = 'bulk-selected-meta';
+    const ordinal = row.number == null ? `选题 ${index + 1}` : `第 ${row.number} 题`;
+    meta.textContent = `${ordinal} · ${row.type || '未分类'}`;
+    meta.title = row.folder || '';
+    const source = document.createElement('div');
+    source.className = 'bulk-selected-source';
+    source.textContent = row.source || row.folder || '未记录题源';
+    const body = document.createElement('div');
+    body.className = 'bulk-selected-body';
+    if (row.body_html) body.innerHTML = row.body_html;
+    else body.textContent = row.excerpt || '（空题干）';
+    item.append(meta, source, body);
+    return item;
+  });
+  bulkSelectedList.replaceChildren(...items);
+  items.forEach(item => window.QMath?.typeset(item));
+}
+async function refreshBulkSelectedQuestions() {
+  if (!bulkSelectedList) return;
+  const generation = ++bulkSelectedGeneration;
+  try {
+    const response = await fetch('/api/selection');
+    const data = await response.json();
+    if (!response.ok || !data.ok) throw new Error(data.error || '读取选题篮失败');
+    if (generation !== bulkSelectedGeneration) return;
+    renderBulkSelectedQuestions(Array.isArray(data.questions) ? data.questions : []);
+  } catch (error) {
+    if (generation !== bulkSelectedGeneration) return;
+    const empty = document.createElement('p');
+    empty.className = 'bulk-selected-empty is-error';
+    empty.textContent = error.message || '读取选题篮失败';
+    bulkSelectedList.replaceChildren(empty);
+  }
+}
 function syncBulkbar(count) {
   if (bulkCount) bulkCount.textContent = count;
   if (bulkbar) bulkbar.classList.toggle('show', count > 0);
   if (bulkLayout) bulkLayout.classList.toggle('bulk-active', count > 0);
   if (bulkMain) bulkMain.classList.toggle('bulk-active-page', count > 0);
+  if (count > 0) void refreshBulkSelectedQuestions();
+  else renderBulkSelectedQuestions([]);
 }
 syncBulkbar(Number(document.getElementById('sel-count').textContent) || 0);
+
+// 勾选、全选与清空都在同一个持久化集合上写数据。用户快速连续操作时必须按点击
+// 顺序落到服务端，否则较慢的单题 toggle 可能在 clear 之后抵达，把刚清空的题又选
+// 回去。队列自身吞掉前一次失败以保持可继续执行，但每个调用者仍收到自己的异常。
+let selectionMutationTail = Promise.resolve();
+let selectionClearInFlight = false;
+function enqueueSelectionMutation(task) {
+  const run = selectionMutationTail.then(task, task);
+  selectionMutationTail = run.catch(() => {});
+  return run;
+}
+function syncSelectionSummary(count) {
+  const normalized = Math.max(0, Number(count) || 0);
+  const counter = document.getElementById('sel-count');
+  if (counter) counter.textContent = normalized;
+  syncBulkbar(normalized);
+}
+function setVisibleCardsSelected(selected) {
+  listEl?.querySelectorAll('.card').forEach(card => {
+    card.classList.toggle('selected', selected);
+    const checkbox = card.querySelector('.sel-toggle');
+    if (checkbox) checkbox.checked = selected;
+  });
+}
+function setVisibleSelectionDisabled(disabled) {
+  listEl?.querySelectorAll('.sel-toggle').forEach(checkbox => {
+    checkbox.disabled = disabled;
+  });
+}
 
 // 新增、局部回渲或无限滚动插入一张题卡后，只初始化这张卡。所有入口都走这里，
 // 避免某个按钮偷懒对 document 重新跑 KaTeX/图片控件，题卡越多就越卡。
@@ -818,8 +902,21 @@ function questionPositionKey() {
 }
 
 function visibleQuestionAnchor(cards) {
-  // 顶栏和题目工具栏是 sticky；以 78px 为可读区上沿，避免保存一张完全被遮住的卡。
-  return cards.find(card => card.getBoundingClientRect().bottom > 78)
+  // 题集标签与题目工具栏会依次吸附；按此刻真实占用高度找首张可见题卡，不能再
+  // 写死 78px。窄屏工具栏换行后更高，固定值会把被遮住的上一题当作恢复锚点。
+  let readableTop = 0;
+  document.querySelectorAll('#collection-tabs, #q-toolbar').forEach(node => {
+    if (node.hidden || node.classList.contains('hidden')) return;
+    const style = getComputedStyle(node);
+    if (style.position !== 'sticky') return;
+    const stickyTop = Number.parseFloat(style.top);
+    const rect = node.getBoundingClientRect();
+    if (Number.isFinite(stickyTop) && rect.top <= stickyTop + 2) {
+      readableTop = Math.max(readableTop, rect.bottom);
+    }
+  });
+  readableTop += 8;
+  return cards.find(card => card.getBoundingClientRect().bottom > readableTop)
     || cards[cards.length - 1] || null;
 }
 
@@ -959,33 +1056,35 @@ async function restoreQuestionPosition() {
 window.addEventListener('pagehide', saveQuestionPosition, {capture: true});
 void restoreQuestionPosition();
 
-listEl?.addEventListener('change', async event => {
+listEl?.addEventListener('change', event => {
     const cb = event.target.closest('.sel-toggle');
     if (!cb) return;
     const id = cb.dataset.id;
-    const res = await fetch(`/question/${id}/toggle`, {method: 'POST'});
-    const data = await res.json();
-    document.getElementById('sel-count').textContent = data.count;
-    syncBulkbar(data.count);
     const card = cb.closest('.card');
-    card.classList.toggle('selected', data.selected === 1);
-
-    // 勾选置顶：仅 custom 排序下实时移动卡片位置
-    if (isCustom && listEl) {
-      if (data.selected === 1) {
-        // 移到已选块末尾（所有 .selected 之后）
-        const selCards = [...listEl.querySelectorAll('.card.selected')];
-        const lastSel = selCards[selCards.length - 1];
-        if (lastSel && lastSel !== card) lastSel.after(card);
-        else if (!lastSel) listEl.prepend(card);
-      } else {
-        // 取消勾选：移到已选块之后（未选块开头）
-        const selCards = [...listEl.querySelectorAll('.card.selected')];
-        const lastSel = selCards[selCards.length - 1];
-        if (lastSel) lastSel.after(card);
-        else listEl.prepend(card);
-      }
-    }
+    const intended = cb.checked;
+    // 浏览器先切换 checkbox，再触发 change；同步题卡底色可避免请求期间出现半套状态。
+    card?.classList.toggle('selected', intended);
+    cb.disabled = true;
+    void enqueueSelectionMutation(async () => {
+      const response = await fetch(`/question/${id}/toggle`, {method: 'POST'});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || '更新选择失败');
+      return data;
+    }).then(data => {
+      // clear 已经排在本请求之后时，中间结果无需再闪回页面；服务端随后会清空。
+      if (selectionClearInFlight) return;
+      const selected = data.selected === 1;
+      cb.checked = selected;
+      card?.classList.toggle('selected', selected);
+      syncSelectionSummary(data.count);
+    }).catch(error => {
+      if (selectionClearInFlight) return;
+      cb.checked = !intended;
+      card?.classList.toggle('selected', !intended);
+      flashToast(error.message || '更新选择失败', 'err');
+    }).finally(() => {
+      cb.disabled = selectionClearInFlight;
+    });
 });
 
 // 图片排版控制条（对齐/宽度手柄/图文分栏/并排堆叠/交换顺序）整块搬到了
@@ -1419,12 +1518,18 @@ const folderTree = document.getElementById('folder-tree');
 const collectionOverviewHost = document.getElementById('collection-overview-host');
 let folderLoadGeneration = 0;
 
-// 文件夹标签只保存轻量浏览状态，不复制题卡 DOM。回切时按原分页快照重新加载到
-// 离开前的深度，再以第一张可见题卡恢复位置，内存不会随标签数量成倍增长。
-const COLLECTION_TABS_STORE = 'quizforge:collection-tabs:v1';
+// 每个标签是一个独立页面槽位。点击题集只替换当前槽位，只有右侧加号会创建新页；
+// 回切时仍按分页深度和可见题卡恢复位置，不在内存中复制题卡 DOM。
+const COLLECTION_TABS_STORE = 'quizforge:collection-tabs:v2';
 const collectionTabsHost = document.getElementById('collection-tabs');
 let collectionTabRestoreGeneration = 0;
 let collectionTabsState = {tabs: [], active: ''};
+let collectionTabSerial = 0;
+
+function nextCollectionTabKey() {
+  collectionTabSerial += 1;
+  return `page-${Date.now().toString(36)}-${collectionTabSerial.toString(36)}`;
+}
 
 function collectionIdFromUrl(rawUrl) {
   return new URL(rawUrl, location.href).searchParams.get('collection') || '';
@@ -1437,9 +1542,40 @@ function collectionTabUrl(rawUrl) {
   return url.pathname + url.search;
 }
 
-function collectionTabName(collectionId, fallback = '') {
-  if (!collectionId) return '全部题目';
+function collectionTabScope(rawUrl) {
+  const url = new URL(rawUrl, location.href);
+  const collectionId = url.searchParams.get('collection') || '';
+  if (collectionId) return `collection:${collectionId}`;
+  if (url.searchParams.has('all')) return 'all';
+  return 'blank';
+}
+
+function collectionTabName(collectionId, fallback = '', rawUrl = '') {
+  if (!collectionId) {
+    if (rawUrl && collectionTabScope(rawUrl) === 'all') return '全部题目';
+    return '空白页';
+  }
   return String(fallback || collectionId.split('/').pop() || collectionId).trim();
+}
+
+function defaultBlankCollectionUrl() {
+  const current = new URL(location.href);
+  const url = new URL(current.pathname, current.origin);
+  if (current.searchParams.has('_embedded')) {
+    url.searchParams.set('_embedded', current.searchParams.get('_embedded'));
+  }
+  return collectionTabUrl(url);
+}
+
+function createBlankCollectionTab() {
+  return {
+    key: nextCollectionTabKey(), id: '', name: '空白页',
+    url: defaultBlankCollectionUrl(), position: null,
+  };
+}
+
+function activeCollectionTab() {
+  return collectionTabsState.tabs.find(tab => tab.key === collectionTabsState.active) || null;
 }
 
 function persistCollectionTabs() {
@@ -1455,31 +1591,27 @@ function renderCollectionTabs() {
   collectionTabsHost.replaceChildren();
   collectionTabsState.tabs.forEach(tab => {
     const item = document.createElement('div');
-    const active = tab.id === collectionTabsState.active;
+    const active = tab.key === collectionTabsState.active;
     item.className = `collection-tab${active ? ' active' : ''}`;
-    item.dataset.collection = tab.id;
+    item.dataset.collectionTabKey = tab.key;
 
     const switchButton = document.createElement('button');
     switchButton.type = 'button';
     switchButton.className = 'collection-tab-switch';
-    switchButton.dataset.collectionTab = tab.id;
+    switchButton.dataset.collectionTab = tab.key;
     switchButton.setAttribute('role', 'tab');
     switchButton.setAttribute('aria-selected', String(active));
     switchButton.tabIndex = active ? 0 : -1;
-    switchButton.title = tab.id || '全部题目';
-    const icon = document.createElement('span');
-    icon.className = 'collection-tab-icon';
-    icon.setAttribute('aria-hidden', 'true');
-    icon.textContent = tab.id ? '▰' : '☷';
+    switchButton.title = tab.id || tab.name;
     const label = document.createElement('span');
     label.className = 'collection-tab-label';
     label.textContent = tab.name;
-    switchButton.append(icon, label);
+    switchButton.append(label);
 
     const closeButton = document.createElement('button');
     closeButton.type = 'button';
     closeButton.className = 'collection-tab-close';
-    closeButton.dataset.collectionTabClose = tab.id;
+    closeButton.dataset.collectionTabClose = tab.key;
     closeButton.title = '关闭';
     closeButton.setAttribute('aria-label', `关闭 ${tab.name}`);
     closeButton.textContent = '×';
@@ -1488,8 +1620,17 @@ function renderCollectionTabs() {
     collectionTabsHost.appendChild(item);
   });
 
+  const addButton = document.createElement('button');
+  addButton.type = 'button';
+  addButton.className = 'collection-tab-add';
+  addButton.dataset.collectionTabAdd = '1';
+  addButton.title = '新建空白页';
+  addButton.setAttribute('aria-label', '新建空白页');
+  addButton.textContent = '＋';
+  collectionTabsHost.appendChild(addButton);
+
   const activeItem = [...collectionTabsHost.children]
-    .find(item => item.dataset.collection === collectionTabsState.active);
+    .find(item => item.dataset.collectionTabKey === collectionTabsState.active);
   if (activeItem) {
     const left = activeItem.offsetLeft;
     const right = left + activeItem.offsetWidth;
@@ -1508,14 +1649,15 @@ function readCollectionTabs() {
     saved = null;
   }
   const tabs = [];
-  const seen = new Set();
+  const seenKeys = new Set();
   (Array.isArray(saved?.tabs) ? saved.tabs : []).forEach(tab => {
-    if (!tab || typeof tab.id !== 'string' || typeof tab.url !== 'string'
-        || seen.has(tab.id)) return;
-    seen.add(tab.id);
+    if (!tab || typeof tab.key !== 'string' || typeof tab.id !== 'string'
+        || typeof tab.url !== 'string' || seenKeys.has(tab.key)) return;
+    seenKeys.add(tab.key);
     tabs.push({
+      key: tab.key,
       id: tab.id,
-      name: collectionTabName(tab.id, tab.name),
+      name: collectionTabName(tab.id, tab.name, tab.url),
       url: collectionTabUrl(tab.url),
       position: tab.position && typeof tab.position === 'object' ? tab.position : null,
     });
@@ -1523,18 +1665,25 @@ function readCollectionTabs() {
 
   const currentId = listEl?.dataset.collection || collectionIdFromUrl(location.href);
   const currentUrl = collectionTabUrl(location.href);
-  let current = tabs.find(tab => tab.id === currentId);
+  let current = tabs.find(tab => (
+    tab.key === saved?.active
+    && collectionTabScope(tab.url) === collectionTabScope(currentUrl)
+  ));
   if (!current) {
-    current = {id: currentId, name: '', url: currentUrl, position: null};
+    current = {
+      key: nextCollectionTabKey(), id: currentId, name: '',
+      url: currentUrl, position: null,
+    };
     tabs.push(current);
   } else if (current.url !== currentUrl) {
     // 搜索或筛选通过普通表单进入同一文件夹时，旧排序下的位置已经没有意义。
     current.position = null;
   }
   current.name = collectionTabName(
-    currentId, listEl?.dataset.collectionName || current.name);
+    currentId, listEl?.dataset.collectionName || current.name, currentUrl);
+  current.id = currentId;
   current.url = currentUrl;
-  collectionTabsState = {tabs, active: currentId};
+  collectionTabsState = {tabs, active: current.key};
   persistCollectionTabs();
   renderCollectionTabs();
 }
@@ -1553,7 +1702,7 @@ function captureCollectionTabPosition() {
 }
 
 function saveActiveCollectionTabState(updateUrl = true) {
-  const tab = collectionTabsState.tabs.find(row => row.id === collectionTabsState.active);
+  const tab = activeCollectionTab();
   if (!tab) return;
   tab.position = captureCollectionTabPosition();
   if (updateUrl && (listEl?.dataset.collection || '') === tab.id) {
@@ -1565,28 +1714,32 @@ function saveActiveCollectionTabState(updateUrl = true) {
 function syncCollectionTabAfterLoad(rawUrl) {
   const id = listEl?.dataset.collection || collectionIdFromUrl(rawUrl);
   const url = collectionTabUrl(rawUrl);
-  let tab = collectionTabsState.tabs.find(row => row.id === id);
+  let tab = activeCollectionTab();
   if (!tab) {
-    tab = {id, name: '', url, position: null};
+    tab = {
+      key: nextCollectionTabKey(), id, name: '', url, position: null,
+    };
     collectionTabsState.tabs.push(tab);
   } else if (tab.url !== url) {
     tab.position = null;
   }
-  tab.name = collectionTabName(id, listEl?.dataset.collectionName || tab.name);
+  tab.id = id;
+  tab.name = collectionTabName(
+    id, listEl?.dataset.collectionName || tab.name, url);
   tab.url = url;
-  collectionTabsState.active = id;
+  collectionTabsState.active = tab.key;
   persistCollectionTabs();
   renderCollectionTabs();
 }
 
-async function restoreCollectionTabPosition(state, expectedCollection) {
+async function restoreCollectionTabPosition(state, expectedTabKey, expectedCollection) {
   const restoreGeneration = ++collectionTabRestoreGeneration;
   const pageGeneration = questionPageGeneration;
   const isCurrent = () => (
     restoreGeneration === collectionTabRestoreGeneration
     && pageGeneration === questionPageGeneration
     && (listEl?.dataset.collection || '') === expectedCollection
-    && collectionTabsState.active === expectedCollection
+    && collectionTabsState.active === expectedTabKey
   );
   questionPageObserver?.disconnect();
   try {
@@ -1625,46 +1778,71 @@ async function restoreCollectionTabPosition(state, expectedCollection) {
 }
 
 async function openCollectionTab(rawUrl, fallbackName = '', options = {}) {
-  const {push = true, useRequestedUrl = false, capture = true,
+  const {push = true, capture = true,
          updateCapturedUrl = true} = options;
   if (capture) saveActiveCollectionTabState(updateCapturedUrl);
   const requestedUrl = collectionTabUrl(rawUrl);
   const id = collectionIdFromUrl(requestedUrl);
-  let tab = collectionTabsState.tabs.find(row => row.id === id);
+  let tab = activeCollectionTab();
   if (!tab) {
-    tab = {id, name: collectionTabName(id, fallbackName), url: requestedUrl, position: null};
+    tab = createBlankCollectionTab();
     collectionTabsState.tabs.push(tab);
-  } else {
-    tab.name = collectionTabName(id, fallbackName || tab.name);
-    if (useRequestedUrl) tab.url = requestedUrl;
   }
-  collectionTabsState.active = id;
+  const unchanged = (
+    tab.url === requestedUrl
+    && (listEl?.dataset.collection || '') === id
+    && collectionTabUrl(location.href) === requestedUrl
+  );
+  tab.id = id;
+  tab.name = collectionTabName(id, fallbackName, requestedUrl);
+  tab.url = requestedUrl;
+  tab.position = null;
+  collectionTabsState.active = tab.key;
   persistCollectionTabs();
   renderCollectionTabs();
-  if ((listEl?.dataset.collection || '') === id && tab.url === collectionTabUrl(location.href)) {
-    return;
-  }
-  const position = tab.position ? {...tab.position} : null;
+  if (unchanged) return;
   await loadFolderFragment(tab.url, push);
-  if ((listEl?.dataset.collection || '') === id && collectionTabsState.active === id) {
-    await restoreCollectionTabPosition(position, id);
+  if ((listEl?.dataset.collection || '') === id && collectionTabsState.active === tab.key) {
+    await restoreCollectionTabPosition(null, tab.key, id);
   }
 }
 
-function defaultRootCollectionUrl() {
-  const current = new URL(location.href);
-  const url = new URL(current.pathname, current.origin);
-  if (current.searchParams.has('_embedded')) {
-    url.searchParams.set('_embedded', current.searchParams.get('_embedded'));
+async function activateCollectionTab(tabKey, options = {}) {
+  const {capture = true} = options;
+  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
+  if (!tab) return;
+  if (capture) saveActiveCollectionTabState();
+  collectionTabsState.active = tab.key;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  const position = tab.position ? {...tab.position} : null;
+  const id = collectionIdFromUrl(tab.url);
+  if (collectionTabUrl(location.href) !== tab.url
+      || (listEl?.dataset.collection || '') !== id) {
+    await loadFolderFragment(tab.url, true);
   }
-  url.searchParams.set('all', '1');
-  return collectionTabUrl(url);
+  if (collectionTabsState.active === tab.key
+      && (listEl?.dataset.collection || '') === id) {
+    await restoreCollectionTabPosition(position, tab.key, id);
+  }
 }
 
-async function closeCollectionTab(collectionId) {
-  const index = collectionTabsState.tabs.findIndex(tab => tab.id === collectionId);
+async function addBlankCollectionTab() {
+  saveActiveCollectionTabState();
+  const tab = createBlankCollectionTab();
+  collectionTabsState.tabs.push(tab);
+  collectionTabsState.active = tab.key;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  if (collectionTabScope(location.href) !== 'blank') {
+    await loadFolderFragment(tab.url, true);
+  }
+}
+
+async function closeCollectionTab(tabKey) {
+  const index = collectionTabsState.tabs.findIndex(tab => tab.key === tabKey);
   if (index < 0) return;
-  const wasActive = collectionTabsState.active === collectionId;
+  const wasActive = collectionTabsState.active === tabKey;
   if (wasActive) saveActiveCollectionTabState();
   collectionTabsState.tabs.splice(index, 1);
   if (!wasActive) {
@@ -1673,15 +1851,10 @@ async function closeCollectionTab(collectionId) {
     return;
   }
   if (!collectionTabsState.tabs.length) {
-    collectionTabsState.tabs.push({
-      id: '', name: '全部题目', url: defaultRootCollectionUrl(), position: null,
-    });
+    collectionTabsState.tabs.push(createBlankCollectionTab());
   }
   const target = collectionTabsState.tabs[Math.min(index, collectionTabsState.tabs.length - 1)];
-  collectionTabsState.active = target.id;
-  persistCollectionTabs();
-  renderCollectionTabs();
-  await openCollectionTab(target.url, target.name, {capture: false});
+  await activateCollectionTab(target.key, {capture: false});
 }
 
 function remapCollectionTabs(oldId, newId, keepSuffix = true) {
@@ -1699,21 +1872,10 @@ function remapCollectionTabs(oldId, newId, keepSuffix = true) {
     } else {
       url.searchParams.delete('collection');
       url.searchParams.delete('recursive');
-      url.searchParams.set('all', '1');
+      url.searchParams.delete('all');
     }
     tab.url = collectionTabUrl(url);
-    if (!suffix) tab.name = collectionTabName(target);
-  });
-  if (collectionTabsState.active === oldId
-      || collectionTabsState.active.startsWith(oldId + '/')) {
-    const suffix = keepSuffix ? collectionTabsState.active.slice(oldId.length) : '';
-    collectionTabsState.active = `${newId || ''}${suffix}`.replace(/^\/+/, '');
-  }
-  const seen = new Set();
-  collectionTabsState.tabs = collectionTabsState.tabs.filter(tab => {
-    if (seen.has(tab.id)) return false;
-    seen.add(tab.id);
-    return true;
+    if (!suffix) tab.name = collectionTabName(target, '', tab.url);
   });
   persistCollectionTabs();
   renderCollectionTabs();
@@ -1721,11 +1883,13 @@ function remapCollectionTabs(oldId, newId, keepSuffix = true) {
 
 function removeCollectionTabs(rootId) {
   saveActiveCollectionTabState();
-  const removedActive = collectionTabsState.active === rootId
-    || collectionTabsState.active.startsWith(rootId + '/');
-  collectionTabsState.tabs = collectionTabsState.tabs.filter(
-    tab => tab.id !== rootId && !tab.id.startsWith(rootId + '/'));
-  if (removedActive) collectionTabsState.active = '';
+  collectionTabsState.tabs.forEach(tab => {
+    if (tab.id !== rootId && !tab.id.startsWith(rootId + '/')) return;
+    tab.id = '';
+    tab.name = '空白页';
+    tab.url = defaultBlankCollectionUrl();
+    tab.position = null;
+  });
   persistCollectionTabs();
   renderCollectionTabs();
 }
@@ -1736,11 +1900,16 @@ async function refreshCurrentCollectionTab(refreshTree = false) {
   saveActiveCollectionTabState();
   const loaded = await loadFolderFragment(location.href, false, refreshTree);
   if (loaded && (listEl?.dataset.collection || '') === collectionId) {
-    await restoreCollectionTabPosition(position, collectionId);
+    await restoreCollectionTabPosition(
+      position, collectionTabsState.active, collectionId);
   }
 }
 
 collectionTabsHost?.addEventListener('click', event => {
+  if (event.target.closest('[data-collection-tab-add]')) {
+    void addBlankCollectionTab();
+    return;
+  }
   const closeButton = event.target.closest('[data-collection-tab-close]');
   if (closeButton) {
     void closeCollectionTab(closeButton.dataset.collectionTabClose || '');
@@ -1748,9 +1917,7 @@ collectionTabsHost?.addEventListener('click', event => {
   }
   const switchButton = event.target.closest('[data-collection-tab]');
   if (!switchButton) return;
-  const tab = collectionTabsState.tabs.find(
-    row => row.id === (switchButton.dataset.collectionTab || ''));
-  if (tab) void openCollectionTab(tab.url, tab.name);
+  void activateCollectionTab(switchButton.dataset.collectionTab || '');
 });
 window.addEventListener('pagehide', () => saveActiveCollectionTabState(), {capture: true});
 readCollectionTabs();
@@ -1861,20 +2028,25 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
     listEl.dataset.total = incoming.dataset.total || '0';
     listEl.dataset.loaded = incoming.dataset.loaded || '0';
     listEl.dataset.inlineCreated = '0';
+    listEl.dataset.blank = incoming.dataset.blank || '0';
     listEl.dataset.collection = incoming.dataset.collection || '';
     listEl.dataset.collectionName = incoming.dataset.collectionName || '题库根目录';
+    const blankPage = listEl.dataset.blank === '1';
     isCustom = listEl.dataset.customSort === '1';
     const count = Number(incoming.dataset.total || 0);
     const countEl = document.getElementById('q-count');
     if (countEl) countEl.textContent = count;
     const addButton = document.getElementById('new-question-fab');
     if (addButton) {
+      addButton.classList.toggle('hidden', blankPage);
       const folderName = listEl.dataset.collectionName || '题库根目录';
       addButton.title = `在“${folderName}”末尾添加题目`;
       addButton.setAttribute('aria-label', addButton.title);
     }
+    document.getElementById('search-form')?.classList.toggle('hidden', blankPage);
     const toolbar = document.getElementById('q-toolbar');
-    toolbar?.classList.toggle('hidden', incomingOverview?.dataset.overview === '1');
+    toolbar?.classList.toggle(
+      'hidden', blankPage || incomingOverview?.dataset.overview === '1');
     if (incomingOverview?.dataset.overview === '1') {
       document.getElementById('export-panel')?.classList.add('hidden');
     }
@@ -1920,7 +2092,10 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false) {
 }
 
 folderTree?.addEventListener('click', event => {
-  const link = event.target.closest('a.folder-link[data-ajax="1"]');
+  const row = event.target.closest('.folder-row');
+  if (!row || event.target.closest(
+      '.folder-twist:not(.folder-twist-empty), .folder-actions')) return;
+  const link = row.querySelector(':scope > a.folder-link[data-ajax="1"]');
   if (!link) return;
   event.preventDefault();
   const item = link.closest('.folder-item');
@@ -1990,27 +2165,55 @@ bulkbar?.addEventListener('submit', async event => {
   const promptText = form.dataset.confirm;
   if (promptText && !confirm(promptText)) return;
   let action = form.action;
+  let targetCollection = '';
   if (form.id === 'add-coll-form') {
-    const cid = form.querySelector('input[name="cid"]')?.value || '';
-    if (!cid) return;
-    action = new URL(collectionActionUrl(cid, 'add'), location.href).href;
+    targetCollection = form.querySelector('input[name="cid"]')?.value || '';
+    if (!targetCollection) return;
+    action = new URL(collectionActionUrl(targetCollection, 'add'), location.href).href;
   }
-  const button = form.querySelector('button[type="submit"]');
+  const path = new URL(action).pathname;
+  const clearsSelection = path === '/clear';
+  const previousCount = Number(document.getElementById('sel-count')?.textContent || 0);
+  const visibleBeforeClear = clearsSelection
+    ? [...(listEl?.querySelectorAll('.card') || [])].map(card => ({
+        card,
+        checked: !!card.querySelector('.sel-toggle')?.checked,
+        selected: card.classList.contains('selected'),
+      }))
+    : [];
+  if (clearsSelection) {
+    selectionClearInFlight = true;
+    setVisibleCardsSelected(false);
+    setVisibleSelectionDisabled(true);
+    syncSelectionSummary(0);
+  }
+  const button = event.submitter?.matches('button[type="submit"]')
+    ? event.submitter
+    : form.querySelector('button[type="submit"]');
   if (button) button.disabled = true;
   try {
-    const response = await fetch(action, {
-      method: 'POST', headers: {'Accept': 'application/json'}, body: new FormData(form)
-    });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || '操作失败');
-    const path = new URL(action).pathname;
+    const requestBody = new FormData(form);
+    if (form.id === 'add-coll-form') {
+      requestBody.set('mode', event.submitter?.value === 'copy' ? 'copy' : 'move');
+    }
+    const performRequest = async () => {
+      const response = await fetch(action, {
+        method: 'POST', headers: {'Accept': 'application/json'}, body: requestBody
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || '操作失败');
+      return data;
+    };
+    // 其它批量操作也依赖当前选题篮，必须等刚才的单题勾选真正落盘后再读取。
+    if (!clearsSelection) await selectionMutationTail;
+    const data = clearsSelection
+      ? await enqueueSelectionMutation(performRequest)
+      : await performRequest();
     const ids = new Set(data.ids || data.deleted || []);
     if (path === '/clear') {
-      listEl?.querySelectorAll('.card.selected').forEach(card => {
-        card.classList.remove('selected');
-        const checkbox = card.querySelector('.sel-toggle');
-        if (checkbox) checkbox.checked = false;
-      });
+      // 再覆盖一次所有题卡，而不是只找 .card.selected；请求发出前刚勾上的 checkbox
+      // 可能尚未来得及获得 selected 类，这正是“清空后蓝勾残留”的根因。
+      setVisibleCardsSelected(false);
     } else if (path === '/tag_selected') {
       listEl?.querySelectorAll('.card').forEach(card => {
         if (!ids.has(card.dataset.id)) return;
@@ -2045,16 +2248,30 @@ bulkbar?.addEventListener('submit', async event => {
       });
       syncQuestionCountAfterRemoval(removed, removedInline);
       if (listEl?.dataset.pageToken) await loadFolderFragment(location.href, false);
+    } else if (data.mode === 'copy'
+               && targetCollection !== (listEl?.dataset.collection || '')) {
+      // 复制到别的题集不会改变当前列表，右栏稍后按同一选题篮自行刷新。
     } else {
       await loadFolderFragment(location.href, false);
     }
-    const count = Number(data.count || 0);
-    document.getElementById('sel-count').textContent = count;
-    syncBulkbar(count);
+    syncSelectionSummary(data.count);
     flashToast(data.message || '操作完成');
   } catch (error) {
+    if (clearsSelection) {
+      visibleBeforeClear.forEach(state => {
+        if (!state.card.isConnected) return;
+        state.card.classList.toggle('selected', state.selected);
+        const checkbox = state.card.querySelector('.sel-toggle');
+        if (checkbox) checkbox.checked = state.checked;
+      });
+      syncSelectionSummary(previousCount);
+    }
     flashToast(error.message, 'err');
   } finally {
+    if (clearsSelection) {
+      selectionClearInFlight = false;
+      setVisibleSelectionDisabled(false);
+    }
     if (button) button.disabled = false;
   }
 });
@@ -2101,25 +2318,24 @@ document.getElementById('select-all-form')?.addEventListener('submit', async eve
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
   if (button) button.disabled = true;
+  setVisibleSelectionDisabled(true);
   try {
-    const response = await fetch(form.action, {
-      method: 'POST', headers: {'Accept': 'application/json'},
-      body: currentSelectionScope(form)
+    const data = await enqueueSelectionMutation(async () => {
+      const response = await fetch(form.action, {
+        method: 'POST', headers: {'Accept': 'application/json'},
+        body: currentSelectionScope(form)
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !payload.ok) throw new Error(payload.error || '全选失败');
+      return payload;
     });
-    const data = await response.json();
-    if (!response.ok || !data.ok) throw new Error(data.error || '全选失败');
-    listEl?.querySelectorAll('.card').forEach(card => {
-      card.classList.add('selected');
-      const checkbox = card.querySelector('.sel-toggle');
-      if (checkbox) checkbox.checked = true;
-    });
-    const count = Number(data.count || 0);
-    document.getElementById('sel-count').textContent = count;
-    syncBulkbar(count);
+    setVisibleCardsSelected(true);
+    syncSelectionSummary(data.count);
     flashToast(data.message || `已全选 ${data.matched || 0} 道题`);
   } catch (error) {
     flashToast(error.message, 'err');
   } finally {
+    setVisibleSelectionDisabled(false);
     if (button) button.disabled = false;
   }
 });
@@ -2135,9 +2351,6 @@ function renderLazyFolder(node) {
   row.innerHTML = node.has_children
     ? '<span class="folder-twist" title="展开/折叠"><span aria-hidden="true">›</span></span>'
     : '<span class="folder-twist folder-twist-empty"></span>';
-  const icon = document.createElement('span');
-  icon.className = 'folder-ico'; icon.setAttribute('aria-hidden', 'true');
-  icon.textContent = '▰';
   const link = document.createElement('a');
   link.className = 'folder-link'; link.dataset.ajax = '1';
   const linkUrl = new URL(location.href);
@@ -2152,7 +2365,7 @@ function renderLazyFolder(node) {
     + '<button type="button" class="folder-act folder-rename" title="重命名">✎</button>'
     + '<button type="button" class="folder-act folder-movebtn" title="移动到…">⇄</button>'
     + '<button type="button" class="folder-act folder-del" title="删除">×</button>';
-  row.append(icon, link, actions);
+  row.append(link, actions);
   li.appendChild(row);
   if (node.has_children) {
     const children = document.createElement('ul');
@@ -2229,6 +2442,61 @@ const bulkFolderTree = document.getElementById('bulk-folder-tree');
 const bulkFolderEmpty = document.getElementById('bulk-folder-empty');
 const bulkFolderInput = document.querySelector('#add-coll-form input[name="cid"]');
 const bulkFolderSubmit = document.getElementById('bulk-folder-submit');
+const bulkFolderCopy = document.getElementById('bulk-folder-copy');
+const bulkTransferButtons = [bulkFolderSubmit, bulkFolderCopy].filter(Boolean);
+let bulkFolderPositionFrame = 0;
+
+function closeBulkFolderPopover(restoreFocus = false) {
+  if (!bulkFolderPopover) return;
+  bulkFolderPopover.hidden = true;
+  bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+  if (bulkFolderPositionFrame) {
+    cancelAnimationFrame(bulkFolderPositionFrame);
+    bulkFolderPositionFrame = 0;
+  }
+  if (restoreFocus) bulkFolderTrigger?.focus();
+}
+
+function positionBulkFolderPopover() {
+  if (!bulkFolderPopover || !bulkFolderTrigger || bulkFolderPopover.hidden) return;
+  const margin = 12;
+  const gap = 6;
+  const viewportWidth = document.documentElement.clientWidth || window.innerWidth;
+  const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+  const triggerRect = bulkFolderTrigger.getBoundingClientRect();
+  if (triggerRect.bottom <= margin || triggerRect.top >= viewportHeight - margin) {
+    closeBulkFolderPopover();
+    return;
+  }
+
+  const width = Math.max(0, Math.min(380, viewportWidth - margin * 2));
+  const spaceBelow = Math.max(0, viewportHeight - triggerRect.bottom - gap - margin);
+  const spaceAbove = Math.max(0, triggerRect.top - gap - margin);
+  const opensAbove = spaceBelow < 240 && spaceAbove > spaceBelow;
+  const availableHeight = opensAbove ? spaceAbove : spaceBelow;
+  const maxHeight = Math.min(460, Math.max(96, availableHeight));
+  const left = Math.min(
+    viewportWidth - margin - width,
+    Math.max(margin, triggerRect.right - width)
+  );
+
+  bulkFolderPopover.style.width = `${width}px`;
+  bulkFolderPopover.style.maxHeight = `${maxHeight}px`;
+  bulkFolderPopover.style.left = `${left}px`;
+  const renderedHeight = Math.min(maxHeight, bulkFolderPopover.offsetHeight);
+  const top = opensAbove
+    ? Math.max(margin, triggerRect.top - gap - renderedHeight)
+    : triggerRect.bottom + gap;
+  bulkFolderPopover.style.top = `${top}px`;
+}
+
+function scheduleBulkFolderPopoverPosition() {
+  if (!bulkFolderPopover || bulkFolderPopover.hidden || bulkFolderPositionFrame) return;
+  bulkFolderPositionFrame = requestAnimationFrame(() => {
+    bulkFolderPositionFrame = 0;
+    positionBulkFolderPopover();
+  });
+}
 
 function renderBulkFolderNode(node) {
   const item = document.createElement('li');
@@ -2241,7 +2509,7 @@ function renderBulkFolderNode(node) {
   row.className = 'bulk-folder-row';
   const twist = document.createElement('button');
   twist.type = 'button';
-  twist.className = `bulk-folder-twist${node.has_children ? '' : ' empty'}`;
+  twist.className = `bulk-folder-twist${node.has_children ? '' : ' is-empty'}`;
   twist.dataset.bulkFolderTwist = '1';
   twist.tabIndex = node.has_children ? 0 : -1;
   twist.textContent = node.has_children ? '›' : '';
@@ -2278,6 +2546,7 @@ async function loadBulkFolderChildren(parentId, host) {
     host.replaceChildren(...data.children.map(renderBulkFolderNode));
     host.dataset.loaded = '1';
     if (!parentId && bulkFolderEmpty) bulkFolderEmpty.hidden = data.children.length > 0;
+    scheduleBulkFolderPopoverPosition();
   } finally {
     host.dataset.loading = '';
   }
@@ -2290,26 +2559,30 @@ function resetBulkFolderPicker() {
   }
   if (bulkFolderInput) bulkFolderInput.value = '';
   if (bulkFolderTrigger) bulkFolderTrigger.textContent = '选择目标文件夹…';
-  if (bulkFolderSubmit) bulkFolderSubmit.disabled = true;
+  bulkTransferButtons.forEach(button => { button.disabled = true; });
   if (bulkFolderEmpty) bulkFolderEmpty.hidden = true;
-  if (bulkFolderPopover) bulkFolderPopover.hidden = true;
-  bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+  closeBulkFolderPopover();
 }
 
 bulkFolderTrigger?.addEventListener('click', async () => {
   const opening = bulkFolderPopover?.hidden;
   if (!bulkFolderPopover) return;
-  bulkFolderPopover.hidden = !opening;
-  bulkFolderTrigger.setAttribute('aria-expanded', String(opening));
-  if (opening && bulkFolderTree?.dataset.loaded !== '1') {
+  if (!opening) {
+    closeBulkFolderPopover();
+    return;
+  }
+  bulkFolderPopover.hidden = false;
+  bulkFolderTrigger.setAttribute('aria-expanded', 'true');
+  positionBulkFolderPopover();
+  if (bulkFolderTree?.dataset.loaded !== '1') {
     try {
       await loadBulkFolderChildren('', bulkFolderTree);
     } catch (error) {
-      bulkFolderPopover.hidden = true;
-      bulkFolderTrigger.setAttribute('aria-expanded', 'false');
+      closeBulkFolderPopover();
       flashToast(error.message, 'err');
     }
   }
+  positionBulkFolderPopover();
 });
 
 bulkFolderTree?.addEventListener('click', async event => {
@@ -2324,6 +2597,7 @@ bulkFolderTree?.addEventListener('click', async event => {
       }
       children.hidden = !children.hidden;
       item.setAttribute('aria-expanded', String(!children.hidden));
+      scheduleBulkFolderPopoverPosition();
     } catch (error) {
       flashToast(error.message, 'err');
     }
@@ -2335,24 +2609,24 @@ bulkFolderTree?.addEventListener('click', async event => {
   item.querySelector(':scope > .bulk-folder-row')?.classList.add('selected');
   if (bulkFolderInput) bulkFolderInput.value = item.dataset.folderId;
   if (bulkFolderTrigger) bulkFolderTrigger.textContent = item.dataset.folderId;
-  if (bulkFolderSubmit) bulkFolderSubmit.disabled = false;
-  if (bulkFolderPopover) bulkFolderPopover.hidden = true;
-  bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+  bulkTransferButtons.forEach(button => { button.disabled = false; });
+  closeBulkFolderPopover();
 });
 
 document.addEventListener('click', event => {
   if (!bulkFolderPicker?.contains(event.target) && bulkFolderPopover) {
-    bulkFolderPopover.hidden = true;
-    bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
+    closeBulkFolderPopover();
   }
 });
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' && bulkFolderPopover && !bulkFolderPopover.hidden) {
-    bulkFolderPopover.hidden = true;
-    bulkFolderTrigger?.setAttribute('aria-expanded', 'false');
-    bulkFolderTrigger?.focus();
+    closeBulkFolderPopover(true);
   }
 });
+window.addEventListener('resize', scheduleBulkFolderPopoverPosition);
+document.addEventListener('scroll', event => {
+  if (!bulkFolderPopover?.contains(event.target)) scheduleBulkFolderPopoverPosition();
+}, true);
 
 folderTree?.addEventListener('click', async event => {
   const twist = event.target.closest('.folder-twist:not(.folder-twist-empty)');
@@ -2436,9 +2710,114 @@ function remapActiveCollection(oldId, newId, keepSuffix = true) {
   } else {
     url.searchParams.delete('collection');
     url.searchParams.delete('recursive');
-    url.searchParams.set('all', '1');
+    url.searchParams.delete('all');
   }
   return {url, changed: true};
+}
+function deletedCollectionFallback(oldId, parentId) {
+  const next = remapActiveCollection(oldId, parentId, false);
+  if (!next.changed) return next;
+  // 被删目录上的搜索、筛选和非默认排序已没有继续继承的对象。父目录仍走自然
+  // 路径流；删除顶层目录则回到空白页，不能因此冷加载整座题库。
+  ['q', 'tag', 'tags', 'match', 'type', 'difficulty', 'starred']
+    .forEach(name => next.url.searchParams.delete(name));
+  next.url.searchParams.set('sort', 'custom');
+  if (parentId) {
+    next.url.searchParams.delete('all');
+    next.url.searchParams.set('recursive', '1');
+  } else {
+    next.url.searchParams.delete('recursive');
+    next.url.searchParams.delete('all');
+  }
+  return next;
+}
+function removeFolderTreeItem(item) {
+  if (!item) return;
+  const children = item.parentElement;
+  const parentItem = children?.closest('.folder-item');
+  item.remove();
+  if (children?.classList.contains('folder-children')
+      && !children.querySelector(':scope > .folder-item') && parentItem) {
+    children.remove();
+    parentItem.classList.remove('has-children', 'collapsed');
+    const twist = parentItem.querySelector(':scope > .folder-row > .folder-twist');
+    if (twist) {
+      twist.className = 'folder-twist folder-twist-empty';
+      twist.removeAttribute('title');
+      twist.replaceChildren();
+    }
+  }
+  resetCollectionOptions();
+}
+function remapFolderTreeItem(item, oldId, newId, newName = '') {
+  if (!item) return;
+  [item, ...item.querySelectorAll('.folder-item')].forEach(node => {
+    const currentId = node.dataset.folderId || '';
+    if (currentId !== oldId && !currentId.startsWith(oldId + '/')) return;
+    const mappedId = `${newId}${currentId.slice(oldId.length)}`;
+    node.dataset.folderId = mappedId;
+    const link = node.querySelector(':scope > .folder-row > .folder-link');
+    if (link) {
+      const url = new URL(link.href, location.href);
+      url.searchParams.set('collection', mappedId);
+      url.searchParams.delete('all');
+      link.href = url;
+    }
+    const children = node.querySelector(':scope > .folder-children');
+    if (children) children.dataset.parentId = mappedId;
+  });
+  if (newName) {
+    item.dataset.folderName = newName;
+    const link = item.querySelector(':scope > .folder-row > .folder-link');
+    if (link) {
+      link.textContent = newName;
+      link.title = newName;
+    }
+  }
+}
+function cleanupEmptyFolderHost(host) {
+  if (!host?.classList.contains('folder-children')
+      || host.querySelector(':scope > .folder-item')) return;
+  const parentItem = host.closest('.folder-item');
+  host.remove();
+  parentItem?.classList.remove('has-children', 'collapsed');
+  const twist = parentItem?.querySelector(':scope > .folder-row > .folder-twist');
+  if (twist) {
+    twist.className = 'folder-twist folder-twist-empty';
+    twist.removeAttribute('title');
+    twist.replaceChildren();
+  }
+}
+function insertExistingFolderItemSorted(host, item) {
+  if (!host || !item) return;
+  const siblings = [...host.children].filter(child => (
+    child !== item && child.classList.contains('folder-item')
+    && !child.classList.contains('folder-root')));
+  const name = item.dataset.folderName || '';
+  const before = siblings.find(child => (
+    (child.dataset.folderName || '').localeCompare(
+      name, 'zh-CN', {numeric: true}) > 0));
+  host.insertBefore(item, before || null);
+}
+function moveFolderTreeItem(item, oldId, newId, newParentId) {
+  if (!item) return;
+  if (folderMoveSelect && item.contains(folderMoveSelect)) folderTree.after(folderMoveSelect);
+  const oldHost = item.parentElement;
+  item.remove();
+  cleanupEmptyFolderHost(oldHost);
+  remapFolderTreeItem(item, oldId, newId);
+  let targetHost = folderTree;
+  if (newParentId) {
+    const parentItem = [...(folderTree?.querySelectorAll('.folder-item') || [])]
+      .find(node => node.dataset.folderId === newParentId);
+    if (!parentItem) {
+      resetCollectionOptions();
+      return;
+    }
+    targetHost = ensureFolderChildrenHost(parentItem, newParentId);
+  }
+  insertExistingFolderItemSorted(targetHost, item);
+  resetCollectionOptions();
 }
 async function postFolderForm(url, body) {
   const response = await fetch(url, {
@@ -2522,7 +2901,13 @@ async function renameFolder(li) {
     const data = await postFolderForm(collectionActionUrl(fid, 'rename'), form);
     const next = remapActiveCollection(fid, data.id, true);
     remapCollectionTabs(fid, data.id, true);
-    await loadFolderFragment(next.url, next.changed, true);
+    if (next.changed) {
+      await loadFolderFragment(next.url, true, true);
+    } else {
+      remapFolderTreeItem(li, fid, data.id, data.name || name.trim());
+      insertExistingFolderItemSorted(li.parentElement, li);
+      resetCollectionOptions();
+    }
     flashToast(data.message || '文件夹已改名');
   } catch (error) {
     flashToast(error.message, 'err');
@@ -2534,9 +2919,17 @@ async function deleteFolder(li) {
   if (!confirm(`删除题集「${li.dataset.folderName}」？整个子树会移入回收站。`)) return;
   try {
     const data = await postFolderForm(collectionActionUrl(fid, 'delete'), new FormData());
-    const next = remapActiveCollection(fid, data.parent_id || '', false);
+    const next = deletedCollectionFallback(fid, data.parent_id || '');
     removeCollectionTabs(fid);
-    await loadFolderFragment(next.url, next.changed, true);
+    if (next.changed) {
+      const loaded = await loadFolderFragment(next.url, false, true);
+      // 原地址已经指向回收站中的目录，不能留在浏览历史里；replaceState 也会把
+      // 新位置同步给桌面常驻外壳，切到其它栏目再回来仍显示有效的题库页面。
+      if (loaded) history.replaceState({qfFragment: true}, '', next.url);
+    } else {
+      // 删除别处的目录不影响当前题卡，原地更新树即可，不能借机重跑当前搜索或排序。
+      removeFolderTreeItem(li);
+    }
     flashToast(data.message || '题集已移入回收站');
   } catch (error) {
     flashToast(error.message, 'err');
@@ -2577,7 +2970,11 @@ folderMoveSelect?.addEventListener('change', async () => {
       if (!res.ok || !data.ok) throw new Error(data.error || '移动失败');
       const next = remapActiveCollection(fid, data.id, true);
       remapCollectionTabs(fid, data.id, true);
-      await loadFolderFragment(next.url, next.changed, true);
+      if (next.changed) {
+        await loadFolderFragment(next.url, true, true);
+      } else {
+        moveFolderTreeItem(li, fid, data.id, parentId);
+      }
       flashToast(data.message || '文件夹已移动');
     } catch (error) {
       flashToast(error.message, 'err');
@@ -2733,7 +3130,14 @@ folderTree?.addEventListener('drop', async e => {
       if (!res.ok || !data.ok) throw new Error(data.error || '移动文件夹失败');
       const next = remapActiveCollection(sourceId, data.id, true);
       remapCollectionTabs(sourceId, data.id, true);
-      await loadFolderFragment(next.url, next.changed, true);
+      if (next.changed) {
+        await loadFolderFragment(next.url, true, true);
+      } else {
+        moveFolderTreeItem(
+          [...(folderTree?.querySelectorAll('.folder-item') || [])]
+            .find(node => node.dataset.folderId === sourceId),
+          sourceId, data.id, cid);
+      }
       flashToast(data.message || '文件夹已移动');
     } catch (error) {
       flashToast(error.message, 'err');

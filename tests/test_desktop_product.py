@@ -481,9 +481,9 @@ class DesktopSettingsTests(unittest.TestCase):
         api = desktop.DesktopApi(
             Path("D:/bank"), Path("D:/data"), Path("D:/data/desktop.json"))
         api._window = mock.Mock()
-        api._window.native.Text = "QuizForge"
-        api._window.native.Handle.ToInt64.return_value = 123
+        api._native_handle = 123
         api._taskbar_button_rect = (10, 20, 110, 120)
+        posted_messages = []
 
         class FakeUser32:
             calls = 0
@@ -513,11 +513,32 @@ class DesktopSettingsTests(unittest.TestCase):
             def IsIconic(_handle):
                 return False
 
+            @staticmethod
+            def PostMessageW(handle, message, command, parameter):
+                posted_messages.append((handle, message, command, parameter))
+                return True
+
         fake_windll = mock.Mock(user32=FakeUser32())
         with mock.patch.object(desktop.ctypes, "windll", fake_windll):
             api._taskbar_click_monitor()
 
-        api._window.minimize.assert_called_once_with()
+        self.assertEqual(posted_messages, [(123, 0x0112, 0xF020, 0)])
+        api._window.minimize.assert_not_called()
+
+    def test_taskbar_rect_monitor_never_reads_winforms_from_worker(self):
+        api = desktop.DesktopApi(
+            Path("D:/bank"), Path("D:/data"), Path("D:/data/desktop.json"))
+        api._native_handle = 123
+        api._taskbar_monitor_stop = mock.Mock()
+        api._taskbar_monitor_stop.is_set.side_effect = [False, True]
+
+        with mock.patch.object(
+                api, "_find_taskbar_button_rect",
+                return_value=(10, 20, 110, 120)) as find_rect:
+            api._taskbar_rect_monitor()
+
+        find_rect.assert_called_once_with(desktop.APP_NAME)
+        self.assertEqual(api._taskbar_button_rect, (10, 20, 110, 120))
 
     def test_frameless_window_resize_clamps_size_and_fixes_opposite_corner(self):
         from webview.window import FixPoint
