@@ -449,6 +449,7 @@ class DesktopSettingsTests(unittest.TestCase):
     def test_frameless_window_controls_delegate_to_native_window(self):
         api = desktop.DesktopApi(Path("D:/bank"), Path("D:/data"), Path("D:/data/desktop.json"))
         api._window = mock.Mock()
+        api._window.native = None
 
         self.assertTrue(api.window_minimize()["ok"])
         api._window.minimize.assert_called_once_with()
@@ -465,6 +466,58 @@ class DesktopSettingsTests(unittest.TestCase):
             self.assertTrue(api.window_close()["ok"])
             timer.assert_called_once_with(0.05, api._window.destroy)
             timer.return_value.start.assert_called_once_with()
+
+    def test_frameless_window_keeps_native_taskbar_controls(self):
+        source = (Path(__file__).resolve().parent.parent / "desktop.py").read_text(
+            encoding="utf-8")
+        self.assertIn("native.ShowInTaskbar = True", source)
+        self.assertIn("native.MinimizeBox = True", source)
+        self.assertIn("native.MaximizeBox = True", source)
+        self.assertIn(
+            "native.MaximizedBounds = Screen.FromHandle(native.Handle).WorkingArea",
+            source)
+
+    def test_active_taskbar_button_click_minimizes_frameless_window(self):
+        api = desktop.DesktopApi(
+            Path("D:/bank"), Path("D:/data"), Path("D:/data/desktop.json"))
+        api._window = mock.Mock()
+        api._window.native.Text = "QuizForge"
+        api._window.native.Handle.ToInt64.return_value = 123
+        api._taskbar_button_rect = (10, 20, 110, 120)
+
+        class FakeUser32:
+            calls = 0
+
+            def GetAsyncKeyState(self, _button):
+                self.calls += 1
+                if self.calls == 1:
+                    return 0x8000
+                api._taskbar_monitor_stop.set()
+                return 0
+
+            @staticmethod
+            def GetCursorPos(pointer):
+                coordinates = desktop.ctypes.cast(
+                    pointer,
+                    desktop.ctypes.POINTER(desktop.ctypes.c_long * 2),
+                ).contents
+                coordinates[0] = 50
+                coordinates[1] = 60
+                return True
+
+            @staticmethod
+            def GetForegroundWindow():
+                return 123
+
+            @staticmethod
+            def IsIconic(_handle):
+                return False
+
+        fake_windll = mock.Mock(user32=FakeUser32())
+        with mock.patch.object(desktop.ctypes, "windll", fake_windll):
+            api._taskbar_click_monitor()
+
+        api._window.minimize.assert_called_once_with()
 
     def test_frameless_window_resize_clamps_size_and_fixes_opposite_corner(self):
         from webview.window import FixPoint

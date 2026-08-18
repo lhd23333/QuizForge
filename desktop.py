@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import ctypes
 import logging
 from logging.handlers import RotatingFileHandler
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from urllib.parse import quote
 import hashlib
@@ -749,6 +751,11 @@ class DesktopApi:
         # Windows 端会误遍历整棵 WinForms/WebView2 对象树并刷出递归与线程错误。
         self._window = None
         self._maximized = False
+        self._taskbar_monitor_stop = threading.Event()
+        self._taskbar_monitor_thread: threading.Thread | None = None
+        self._taskbar_rect_thread: threading.Thread | None = None
+        self._taskbar_button_rect = None
+        self._taskbar_rect_lock = threading.Lock()
         self.restart_requested = False
         self.restart_bank_dir: Path | None = None
         self.restart_subject: str | None = None
@@ -863,17 +870,213 @@ class DesktopApi:
         self._window.minimize()
         return {"ok": True}
 
+    @staticmethod
+    def _find_taskbar_button_rect(window_title: str):
+        """读取当前窗口任务栏按钮范围，供无边框窗口补齐活动按钮点击。"""
+        try:
+            import clr
+
+            if not getattr(DesktopApi._find_taskbar_button_rect, "_uia_ready", False):
+                windows_dir = Path(os.environ.get("WINDIR", r"C:\\Windows"))
+                candidates = (
+                    windows_dir / "Microsoft.NET" / "Framework64"
+                    / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",
+                    windows_dir / "Microsoft.NET" / "Framework"
+                    / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",
+                )
+                for assembly in candidates:
+                    if assembly.is_file():
+                        clr.AddReference(str(assembly))
+                        types_assembly = assembly.with_name("UIAutomationTypes.dll")
+                        if types_assembly.is_file():
+                            clr.AddReference(str(types_assembly))
+                        break
+                DesktopApi._find_taskbar_button_rect._uia_ready = True
+
+            from System import IntPtr
+            from System.Windows.Automation import (
+                AutomationElement,
+                Condition,
+                TreeScope,
+            )
+
+            user32 = ctypes.windll.user32
+            tray_handles = []
+
+            @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+            def collect_tray(hwnd, _lparam):
+                class_name = ctypes.create_unicode_buffer(128)
+                user32.GetClassNameW(hwnd, class_name, len(class_name))
+                if class_name.value in ("Shell_TrayWnd", "Shell_SecondaryTrayWnd"):
+                    tray_handles.append(hwnd)
+                return True
+
+            user32.EnumWindows(collect_tray, 0)
+            for handle in tray_handles:
+                tray = AutomationElement.FromHandle(IntPtr(handle))
+                elements = tray.FindAll(TreeScope.Descendants, Condition.TrueCondition)
+                for index in range(elements.Count):
+                    element = elements[index]
+                    name = str(element.Current.Name or "")
+                    if name == window_title or name.startswith(window_title + " - "):
+                        rect = element.Current.BoundingRectangle
+                        return (
+                            float(rect.Left), float(rect.Top),
+                            float(rect.Right), float(rect.Bottom),
+                        )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "无法读取 QuizForge 任务栏按钮范围", exc_info=True)
+        return None
+
+    def _taskbar_click_monitor(self) -> None:
+        """补齐无边框 WinForms 活动任务栏按钮的再次点击最小化行为。"""
+        try:
+            user32 = ctypes.windll.user32
+
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+            point = POINT()
+            was_pressed = False
+            pending_click = False
+            while not self._taskbar_monitor_stop.wait(0.025):
+                native = getattr(self._window, "native", None)
+                if native is None:
+                    continue
+                with self._taskbar_rect_lock:
+                    rect = self._taskbar_button_rect
+
+                pressed = bool(user32.GetAsyncKeyState(0x01) & 0x8000)
+                if pressed and not was_pressed and rect is not None:
+                    user32.GetCursorPos(ctypes.byref(point))
+                    in_button = (
+                        rect[0] <= point.x < rect[2]
+                        and rect[1] <= point.y < rect[3]
+                    )
+                    handle = int(native.Handle.ToInt64())
+                    is_foreground = user32.GetForegroundWindow() == handle
+                    is_minimized = bool(user32.IsIconic(handle))
+                    pending_click = in_button and is_foreground and not is_minimized
+                    if in_button:
+                        logging.getLogger(__name__).info(
+                            "任务栏按钮按下：foreground=%s minimized=%s",
+                            is_foreground, is_minimized)
+                elif not pressed and was_pressed and pending_click:
+                    # Windows 在鼠标抬起时才处理任务栏按钮。若按下阶段立即最小化，
+                    # 壳层会把刚缩回的窗口再次还原，因此必须等本次点击结束后再执行。
+                    time.sleep(0.05)
+                    user32.GetCursorPos(ctypes.byref(point))
+                    still_in_button = (
+                        rect is not None
+                        and rect[0] <= point.x < rect[2]
+                        and rect[1] <= point.y < rect[3]
+                    )
+                    handle = int(native.Handle.ToInt64())
+                    if (still_in_button
+                            and user32.GetForegroundWindow() == handle
+                            and not user32.IsIconic(handle)):
+                        logging.getLogger(__name__).info("任务栏按钮抬起：执行最小化")
+                        self._window.minimize()
+                    pending_click = False
+                was_pressed = pressed
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "任务栏点击监测已停止", exc_info=True)
+
+    def _taskbar_rect_monitor(self) -> None:
+        """低频刷新任务栏按钮位置，不阻塞短周期鼠标点击检测。"""
+        while not self._taskbar_monitor_stop.is_set():
+            native = getattr(self._window, "native", None)
+            if native is not None:
+                rect = self._find_taskbar_button_rect(str(native.Text or APP_NAME))
+                with self._taskbar_rect_lock:
+                    changed = rect != self._taskbar_button_rect
+                    self._taskbar_button_rect = rect
+                if changed:
+                    logging.getLogger(__name__).info(
+                        "任务栏按钮范围已更新：%s", rect)
+            self._taskbar_monitor_stop.wait(2.0)
+
+    def _start_taskbar_click_monitor(self) -> None:
+        if os.name != "nt" or self._taskbar_monitor_thread is not None:
+            return
+        self._taskbar_monitor_stop.clear()
+        self._taskbar_rect_thread = threading.Thread(
+            target=self._taskbar_rect_monitor,
+            name="quizforge-taskbar-rect",
+            daemon=True,
+        )
+        self._taskbar_monitor_thread = threading.Thread(
+            target=self._taskbar_click_monitor,
+            name="quizforge-taskbar-monitor",
+            daemon=True,
+        )
+        self._taskbar_rect_thread.start()
+        self._taskbar_monitor_thread.start()
+        logging.getLogger(__name__).info("任务栏点击监测已启动")
+
+    def _stop_taskbar_click_monitor(self) -> None:
+        self._taskbar_monitor_stop.set()
+        thread = self._taskbar_monitor_thread
+        rect_thread = self._taskbar_rect_thread
+        self._taskbar_monitor_thread = None
+        self._taskbar_rect_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=1.0)
+        if rect_thread is not None and rect_thread is not threading.current_thread():
+            rect_thread.join(timeout=1.0)
+
+    def _prepare_native_maximize(self) -> None:
+        """让 WinForms 无边框窗口最大化到当前屏幕工作区，不覆盖任务栏。"""
+        if os.name != "nt" or self._window is None:
+            return
+        native = getattr(self._window, "native", None)
+        if native is None:
+            return
+        try:
+            from System import Action
+            from System.Windows.Forms import Screen
+
+            def apply_bounds():
+                # 无边框 Form 仍应当是一个正常的任务栏窗口。显式保留最小化/最大化
+                # 能力后，Windows 的标准单击手势会负责“当前在前台则缩回、否则唤起”。
+                # 双击会执行两次相反动作，不能在应用里劫持成另一套非标准语义。
+                native.ShowInTaskbar = True
+                native.MinimizeBox = True
+                native.MaximizeBox = True
+                native.MaximizedBounds = Screen.FromHandle(native.Handle).WorkingArea
+
+            if native.InvokeRequired:
+                native.Invoke(Action(apply_bounds))
+            else:
+                apply_bounds()
+            self._start_taskbar_click_monitor()
+        except Exception:
+            # 极少数 WebView 后端不暴露 WinForms Form；保留原生 maximize 作为降级，
+            # 不能让窗口控制按钮因工作区探测失败而完全失效。
+            logging.getLogger(__name__).warning(
+                "无法设置无边框窗口最大化工作区", exc_info=True)
+
+    def _on_window_maximized(self) -> None:
+        self._maximized = True
+
+    def _on_window_restored(self) -> None:
+        self._maximized = False
+
     def window_toggle_maximize(self) -> dict:
         if self._window is None:
             return {"ok": False, "error": "桌面窗口尚未就绪"}
         if self._maximized:
             self._window.restore()
         else:
+            self._prepare_native_maximize()
             self._window.maximize()
         self._maximized = not self._maximized
         return {"ok": True, "maximized": self._maximized}
 
     def window_close(self) -> dict:
+        self._stop_taskbar_click_monitor()
         if self._window is None:
             return {"ok": False, "error": "桌面窗口尚未就绪"}
         # 与重启一样延迟销毁，让 JS API 有机会先收到成功响应。
@@ -1438,6 +1641,11 @@ def main() -> int:
         shadow=True,
     )
     api._window = window
+    # WinForms 的 frameless 最大化默认按整块屏幕算，会压住任务栏。窗口显示后先写入
+    # 当前显示器工作区，并监听原生状态变化，使任务栏最小化/还原后桥接状态不漂移。
+    window.events.shown += api._prepare_native_maximize
+    window.events.maximized += api._on_window_maximized
+    window.events.restored += api._on_window_restored
 
     try:
         webview.start(
