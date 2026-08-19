@@ -34,9 +34,24 @@ class LibraryOperationTests(unittest.TestCase):
             self.root, folder.path, "例题", "第一行\r\n第二行\r第三行")
 
         self.assertEqual(folder.path, "资料")
-        self.assertEqual(note.path, "资料/例题.markdown")
-        self.assertEqual((self.root / "资料" / "例题.markdown").read_bytes(),
-                         b"\xe7\xac\xac\xe4\xb8\x80\xe8\xa1\x8c\n\xe7\xac\xac\xe4\xba\x8c\xe8\xa1\x8c\n\xe7\xac\xac\xe4\xb8\x89\xe8\xa1\x8c")
+        self.assertEqual(note.path, "资料/例题.md")
+        meta, body = filestore._read_raw(self.root / "资料" / "例题.md")
+        self.assertEqual(meta["quizforge_kind"], "document")
+        self.assertEqual(body.lstrip("\n"), "第一行\n第二行\n第三行")
+
+    def test_create_markdown_preserves_custom_frontmatter_and_body(self):
+        note = library_ops.create_markdown(
+            self.root,
+            "",
+            "课堂笔记.md",
+            "---\r\ncustom_field: 保留\r\nnested:\r\n  enabled: true\r\n---\r\n\r\n# 正文\r\n内容\r\n",
+        )
+
+        meta, body = filestore._read_raw(self.root / note.path)
+        self.assertEqual(meta["quizforge_kind"], "document")
+        self.assertEqual(meta["custom_field"], "保留")
+        self.assertEqual(meta["nested"], {"enabled": True})
+        self.assertEqual(body.lstrip("\n"), "# 正文\n内容\n")
 
     def test_rejects_traversal_hidden_and_invalid_names(self):
         for path in ("../outside", ".obsidian", "C:/outside"):
@@ -165,6 +180,12 @@ class LibraryOperationTests(unittest.TestCase):
         )
         original_bytes = original.read_bytes()
         self._write_question(target / "既有.md", qid="target-id", order=4)
+        self._write_question(
+            target / "普通文档.md", qid="document-id", order=999,
+            quizforge_kind="document")
+        self._write_question(
+            target / "讲义.md", qid="handout-id", order=888,
+            quizforge_kind="handout")
 
         result = library_ops.copy_entry(self.root, "复制来源/题卡.md", "复制目标")
 
@@ -190,17 +211,31 @@ class LibraryOperationTests(unittest.TestCase):
         markdown_text = "# 普通资料\n\n不进入题卡索引。\n".encode("utf-8")
         unusual_md = "---\n- list-frontmatter\n---\n\n正文\n".encode("utf-8")
         invalid_md = b"\xff\xfe\x00not-utf8"
+        document_md = filestore._render_raw(
+            {"quizforge_kind": "document", "id": "document-id", "order": 12},
+            "# 文档正文\n",
+        ).encode("utf-8")
+        handout_md = filestore._render_raw(
+            {"quizforge_kind": "handout", "id": "handout-id", "order": 13},
+            "# 讲义正文\n",
+        ).encode("utf-8")
         (source / "资料.markdown").write_bytes(markdown_text)
         (source / "列表头.md").write_bytes(unusual_md)
         (source / "损坏编码.md").write_bytes(invalid_md)
+        (source / "文档.md").write_bytes(document_md)
+        (source / "讲义.md").write_bytes(handout_md)
 
         library_ops.copy_entry(self.root, "普通文档来源/资料.markdown", "普通文档目标")
         library_ops.copy_entry(self.root, "普通文档来源/列表头.md", "普通文档目标")
         library_ops.copy_entry(self.root, "普通文档来源/损坏编码.md", "普通文档目标")
+        library_ops.copy_entry(self.root, "普通文档来源/文档.md", "普通文档目标")
+        library_ops.copy_entry(self.root, "普通文档来源/讲义.md", "普通文档目标")
 
         self.assertEqual((target / "资料.markdown").read_bytes(), markdown_text)
         self.assertEqual((target / "列表头.md").read_bytes(), unusual_md)
         self.assertEqual((target / "损坏编码.md").read_bytes(), invalid_md)
+        self.assertEqual((target / "文档.md").read_bytes(), document_md)
+        self.assertEqual((target / "讲义.md").read_bytes(), handout_md)
 
     def test_folder_copy_and_descendant_target(self):
         (self.root / "章节" / "子目录").mkdir(parents=True)
@@ -209,6 +244,11 @@ class LibraryOperationTests(unittest.TestCase):
             body="题目 ![[章节图.png]]", custom_field="保留")
         (self.root / "章节" / "子目录" / "普通.md").write_text(
             "没有 frontmatter", encoding="utf-8")
+        document_bytes = filestore._render_raw(
+            {"quizforge_kind": "document", "custom_field": "原样保留"},
+            "# 普通文档\n",
+        ).encode("utf-8")
+        (self.root / "章节" / "子目录" / "文档.md").write_bytes(document_bytes)
         (self.root / "归档").mkdir()
 
         copied = library_ops.copy_entry(self.root, "章节", "归档")
@@ -229,6 +269,10 @@ class LibraryOperationTests(unittest.TestCase):
             (self.root / "章节" / "子目录" / "普通.md").read_text(
                 encoding="utf-8"),
             "没有 frontmatter",
+        )
+        self.assertEqual(
+            (self.root / "归档" / "章节" / "子目录" / "文档.md").read_bytes(),
+            document_bytes,
         )
 
         with self.assertRaises(library_ops.LibraryOperationError) as caught:

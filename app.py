@@ -670,6 +670,23 @@ def library_create_folder():
     return jsonify(ok=True, entry=result.as_dict()), 201
 
 
+@app.route("/api/library/markdown", methods=["POST"])
+def library_create_markdown():
+    try:
+        payload = _library_operation_payload()
+        parent = payload.get("parent", "")
+        _library_reject_history_operation(parent)
+        result = library_ops.create_markdown(
+            config.BANK_DIR,
+            parent,
+            payload.get("name", ""),
+            payload.get("text", ""),
+        )
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, entry=result.as_dict()), 201
+
+
 @app.route("/api/library/rename", methods=["POST"])
 def library_rename():
     try:
@@ -2468,6 +2485,12 @@ def reorder_relative():
 _jobs: dict[str, dict] = {}
 _jobs_lock = threading.Lock()
 
+# 资料库 PDF/DOCX 工具共用 task_store，但执行器尚未启动时只保留快照中的
+# 终态/中断态。单独的内存表让后续资料库看板可以直接接入，而不会混入 OCR
+# 的 job/batch 两套历史状态机。
+_library_tasks: dict[str, dict] = {}
+_library_tasks_lock = threading.Lock()
+
 # 方式四「多组 PDF 批量导入」内存表：batch_id -> {
 #   status: converting|done|error,
 #   groups: [ {job_id, file_path, solution_path|None, include_solution,
@@ -2481,7 +2504,11 @@ _batch_jobs: dict[str, dict] = {}
 _batch_jobs_lock = threading.Lock()
 
 _RESTART_INTERRUPTED = ("后端重启时任务尚未完成；为避免重复调用和重复计费，"
-                        "请手动重新转换")
+                         "请手动重新转换")
+_LIBRARY_ACTIVE_STATUSES = frozenset({
+    "pending", "queued", "running", "processing", "converting",
+    "splitting", "merging", "extracting", "rotating",
+})
 _CANCEL_UNSTARTED = "已中止（未开始转换）"
 _CANCEL_INFLIGHT = "已中止（额度已消耗，结果作废）"
 
@@ -2575,6 +2602,14 @@ def restore_persisted_tasks() -> None:
         _persist_job(job_id, job)
     for batch_id, batch in changed_batches:
         _persist_batch(batch_id, batch)
+
+    # 资料库转换任务没有可安全续跑的执行线程；恢复时统一落成“中断”，
+    # 由后续路由提供明确的手动重试入口，绝不在启动阶段再次调用外部工具。
+    restored_library = task_store.mark_interrupted(
+        "library", _LIBRARY_ACTIVE_STATUSES, _RESTART_INTERRUPTED)
+    with _library_tasks_lock:
+        _library_tasks.clear()
+        _library_tasks.update(dict(restored_library))
 
 
 def _parse_number_spec(spec: str):

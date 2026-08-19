@@ -8,6 +8,7 @@
   const tree = document.getElementById('library-tree');
   const panesHost = document.getElementById('library-panes');
   const paneTemplate = document.getElementById('library-pane-template');
+  const newMarkdownButton = document.getElementById('library-new-markdown');
   const newFolderButton = document.getElementById('library-new-folder');
   if (!tree || !panesHost || !paneTemplate) return;
   const sidebar = tree.closest('.library-sidebar');
@@ -995,6 +996,41 @@
     }
   }
 
+  async function createLibraryMarkdown(parent = '') {
+    const activeTab = tabs.get(focusedPane()?.active);
+    if (activeTab?.dirty) {
+      updateMarkdownState(activeTab, '请先保存当前修改，再新建文档', true);
+      return;
+    }
+    const name = await askLibraryName(
+      parent ? `在「${pathName(parent)}」中新建 Markdown` : '新建顶层 Markdown',
+      '新建文档.md');
+    if (name === null) return;
+    try {
+      const data = await fetchJson('/api/library/markdown', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({parent, name}),
+      });
+      let host = tree;
+      if (parent) {
+        const parentEntry = [...tree.querySelectorAll('.library-tree-entry[data-path]')]
+          .find(item => item.dataset.path === parent);
+        const parentNode = parentEntry?.closest('.library-tree-node');
+        host = parentNode?.querySelector(':scope > .library-tree-children') || null;
+        if (host) {
+          host.hidden = false;
+          parentEntry.classList.add('is-open');
+        }
+      }
+      if (host) await loadChildren(host, parent, 0);
+      openDocument({...data.entry, name: pathName(data.entry.path)});
+      showLibraryToast('Markdown 文档已新建');
+    } catch (error) {
+      showLibraryToast(error.message || '新建 Markdown 失败', true);
+    }
+  }
+
   async function renameLibraryEntry(entry) {
     const oldPath = entry.dataset.path;
     const currentName = entry.querySelector('.library-tree-label')?.textContent || pathName(oldPath);
@@ -1057,7 +1093,8 @@
     menu.className = 'library-tree-menu';
     menu.setAttribute('role', 'menu');
     const actions = entry.dataset.kind === 'folder'
-      ? [['new-folder', '新建子文件夹'], ['rename', '重命名']]
+      ? [['new-markdown', '新建 Markdown'], ['new-folder', '新建子文件夹'],
+        ['rename', '重命名']]
       : [['rename', '重命名']];
     actions.forEach(([action, label]) => {
       const button = document.createElement('button');
@@ -1066,7 +1103,8 @@
       button.textContent = label;
       button.addEventListener('click', () => {
         closeTreeMenu();
-        if (action === 'new-folder') createLibraryFolder(entry.dataset.path);
+        if (action === 'new-markdown') createLibraryMarkdown(entry.dataset.path);
+        else if (action === 'new-folder') createLibraryFolder(entry.dataset.path);
         else renameLibraryEntry(entry);
       });
       menu.append(button);
@@ -1255,6 +1293,7 @@
     if (session && !session.handled) dragSession = null;
   });
 
+  newMarkdownButton?.addEventListener('click', () => createLibraryMarkdown(''));
   newFolderButton?.addEventListener('click', () => createLibraryFolder(''));
   document.addEventListener('pointerdown', event => {
     if (contextMenu && !event.target.closest('.library-tree-menu')) closeTreeMenu();

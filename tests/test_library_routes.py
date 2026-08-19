@@ -122,6 +122,66 @@ class LibraryRouteTests(unittest.TestCase):
             b"docx",
         )
 
+    def test_create_markdown_accepts_optional_text(self):
+        parent = config.BANK_DIR / "Markdown 新建"
+        parent.mkdir()
+        created = self.client.post(
+            "/api/library/markdown",
+            json={"parent": "Markdown 新建", "name": "课堂笔记",
+                  "text": "# 第一节\r\n\r\n正文"},
+            headers=self.headers,
+        )
+        empty = self.client.post(
+            "/api/library/markdown",
+            json={"parent": "Markdown 新建", "name": "空白笔记.md"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(created.status_code, 201)
+        created_entry = created.get_json()["entry"]
+        self.assertEqual(created_entry["path"], "Markdown 新建/课堂笔记.md")
+        self.assertEqual(created_entry["kind"], "markdown")
+        self.assertEqual(empty.status_code, 201)
+        self.assertEqual(empty.get_json()["entry"]["path"],
+                         "Markdown 新建/空白笔记.md")
+        created_text = (parent / "课堂笔记.md").read_text(encoding="utf-8")
+        empty_text = (parent / "空白笔记.md").read_text(encoding="utf-8")
+        self.assertIn("quizforge_kind: document", created_text)
+        self.assertIn("# 第一节\n\n正文", created_text)
+        self.assertIn("quizforge_kind: document", empty_text)
+
+    def test_create_markdown_rejects_history_and_reserved_roots(self):
+        for reserved in ("_assets", "_handouts", "_backups"):
+            (config.BANK_DIR / reserved).mkdir(exist_ok=True)
+        for parent in (".quizforge-history", "_assets", "_handouts", "_backups"):
+            with self.subTest(parent=parent):
+                response = self.client.post(
+                    "/api/library/markdown",
+                    json={"parent": parent, "name": "不得创建"},
+                    headers=self.headers,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn(response.get_json()["code"],
+                              {"read_only", "reserved_path"})
+                self.assertFalse((config.BANK_DIR / parent / "不得创建.md").exists())
+
+    def test_markdown_creation_ui_contract(self):
+        page = self.client.get("/library").get_data(as_text=True)
+        script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
+            encoding="utf-8")
+
+        self.assertIn('id="library-new-markdown"', page)
+        self.assertIn('aria-label="新建顶层 Markdown 文档"', page)
+        self.assertIn("function createLibraryMarkdown(parent = '')", script)
+        self.assertIn("fetchJson('/api/library/markdown'", script)
+        self.assertIn("['new-markdown', '新建 Markdown']", script)
+        self.assertIn("if (host) await loadChildren(host, parent, 0)", script)
+        self.assertIn("openDocument({...data.entry", script)
+        self.assertIn(
+            "newMarkdownButton?.addEventListener('click', () => createLibraryMarkdown(''))",
+            script,
+        )
+
     def test_transfer_moves_and_copies_entries(self):
         source = config.BANK_DIR / "转移来源"
         target = config.BANK_DIR / "转移目标"

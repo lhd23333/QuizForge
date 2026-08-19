@@ -1,8 +1,8 @@
 """资料库文件管理的安全文件系统操作。
 
 本模块只处理题库根目录内的真实文件，不认识 Flask 请求、历史记录虚拟目录或界面
-状态。调用方负责把成功结果同步给已打开的标签页；本模块在复制会进入题库索引的
-``.md`` 时沿用题卡复制语义，为副本生成新的题目 id。
+状态。调用方负责把成功结果同步给已打开的标签页；本模块只在复制会进入题库索引的
+题卡 ``.md`` 时生成新的题目 id，普通文档和讲义始终保留原字节。
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import filestore
 
 MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
 QUESTION_MARKDOWN_EXTENSION = ".md"
+DOCUMENT_MARKDOWN_KIND = "document"
 PDF_EXTENSIONS = frozenset({".pdf"})
 WORD_EXTENSIONS = frozenset({".doc", ".docx"})
 IMAGE_EXTENSIONS = frozenset({
@@ -199,7 +200,7 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
 
 
 def _read_question_markdown(source: Path) -> tuple[MutableMapping, str] | None:
-    """读取会进入题库索引的 Markdown；非映射 frontmatter 视为普通文档。"""
+    """读取会进入题库索引的 Markdown；显式文档和讲义不套用题卡复制语义。"""
     try:
         meta, body = filestore._read_raw(source)
     except OSError:
@@ -209,6 +210,8 @@ def _read_question_markdown(source: Path) -> tuple[MutableMapping, str] | None:
         # 题卡 id，且与资料树的“可见即可拖动”语义保持一致。
         return None
     if not isinstance(meta, MutableMapping):
+        return None
+    if not filestore._is_question_meta(meta):
         return None
     return meta, body
 
@@ -257,6 +260,10 @@ def _next_markdown_order(directory: Path) -> float:
             continue
         try:
             meta, _body = filestore._read_raw(path)
+            if not isinstance(meta, MutableMapping):
+                continue
+            if not filestore._is_question_meta(meta):
+                continue
             value = float(meta.get("order", 0.0) or 0.0)
         except Exception:
             # 与题库扫描一致：损坏到无法解析的 Markdown 不参与题卡排序。
@@ -288,6 +295,22 @@ def _write_new_markdown(target: Path, text: str) -> None:
         _publish_file(staged, target)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _render_document_markdown(text: str) -> str:
+    """给资料库新建 Markdown 写入文档身份，同时保留有效的自定义 frontmatter。"""
+    normalized = filestore.normalize_newlines(text)
+    try:
+        meta, body = filestore._parse_raw_text(normalized)
+    except Exception:
+        # YAML 已损坏时不能丢掉用户交来的原文；把它整体放进新文档正文，仍能在
+        # 编辑器里看见并修复。
+        meta, body = {}, normalized
+    if not isinstance(meta, MutableMapping):
+        # 非映射 frontmatter 不能承载身份字段，同样按正文原样保留。
+        meta, body = {}, normalized
+    meta["quizforge_kind"] = DOCUMENT_MARKDOWN_KIND
+    return filestore._render_raw(meta, body)
 
 
 def _copyable_tree_files(source: Path) -> list[Path]:
@@ -423,7 +446,7 @@ def create_markdown(root: str | Path, parent_path: str, name: str,
         raise LibraryOperationError("目标文件夹不存在", code="not_found", status=404)
     filename = _validate_name(name)
     if not Path(filename).suffix:
-        filename += ".markdown"
+        filename += ".md"
     if Path(filename).suffix.lower() not in MARKDOWN_EXTENSIONS:
         raise LibraryOperationError("新建文件必须使用 .md 或 .markdown 扩展名",
                                     code="unsupported_file")
@@ -433,7 +456,7 @@ def create_markdown(root: str | Path, parent_path: str, name: str,
         if target.exists():
             raise LibraryOperationError("目标位置已存在同名项目",
                                         code="conflict", status=409)
-        _write_new_markdown(target, text)
+        _write_new_markdown(target, _render_document_markdown(text))
         _invalidate(folder_structure=False)
     return OperationResult(path=_relative(root_path, target), kind="markdown")
 
