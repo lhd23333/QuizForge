@@ -1180,10 +1180,23 @@ def _create_library_cards(chosen: list[dict], params: dict,
     if not folder:
         folder = filestore.get_or_create_collection("临时卡片", "")
     source_label = str(source_label or "").strip()
+    items = _auto_import_items(chosen, source_label)
+    card_name = filestore.safe_question_title(params.get("card_name") or "")
+    if card_name:
+        if params.get("split_mode") == "single":
+            items[0]["title"] = card_name
+        else:
+            # 多题自定义名称表示统一前缀，按本批顺序编号；不能沿用 OCR 原题号，
+            # 否则白名单模式的跳号、乱序或重复号会让文件名再次失去稳定顺序。
+            for index, item in enumerate(items, 1):
+                suffix = f"第{index}题"
+                prefix = card_name[:max(1, 180 - len(suffix))].rstrip(" .")
+                item["title"] = filestore.safe_question_title(prefix + suffix)
     # 单题或没有统一题源的散题使用“临时卡x”；题源仍写入 frontmatter，便于回溯。
-    temporary = params.get("split_mode") == "single" or not source_label
+    temporary = (not card_name
+                 and (params.get("split_mode") == "single" or not source_label))
     created = filestore.create_questions_batch(
-        _auto_import_items(chosen, source_label),
+        items,
         folder,
         idempotency_scope=str(params.get("idempotency_scope") or ""),
         temporary=temporary,
@@ -1231,6 +1244,75 @@ def _library_card_source(spec: dict) -> Path:
         "制卡来源无效", code="invalid_capture")
 
 
+def _convert_library_card_media(source: Path, params: dict,
+                                solution: Path | None = None) -> str:
+    """识别 PDF／图片并按制卡开关选择机械或大模型规范化。"""
+    ocr_backend = _parse_ocr_backend(params.get("ocr_backend", ""))
+    boundary_mode = _parse_boundary_mode(params.get("boundary_mode", ""))
+    include_solution = bool(params.get("include_solution")) or solution is not None
+    image_page_count = 1 if converter.is_image_file(source) else 0
+
+    if _library_payload_bool(params.get("use_llm")):
+        provider = providers.resolve_active()
+        if solution is not None:
+            return _convert_with_ocr_credentials(
+                ocr_backend,
+                lambda token, doc2x_key: converter.convert_exam_and_solution(
+                    source, solution, mineru_token=token,
+                    provider=provider,
+                    engine=_parse_engine(params.get("engine", "")),
+                    boundary_mode=boundary_mode,
+                    exam_image_page_count=image_page_count,
+                    solution_image_page_count=(
+                        1 if converter.is_image_file(solution) else 0),
+                    ocr_backend=ocr_backend,
+                    doc2x_api_key=doc2x_key,
+                ),
+            )
+        return _convert_with_ocr_credentials(
+            ocr_backend,
+            lambda token, doc2x_key: converter.convert_file(
+                source, mineru_token=token,
+                include_solution=include_solution,
+                provider=provider,
+                engine=_parse_engine(params.get("engine", "")),
+                boundary_mode=boundary_mode,
+                image_page_count=image_page_count,
+                ocr_backend=ocr_backend,
+                doc2x_api_key=doc2x_key,
+            ),
+        )
+
+    # 关闭大模型时不能只传 provider=None：那会回落 .env 的 DeepSeek。
+    # 复用标准导入的 no_ai 两阶段链路，确保图片拦截、语料归档和清理仍完整执行。
+    if solution is not None:
+        pending = _convert_with_ocr_credentials(
+            ocr_backend,
+            lambda token, doc2x_key: converter.convert_exam_and_solution_to_blocks(
+                source, solution, mineru_token=token,
+                boundary_mode=boundary_mode,
+                exam_image_page_count=image_page_count,
+                solution_image_page_count=(
+                    1 if converter.is_image_file(solution) else 0),
+                ocr_backend=ocr_backend,
+                doc2x_api_key=doc2x_key,
+            ),
+        )
+    else:
+        pending = _convert_with_ocr_credentials(
+            ocr_backend,
+            lambda token, doc2x_key: converter.convert_file_to_blocks(
+                source, mineru_token=token,
+                boundary_mode=boundary_mode,
+                image_page_count=image_page_count,
+                ocr_backend=ocr_backend,
+                doc2x_api_key=doc2x_key,
+            ),
+        )
+    return converter.finish_block_review(
+        pending, action="skip", include_solution=include_solution)
+
+
 def _execute_library_task(operation: str, params: dict) -> list[Path]:
     if operation == "card_markdown":
         raw = str(params.get("text") or "")
@@ -1249,17 +1331,7 @@ def _execute_library_task(operation: str, params: dict) -> list[Path]:
                 temporary_pdf = config.BATCH_UPLOAD_DIR / f"library-card-{uuid.uuid4().hex}.pdf"
                 library_pdf_tools.extract_pages(source, pages, output_path=temporary_pdf)
                 convert_source = temporary_pdf
-            md = _convert_with_ocr_credentials(
-                _parse_ocr_backend(params.get("ocr_backend", "")),
-                lambda token, doc2x_key: converter.convert_file(
-                    convert_source, mineru_token=token,
-                    include_solution=bool(params.get("include_solution")),
-                    provider=providers.resolve_active(),
-                    engine=_parse_engine(params.get("engine", "")),
-                    boundary_mode=_parse_boundary_mode(params.get("boundary_mode", "")),
-                    image_page_count=(1 if converter.is_image_file(convert_source) else 0),
-                    ocr_backend=_parse_ocr_backend(params.get("ocr_backend", "")),
-                    doc2x_api_key=doc2x_key))
+            md = _convert_library_card_media(convert_source, params)
             chosen = _library_card_preview(md, params)
             source_label = (str(params.get("source_label") or "").strip()
                             or source.stem)
@@ -1271,37 +1343,7 @@ def _execute_library_task(operation: str, params: dict) -> list[Path]:
         stem = _library_card_source(params.get("stem_source"))
         solution_spec = params.get("solution_source")
         solution = _library_card_source(solution_spec) if solution_spec else None
-        ocr_backend = _parse_ocr_backend(params.get("ocr_backend", ""))
-        if solution is not None:
-            md = _convert_with_ocr_credentials(
-                ocr_backend,
-                lambda token, doc2x_key: converter.convert_exam_and_solution(
-                    stem, solution, mineru_token=token,
-                    provider=providers.resolve_active(),
-                    engine=_parse_engine(params.get("engine", "")),
-                    boundary_mode=_parse_boundary_mode(
-                        params.get("boundary_mode", "")),
-                    exam_image_page_count=1,
-                    solution_image_page_count=1,
-                    ocr_backend=ocr_backend,
-                    doc2x_api_key=doc2x_key,
-                ),
-            )
-        else:
-            md = _convert_with_ocr_credentials(
-                ocr_backend,
-                lambda token, doc2x_key: converter.convert_file(
-                    stem, mineru_token=token,
-                    include_solution=bool(params.get("include_solution")),
-                    provider=providers.resolve_active(),
-                    engine=_parse_engine(params.get("engine", "")),
-                    boundary_mode=_parse_boundary_mode(
-                        params.get("boundary_mode", "")),
-                    image_page_count=1,
-                    ocr_backend=ocr_backend,
-                    doc2x_api_key=doc2x_key,
-                ),
-            )
+        md = _convert_library_card_media(stem, params, solution)
         chosen = _library_card_preview(md, params)
         return _create_library_cards(
             chosen, params, str(params.get("source_label") or stem.stem))
@@ -1408,19 +1450,31 @@ def _prepare_library_card_common(payload: dict) -> dict:
     split_mode = str(payload.get("split_mode") or "multi").strip().lower()
     if split_mode not in {"single", "multi"}:
         raise library_ops.LibraryOperationError("制卡模式无效", code="invalid_split_mode")
+    raw_card_name = str(payload.get("card_name") or "").strip()
+    card_name = filestore.safe_question_title(raw_card_name)
+    if raw_card_name and not card_name:
+        raise library_ops.LibraryOperationError(
+            "题卡名称无效", code="invalid_card_name")
     params = {
         "target_collection": str(payload.get("target_collection") or "").strip(),
         "split_mode": split_mode,
         "include_solution": _library_payload_bool(payload.get("include_solution")),
+        "use_llm": _library_payload_bool(payload.get("use_llm")),
+        "card_name": card_name,
         "boundary_mode": _parse_boundary_mode(payload.get("boundary_mode", "")),
         "ocr_backend": _parse_ocr_backend(payload.get("ocr_backend", "")),
         "engine": _parse_engine(payload.get("engine", "")),
     }
     if not params["target_collection"] or params["target_collection"] == "临时卡片":
         params["target_collection"] = filestore.get_or_create_collection("临时卡片", "")
-    elif params["target_collection"] and not filestore.get_collection(params["target_collection"]):
-        raise library_ops.LibraryOperationError(
-            "目标题集不存在", code="target_not_found", status=404)
+    else:
+        target = filestore.get_collection(params["target_collection"])
+        if not target:
+            raise library_ops.LibraryOperationError(
+                "目标题集不存在", code="target_not_found", status=404)
+        # get_collection 会把前导分隔符等输入收敛为题库内相对 id；任务只能保存
+        # 这份已验证结果，不能把仅用于请求校验的原始路径继续带到写盘阶段。
+        params["target_collection"] = target["id"]
     return params
 
 

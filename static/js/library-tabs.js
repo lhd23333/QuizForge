@@ -108,6 +108,24 @@
     return {label, input};
   }
 
+  async function loadLibraryCardCollections(select, status) {
+    try {
+      const data = await fetchJson('/collections/options');
+      if (!select.isConnected) return;
+      data.collections.forEach(row => {
+        if (!row.id || row.id === '临时卡片') return;
+        const option = document.createElement('option');
+        option.value = row.id;
+        option.textContent = `${'　'.repeat(row.depth)}${row.name}`;
+        select.append(option);
+      });
+    } catch (error) {
+      if (select.isConnected && !status.textContent) {
+        status.textContent = error.message || '题集列表加载失败';
+      }
+    }
+  }
+
   function selectedMarkdownText(tab) {
     if (!tab || tab.kind !== 'markdown') return '';
     if (tab.editor && !tab.editor.hidden && document.activeElement === tab.editor) {
@@ -411,10 +429,27 @@
     boundaryField.label.replaceChild(boundary, boundaryField.input);
     body.append(boundaryField.label);
 
-    const targetField = toolDialogField('目标题集', 'library-card-target');
-    targetField.input.value = '临时卡片';
-    targetField.input.placeholder = '留空或填写已有题集';
+    const nameField = toolDialogField('题卡名称', 'library-card-name');
+    nameField.input.maxLength = 180;
+    body.append(nameField.label);
+
+    const targetField = toolDialogField('保存到题集', 'library-card-target');
+    const target = document.createElement('select');
+    const temporaryTarget = document.createElement('option');
+    temporaryTarget.value = '';
+    temporaryTarget.textContent = '临时卡片（默认）';
+    target.append(temporaryTarget);
+    targetField.label.replaceChild(target, targetField.input);
     body.append(targetField.label);
+
+    const refreshNameField = () => {
+      const multi = mode.value === 'multi';
+      nameField.label.firstElementChild.textContent = multi ? '命名前缀' : '题卡名称';
+      nameField.input.placeholder = multi
+        ? '留空按题源命名' : '留空自动生成临时卡名称';
+    };
+    mode.addEventListener('change', refreshNameField);
+    refreshNameField();
 
     let textField = null;
     if (tab.kind === 'markdown') {
@@ -466,6 +501,20 @@
       body.append(stemCapture.label, solutionCapture.label);
     }
 
+    let useLlm = null;
+    if (tab.kind !== 'markdown') {
+      const llmField = document.createElement('label');
+      llmField.className = 'library-card-check library-tool-field';
+      const llmText = document.createElement('span');
+      llmText.textContent = '大模型规范化';
+      useLlm = document.createElement('input');
+      useLlm.type = 'checkbox';
+      useLlm.checked = false;
+      useLlm.title = '开启后使用设置页当前启用的大模型整理识别结果';
+      llmField.append(llmText, useLlm);
+      body.append(llmField);
+    }
+
     const solutionField = document.createElement('label');
     solutionField.className = 'library-card-check library-tool-field';
     const solutionText = document.createElement('span');
@@ -503,6 +552,7 @@
     form.append(head, body, footer);
     dialog.append(form);
     document.body.append(dialog);
+    loadLibraryCardCollections(target, status);
 
     if (tab.kind === 'pdf') {
       dialog._discardPdfCaptures = () => {
@@ -539,14 +589,15 @@
     form.addEventListener('submit', async event => {
       event.preventDefault();
       const capture = inputMode?.value === 'capture';
-      const target = targetField.input.value.trim();
       const common = {
         split_mode: mode.value,
         boundary_mode: boundary.value,
+        target_collection: target.value,
+        card_name: nameField.input.value.trim(),
+        use_llm: Boolean(useLlm?.checked),
         include_solution: tab.kind === 'pdf' && capture
           ? Boolean(solutionCapture?.captureName) : solution.checked,
       };
-      if (target && target !== '临时卡片') common.target_collection = target;
       if (tab.kind === 'markdown') {
         const payload = {mode: 'markdown', ...common};
         const text = textField.input.value;

@@ -193,6 +193,11 @@ class LibraryRouteTests(unittest.TestCase):
         self.assertIn("event.shiftKey", script)
         self.assertIn("/api/library/card-task", script)
         self.assertIn("split_mode: mode.value", script)
+        self.assertIn("loadLibraryCardCollections(target, status)", script)
+        self.assertIn("const target = document.createElement('select')", script)
+        self.assertIn("useLlm.checked = false", script)
+        self.assertIn("use_llm: Boolean(useLlm?.checked)", script)
+        self.assertIn("card_name: nameField.input.value.trim()", script)
         self.assertIn("event.ctrlKey || event.metaKey", script)
         self.assertIn("openLibraryCardDialog(tab)", script)
 
@@ -250,8 +255,27 @@ class LibraryRouteTests(unittest.TestCase):
         self.assertEqual(operation, "card_markdown")
         self.assertEqual(params["split_mode"], "single")
         self.assertFalse(params["include_solution"])
+        self.assertFalse(params["use_llm"])
+        self.assertEqual(params["card_name"], "")
         self.assertEqual(params["target_collection"], "临时卡片")
         self.assertTrue((config.BANK_DIR / "临时卡片").is_dir())
+
+    def test_card_task_stores_validated_collection_id(self):
+        folder = app_module.filestore.get_or_create_collection("规范题集", "")
+        with mock.patch.object(
+                app_module, "_queue_library_task",
+                return_value={"task_id": "card-task"}) as queue:
+            response = self.client.post(
+                "/api/library/card-task",
+                json={
+                    "mode": "markdown", "split_mode": "single",
+                    "text": "1. 计算 $1+1$。", "target_collection": f"/{folder}",
+                },
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(queue.call_args.args[1]["target_collection"], folder)
 
     def test_card_task_retry_uses_card_validation(self):
         task_id = "failed-card-task"
@@ -317,6 +341,84 @@ class LibraryRouteTests(unittest.TestCase):
         self.assertEqual([path.stem for path in files], ["临时卡1"])
         self.assertIn("source: 课堂来源", files[0].read_text(encoding="utf-8"))
 
+    def test_library_cards_accept_custom_single_name_and_multi_prefix(self):
+        single_folder = "自定义单题名称"
+        multi_folder = "自定义多题名称"
+        config.BANK_DIR.joinpath(single_folder).mkdir()
+        config.BANK_DIR.joinpath(multi_folder).mkdir()
+        chosen = [{
+            "body": "题目一", "solution": "", "type": "填空题", "number": 9,
+            "img_split": None, "img_layouts": [],
+            "sol_img_split": None, "sol_img_layouts": [],
+        }]
+        app_module._create_library_cards(
+            chosen,
+            {"target_collection": single_folder, "split_mode": "single",
+             "card_name": "函数极值例题", "idempotency_scope": "custom-single"},
+            "课堂来源",
+        )
+        self.assertTrue(
+            (config.BANK_DIR / single_folder / "函数极值例题.md").is_file())
+
+        second = {**chosen[0], "body": "题目二", "number": 3}
+        app_module._create_library_cards(
+            [chosen[0], second],
+            {"target_collection": multi_folder, "split_mode": "multi",
+             "card_name": "函数专题", "idempotency_scope": "custom-multi"},
+            "课堂来源",
+        )
+        names = sorted(path.stem for path in
+                       (config.BANK_DIR / multi_folder).glob("*.md"))
+        self.assertEqual(names, ["函数专题第1题", "函数专题第2题"])
+
+        long_folder = "超长多题名称"
+        config.BANK_DIR.joinpath(long_folder).mkdir()
+        app_module._create_library_cards(
+            [chosen[0], second],
+            {"target_collection": long_folder, "split_mode": "multi",
+             "card_name": "甲" * 180, "idempotency_scope": "custom-long"},
+            "课堂来源",
+        )
+        long_names = sorted(path.stem for path in
+                            (config.BANK_DIR / long_folder).glob("*.md"))
+        self.assertEqual(len(long_names), 2)
+        self.assertTrue(long_names[0].endswith("第1题"))
+        self.assertTrue(long_names[1].endswith("第2题"))
+
+    def test_library_card_media_defaults_to_mechanical_pipeline(self):
+        source = config.BANK_DIR / "机械制卡.pdf"
+        pending = {"blocks": [], "source_name": source.name}
+        params = {
+            "use_llm": False, "include_solution": True,
+            "boundary_mode": "whitelist", "ocr_backend": "mineru",
+        }
+
+        def run_credentials(_backend, callback):
+            return callback("mineru-token", "doc2x-key")
+
+        with (mock.patch.object(
+                app_module, "_convert_with_ocr_credentials",
+                side_effect=run_credentials),
+              mock.patch.object(
+                  app_module.converter, "convert_file_to_blocks",
+                  return_value=pending) as to_blocks,
+              mock.patch.object(
+                  app_module.converter, "finish_block_review",
+                  return_value="1. 机械结果") as finish,
+              mock.patch.object(
+                  app_module.providers, "resolve_active") as resolve_active,
+              mock.patch.object(
+                  app_module.converter, "convert_file") as convert_file):
+            result = app_module._convert_library_card_media(source, params)
+
+        self.assertEqual(result, "1. 机械结果")
+        to_blocks.assert_called_once()
+        self.assertEqual(to_blocks.call_args.kwargs["boundary_mode"], "whitelist")
+        finish.assert_called_once_with(
+            pending, action="skip", include_solution=True)
+        resolve_active.assert_not_called()
+        convert_file.assert_not_called()
+
     def test_card_capture_multipart_contract(self):
         # 1x1 PNG，足够走真实图片格式校验而不引入测试资源文件。
         png = base64.b64decode(
@@ -331,6 +433,7 @@ class LibraryRouteTests(unittest.TestCase):
                     "split_mode": "single",
                     "boundary_mode": "whitelist",
                     "include_solution": "false",
+                    "use_llm": "true",
                     "stem_image": (io.BytesIO(png), "stem.png"),
                     "solution_image": (io.BytesIO(png), "solution.png"),
                 },
@@ -343,6 +446,7 @@ class LibraryRouteTests(unittest.TestCase):
         self.assertEqual(operation, "card_capture")
         self.assertEqual(params["stem_source"]["kind"], "upload")
         self.assertEqual(params["solution_source"]["kind"], "upload")
+        self.assertTrue(params["use_llm"])
         for spec in (params["stem_source"], params["solution_source"]):
             (config.BATCH_UPLOAD_DIR / spec["name"]).unlink(missing_ok=True)
 
