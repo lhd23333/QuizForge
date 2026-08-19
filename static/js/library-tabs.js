@@ -262,6 +262,8 @@
       layer.append(prompt, box);
       stage.append(layer);
       stage.classList.add('is-capturing');
+      // 从用户开始框选到结束都让出完整 PDF 画面，不能只在最终截图瞬间隐藏。
+      dialog.style.visibility = 'hidden';
 
       let origin = null;
       let currentRect = null;
@@ -342,7 +344,6 @@
           return;
         }
         layer.style.visibility = 'hidden';
-        dialog.style.visibility = 'hidden';
         await waitForCapturePaint();
         try {
           const result = await api.capture_client_rect(requestRect);

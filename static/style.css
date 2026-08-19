@@ -2232,6 +2232,7 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 .library-tool-dialog-head h2 { margin: 0; font-size: 15px; }
 .library-tool-dialog-body { display: grid; gap: 10px; padding: 14px 16px; overflow: auto; }
 .library-tool-field { display: grid; grid-template-columns: 155px minmax(0, 1fr); align-items: center; gap: 10px; color: var(--text-2); font-size: 12px; }
+.library-tool-field[hidden] { display: none !important; }
 .library-tool-field > span { text-align: right; }
 .library-tool-field input, .library-tool-field textarea, .library-tool-field select {
   min-width: 0; width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
