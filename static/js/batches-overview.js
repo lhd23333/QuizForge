@@ -4,16 +4,22 @@
 (function () {
   'use strict';
 
+  const rootEl = document.getElementById('batches-overview');
+  if (!rootEl) return;
   const listEl = document.getElementById('bo-list');
-  if (!listEl) return;
-  const showAll = listEl.dataset.showAll === '1';
+  const libraryListEl = document.getElementById('bo-library-list');
+  const showAll = rootEl.dataset.showAll === '1';
   const statusUrl = '/batches/status' + (showAll ? '?all=1' : '');
 
-  function rowOf(bid) { return listEl.querySelector('.bo-row[data-bid="' + bid + '"]'); }
+  function rowOf(bid) { return listEl?.querySelector('.bo-row[data-bid="' + bid + '"]'); }
+  function libraryRowOf(taskId) {
+    return libraryListEl?.querySelector('.bo-library-row[data-task-id="'
+      + taskId + '"]');
+  }
   function setText(el, s) { if (el) el.textContent = s; }
 
   // ---------- 中止整批 ----------
-  listEl.addEventListener('click', async ev => {
+  listEl?.addEventListener('click', async ev => {
     const btn = ev.target.closest('.bo-cancel');
     if (!btn) return;
     const row = btn.closest('.bo-row');
@@ -27,7 +33,7 @@
   });
 
   // ---------- 删除一批 ----------
-  listEl.addEventListener('click', async ev => {
+  listEl?.addEventListener('click', async ev => {
     const btn = ev.target.closest('.bo-delete');
     if (!btn) return;
     const row = btn.closest('.bo-row');
@@ -46,6 +52,81 @@
     }
   });
 
+  // 资料库任务没有标准批次的中止/审核阶段，只提供同一重试入口。
+  libraryListEl?.addEventListener('click', async ev => {
+    const btn = ev.target.closest('.bo-library-retry');
+    if (!btn) return;
+    const row = btn.closest('.bo-library-row');
+    if (!row) return;
+    btn.disabled = true;
+    try {
+      const response = await fetch('/api/library/task/' + encodeURIComponent(row.dataset.taskId)
+        + '/retry', {method: 'POST'});
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.ok) throw new Error(data.error || '重试失败');
+      refresh();
+    } catch (e) {
+      alert('重试失败：' + e.message);
+      btn.disabled = false;
+    }
+  });
+
+  function refreshLibraryRows(tasks) {
+    if (!libraryListEl) {
+      if (tasks?.length) location.reload();
+      return;
+    }
+    const seen = new Set();
+    for (const task of tasks || []) {
+      seen.add(task.task_id);
+      const row = libraryRowOf(task.task_id);
+      if (!row) { location.reload(); return; }
+      row.classList.toggle('bo-finished', !!task.finished);
+      const fill = row.querySelector('.bo-bar-fill');
+      if (fill) fill.style.width = task.finished ? '100%' : '0%';
+      setText(row.querySelector('.bo-num'), task.finished ? '1/1'
+        : task.busy ? '处理中' : '已停止');
+      const chips = row.querySelector('.bo-chips');
+      if (chips) {
+        chips.innerHTML = '';
+        const state = document.createElement('span');
+        state.className = task.status === 'done' ? 'bp-st bp-ready'
+          : ['error', 'interrupted'].includes(task.status) ? 'bp-st bp-err-st' : 'bp-st';
+        state.textContent = task.status === 'queued' ? '排队中'
+          : task.status === 'done' ? '已完成'
+            : task.status === 'interrupted' ? '已中断'
+              : task.busy ? '处理中' : '失败';
+        chips.appendChild(state);
+        if (task.error) {
+          const detail = document.createElement('span');
+          detail.className = 'muted bo-library-error'; detail.textContent = task.error;
+          chips.appendChild(detail);
+        }
+        if (task.outputs?.length) {
+          const output = document.createElement('span');
+          output.className = 'muted bo-library-output';
+          output.textContent = task.outputs.join('、'); chips.appendChild(output);
+        }
+      }
+      const actions = row.querySelector('.bo-act');
+      if (actions) {
+        const retry = actions.querySelector('.bo-library-retry');
+        const shouldRetry = ['error', 'interrupted'].includes(task.status);
+        if (shouldRetry && !retry) {
+          const button = document.createElement('button');
+          button.type = 'button'; button.className = 'btn btn-sm bo-library-retry';
+          button.textContent = '重试'; actions.appendChild(button);
+        } else if (!shouldRetry && retry) retry.remove();
+      }
+    }
+    // 默认视图中完成项会消失；完整视图中也可能由其他窗口清除任务。
+    // 两种模式都按接口结果撤掉旧行，避免 show_all 页面长期显示幽灵任务。
+    libraryListEl.querySelectorAll('.bo-library-row').forEach(row => {
+      if (!seen.has(row.dataset.taskId)) row.remove();
+    });
+    if (!libraryListEl.querySelector('.bo-library-row')) location.reload();
+  }
+
   // ---------- 轮询刷新 ----------
   async function refresh() {
     let data;
@@ -55,8 +136,12 @@
     } catch (e) { return; }   // 后端重启中之类，下一轮再试
     if (!data.ok) return;
 
+    const batches = data.batches || [];
+    const libraryTasks = data.library_tasks || [];
+    if (!listEl && batches.length) { location.reload(); return; }
+
     const seen = new Set();
-    for (const b of data.batches) {
+    for (const b of batches) {
       seen.add(b.batch_id);
       const row = rowOf(b.batch_id);
       if (!row) { location.reload(); return; }   // 新来了一批，重排序号
@@ -92,13 +177,17 @@
       if (delBtn) delBtn.hidden = !!b.busy;
     }
 
-    // 「只看进行中」模式下：处理完的批次会从接口里消失，行也跟着撤掉
-    if (!showAll) {
+    // 默认视图中已处理项会消失；完整视图也可能由其他窗口删除批次。
+    if (listEl) {
       listEl.querySelectorAll('.bo-row').forEach(row => {
         if (!seen.has(row.dataset.bid)) row.remove();
       });
-      if (!listEl.querySelectorAll('.bo-row').length) location.reload();
+      if (!listEl.querySelectorAll('.bo-row').length) {
+        location.reload();
+        return;
+      }
     }
+    refreshLibraryRows(libraryTasks);
   }
 
   setInterval(refresh, 5000);

@@ -1601,10 +1601,6 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
     target_dir = _folder_abspath(folder)
     created: list[str] = []
     scope = str(idempotency_scope or "").strip()
-    if temporary and scope:
-        # 自动任务可能在崩溃后认回部分既有题；临时卡的递增编号没有持久化批次基准，
-        # 不能在重试时重新猜编号。异常快照宁可停下，也不能生成一组漂移名称。
-        raise ValueError("自动入库缺少题源，无法安全生成临时卡名称")
     written_paths: list[tuple[Path, str, int]] = []
     with _write_lock:
         # 取名、算序号、落盘必须在同一把锁里。批量导入若逐题调用
@@ -1639,17 +1635,6 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
                 now = _now_iso()
                 source = str(item.get("source") or "")
                 number = _as_number(item.get("number"))
-                explicit_title = safe_question_title(item.get("title") or "")
-                if temporary and not explicit_title and not source:
-                    generated_title = default_question_title(
-                        sequence=next_temporary_index, temporary=True)
-                    next_temporary_index += 1
-                else:
-                    generated_title = default_question_title(
-                        source, number,
-                        item_index + 1 if source and number is None and len(items) > 1
-                        else None)
-                question_title = explicit_title or generated_title or qid
                 meta = dict(_KNOWN_DEFAULTS)
                 meta.update({
                     "id": qid,
@@ -1703,6 +1688,22 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
                             "自动入库幂等标识与既有题目冲突，已停止以避免重复或覆盖")
                     created.append(qid)
                     continue
+
+                explicit_title = safe_question_title(item.get("title") or "")
+                if temporary and not explicit_title:
+                    # 临时命名与题源元数据彼此独立。资料库截图仍要保留来源，但单题
+                    # 制卡按产品规则命名为“临时卡x”；稳定 scope 重试认回既有题时
+                    # 不消耗编号，因此进程在批次中途退出也不会因自己留下的部分题
+                    # 造成后续编号漂移。
+                    generated_title = default_question_title(
+                        sequence=next_temporary_index, temporary=True)
+                    next_temporary_index += 1
+                else:
+                    generated_title = default_question_title(
+                        source, number,
+                        item_index + 1 if source and number is None and len(items) > 1
+                        else None)
+                question_title = explicit_title or generated_title or qid
 
                 path = _question_filename(
                     target_dir, qid, meta["number"], question_title)

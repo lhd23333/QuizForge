@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import base64
+import io
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest import mock
 
@@ -182,6 +185,17 @@ class LibraryRouteTests(unittest.TestCase):
             script,
         )
 
+    def test_library_drag_and_card_ui_contract(self):
+        script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
+            encoding="utf-8")
+        self.assertIn('button.draggable = true', script)
+        self.assertIn("/api/library/transfer", script)
+        self.assertIn("event.shiftKey", script)
+        self.assertIn("/api/library/card-task", script)
+        self.assertIn("split_mode: mode.value", script)
+        self.assertIn("event.ctrlKey || event.metaKey", script)
+        self.assertIn("openLibraryCardDialog(tab)", script)
+
     def test_transfer_moves_and_copies_entries(self):
         source = config.BANK_DIR / "转移来源"
         target = config.BANK_DIR / "转移目标"
@@ -213,6 +227,247 @@ class LibraryRouteTests(unittest.TestCase):
         self.assertEqual(moved.status_code, 200)
         self.assertFalse((source / "配图.png").exists())
         self.assertEqual((target / "配图.png").read_bytes(), b"png")
+
+    def test_card_task_accepts_markdown_and_defaults_to_temporary_collection(self):
+        with mock.patch.object(
+                app_module, "_queue_library_task",
+                return_value={"task_id": "card-task"}) as queue:
+            response = self.client.post(
+                "/api/library/card-task",
+                json={
+                    "mode": "markdown",
+                    "split_mode": "single",
+                    "text": "1. 计算 $1+1$。",
+                    "source": "课堂练习",
+                    "include_solution": False,
+                },
+                headers=self.headers,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        queue.assert_called_once()
+        operation, params = queue.call_args.args
+        self.assertEqual(operation, "card_markdown")
+        self.assertEqual(params["split_mode"], "single")
+        self.assertFalse(params["include_solution"])
+        self.assertEqual(params["target_collection"], "临时卡片")
+        self.assertTrue((config.BANK_DIR / "临时卡片").is_dir())
+
+    def test_card_task_retry_uses_card_validation(self):
+        task_id = "failed-card-task"
+        app_module._library_tasks[task_id] = {
+            "task_id": task_id,
+            "operation": "card_markdown",
+            "params": {
+                "text": "1. 计算 $1+1$。",
+                "source": "练习",
+                "target_collection": "",
+                "split_mode": "multi",
+                "include_solution": True,
+                "boundary_mode": "auto",
+            },
+            "status": "error",
+        }
+        try:
+            with mock.patch.object(
+                    app_module, "_queue_library_task",
+                    return_value={"task_id": "retry-task"}) as queue:
+                response = self.client.post(
+                    f"/api/library/task/{task_id}/retry",
+                    headers=self.headers,
+                )
+            self.assertEqual(response.status_code, 202)
+            queue.assert_called_once()
+            operation, _params = queue.call_args.args
+            self.assertEqual(operation, "card_markdown")
+        finally:
+            app_module._library_tasks.pop(task_id, None)
+
+    def test_card_preview_respects_boundary_mode_and_single_mode(self):
+        raw = "1. First question\n\n3. Third question"
+        with self.assertRaises(app_module.library_ops.LibraryOperationError) as ctx:
+            app_module._library_card_preview(
+                raw, {"split_mode": "multi", "boundary_mode": "auto",
+                      "include_solution": False})
+        self.assertEqual(ctx.exception.code, "missing_question_numbers")
+        cards = app_module._library_card_preview(
+            raw, {"split_mode": "multi", "boundary_mode": "whitelist",
+                  "include_solution": False})
+        self.assertEqual(len(cards), 2)
+        with self.assertRaises(app_module.library_ops.LibraryOperationError) as ctx:
+            app_module._library_card_preview(
+                "1. First\n\n2. Second",
+                {"split_mode": "single", "boundary_mode": "auto",
+                 "include_solution": False})
+        self.assertEqual(ctx.exception.code, "multiple_cards_in_single_mode")
+
+    def test_library_cards_use_temporary_title_and_idempotent_scope(self):
+        folder = "临时卡片测试"
+        chosen = [{
+            "body": "A short question", "solution": "A short answer",
+            "type": "填空题", "number": 9, "img_split": None,
+            "img_layouts": [], "sol_img_split": None, "sol_img_layouts": [],
+        }]
+        params = {"target_collection": folder, "split_mode": "single",
+                  "idempotency_scope": "library-test-temporary-1"}
+        first = app_module._create_library_cards(chosen, params, "课堂来源")
+        second = app_module._create_library_cards(chosen, params, "课堂来源")
+        self.assertEqual(first, second)
+        files = sorted((config.BANK_DIR / folder).glob("*.md"))
+        self.assertEqual([path.stem for path in files], ["临时卡1"])
+        self.assertIn("source: 课堂来源", files[0].read_text(encoding="utf-8"))
+
+    def test_card_capture_multipart_contract(self):
+        # 1x1 PNG，足够走真实图片格式校验而不引入测试资源文件。
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "YAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
+        with mock.patch.object(
+                app_module, "_queue_library_task",
+                return_value={"task_id": "capture-task"}) as queue:
+            response = self.client.post(
+                "/api/library/card-capture",
+                data={
+                    "split_mode": "single",
+                    "boundary_mode": "whitelist",
+                    "include_solution": "false",
+                    "stem_image": (io.BytesIO(png), "stem.png"),
+                    "solution_image": (io.BytesIO(png), "solution.png"),
+                },
+                content_type="multipart/form-data",
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN},
+            )
+        self.assertEqual(response.status_code, 202)
+        queue.assert_called_once()
+        operation, params = queue.call_args.args
+        self.assertEqual(operation, "card_capture")
+        self.assertEqual(params["stem_source"]["kind"], "upload")
+        self.assertEqual(params["solution_source"]["kind"], "upload")
+        for spec in (params["stem_source"], params["solution_source"]):
+            (config.BATCH_UPLOAD_DIR / spec["name"]).unlink(missing_ok=True)
+
+    def test_cleanup_protects_nested_card_capture_uploads(self):
+        import cleanup_output
+        name = "library-card-active.png"
+        expected = config.BATCH_UPLOAD_DIR / name
+        payload = {"params": {
+            "stem_source": {"kind": "upload", "name": name},
+            "solution_source": {"kind": "upload", "name": "../escape.png"},
+        }}
+        self.assertIn(expected.resolve(), {
+            path.resolve() for path in cleanup_output._payload_paths(payload)
+        })
+
+    def test_image_conversion_forwards_include_solution(self):
+        image = config.BANK_DIR / "solution-forward.png"
+        image.write_bytes(b"image-placeholder")
+        with (mock.patch.object(app_module.converter, "_alpha_cwd",
+                                return_value=nullcontext()),
+              mock.patch.object(app_module.converter, "_load_config_for_user",
+                                return_value=object()),
+              mock.patch.object(app_module.converter, "_prep_for_ocr",
+                                return_value=image),
+              mock.patch.object(app_module.converter, "_ensure_src_on_path"),
+              mock.patch.object(app_module.converter, "_convert_image",
+                                return_value="converted") as convert_image):
+            result = app_module.converter.convert_file(
+                image, include_solution=True, is_image=True)
+        self.assertEqual(result, "converted")
+        self.assertTrue(convert_image.call_args.args[2])
+
+    def test_conversion_page_filters_both_task_kinds_and_matches_badge(self):
+        active_batch = {
+            "status": "converting", "created_at": 1,
+            "groups": [{"status": "pending", "reviewed": None}],
+        }
+        finished_batch = {
+            "status": "done", "created_at": 2,
+            "groups": [{"status": "done", "reviewed": "imported"}],
+        }
+        library_tasks = {
+            "library-running": {
+                "task_id": "library-running", "operation": "pdf_merge",
+                "status": "running", "created_at": 1,
+            },
+            "library-error": {
+                "task_id": "library-error", "operation": "card_markdown",
+                "status": "error", "created_at": 2, "error": "restart",
+            },
+            "library-done": {
+                "task_id": "library-done", "operation": "pdf_extract",
+                "status": "done", "created_at": 3,
+            },
+        }
+        batches = {
+            "standard-active": active_batch,
+            "standard-finished": finished_batch,
+        }
+        with (mock.patch.dict(app_module._batch_jobs, batches, clear=True),
+              mock.patch.dict(app_module._library_tasks, library_tasks,
+                              clear=True)):
+            current_page = self.client.get("/batches").get_data(as_text=True)
+            all_page = self.client.get("/batches?all=1").get_data(as_text=True)
+            current = self.client.get("/batches/status").get_json()
+            all_tasks = self.client.get("/batches/status?all=1").get_json()
+            badge = app_module._inject_nav_badge()["nav_batch_count"]
+
+        self.assertIn('data-bid="standard-active"', current_page)
+        self.assertNotIn('data-bid="standard-finished"', current_page)
+        self.assertIn('data-task-id="library-running"', current_page)
+        self.assertIn('data-task-id="library-error"', current_page)
+        self.assertNotIn('data-task-id="library-done"', current_page)
+        self.assertIn("已停止", current_page)
+        self.assertIn('data-bid="standard-finished"', all_page)
+        self.assertIn('data-task-id="library-done"', all_page)
+        self.assertEqual([row["batch_id"] for row in current["batches"]],
+                         ["standard-active"])
+        self.assertEqual(
+            {row["task_id"] for row in current["library_tasks"]},
+            {"library-running", "library-error"},
+        )
+        self.assertEqual(len(all_tasks["batches"]), 2)
+        self.assertEqual(len(all_tasks["library_tasks"]), 3)
+        self.assertEqual(badge, 3)
+
+    def test_conversion_page_keeps_polling_with_one_task_kind_or_empty(self):
+        active_batch = {
+            "status": "converting", "created_at": 1,
+            "groups": [{"status": "pending", "reviewed": None}],
+        }
+        active_library = {
+            "library-only": {
+                "task_id": "library-only", "operation": "pdf_merge",
+                "status": "running", "created_at": 1,
+            },
+        }
+        scenarios = (
+            ("仅标准任务", {"standard-only": active_batch}, {}, True, False),
+            ("仅资料库任务", {}, active_library, False, True),
+            ("空任务页", {}, {}, False, False),
+        )
+        for label, batches, library_tasks, has_batch, has_library in scenarios:
+            with self.subTest(label=label), \
+                    mock.patch.dict(app_module._batch_jobs, batches, clear=True), \
+                    mock.patch.dict(app_module._library_tasks, library_tasks,
+                                    clear=True):
+                page = self.client.get("/batches").get_data(as_text=True)
+                status = self.client.get("/batches/status").get_json()
+                self.assertIn('id="batches-overview"', page)
+                self.assertIn("js/batches-overview.js", page)
+                self.assertEqual('id="bo-list"' in page, has_batch)
+                self.assertEqual('id="bo-library-list"' in page, has_library)
+                self.assertEqual(bool(status["batches"]), has_batch)
+                self.assertEqual(bool(status["library_tasks"]), has_library)
+
+    def test_library_task_snapshot_failure_rolls_back_memory(self):
+        task_id = "snapshot-failure-task"
+        fake_uuid = mock.Mock(hex=task_id)
+        with (mock.patch.object(app_module.uuid, "uuid4", return_value=fake_uuid),
+              mock.patch.object(app_module, "_persist_library_task",
+                                side_effect=OSError("disk full"))):
+            with self.assertRaises(OSError):
+                app_module._queue_library_task("pdf_merge", {"sources": []})
+        self.assertNotIn(task_id, app_module._library_tasks)
 
     def test_errors_are_structured_and_history_never_reaches_disk_ops(self):
         self.client.post(

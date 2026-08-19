@@ -4616,7 +4616,8 @@ def convert_file(file_path, mineru_token: str = "", *, is_image=False,
                 mineru_token, require_mineru=(backend == OCR_MINERU))
 
         if is_image_input:
-            return _convert_image(file_path, cfg, keep_images, only_numbers,
+            return _convert_image(file_path, cfg, include_solution, keep_images,
+                                  only_numbers,
                                   provider, engine, num_template, note_sink,
                                   boundary_mode=mode,
                                   image_page_count=image_page_count,
@@ -4889,7 +4890,8 @@ def _prep_for_ocr(path: Path, ocr_backend: str, *, force_image=False,
     return _prep_for_mineru(path, work_dir)
 
 
-def _convert_image(file_path: Path, cfg, keep_images: bool = True,
+def _convert_image(file_path: Path, cfg, include_solution: bool = False,
+                   keep_images: bool = True,
                    only_numbers=None, provider=None,
                    engine: str = ENGINE_WHOLE, num_template: str = "",
                    note_sink=None, *,
@@ -4923,7 +4925,7 @@ def _convert_image(file_path: Path, cfg, keep_images: bool = True,
     _check_options(raw_md, note_sink)
     if engine == ENGINE_BLOCK:
         md = _run_block_engine(
-            raw_md, cfg, provider, include_solution=False,
+            raw_md, cfg, provider, include_solution=include_solution,
             keep_images=keep_images, only_numbers=only_numbers,
             artifact_dir=extract_dir, name=source_stem,
             num_template=num_template, note_sink=note_sink,
@@ -4932,11 +4934,12 @@ def _convert_image(file_path: Path, cfg, keep_images: bool = True,
         import blocksplit
         client = _make_llm_client(cfg, provider)
         llm_raw = raw_md.replace(blocksplit.SOURCE_PAGE_BREAK, "")
-        md = normalize(llm_raw, client, include_solution=False,
+        md = normalize(llm_raw, client, include_solution=include_solution,
                        keep_images=keep_images, only_numbers=only_numbers)
     if keep_images:
         _check_preserved_image_refs(
-            raw_md, md, note_sink=note_sink, include_solution=False,
+            raw_md, md, note_sink=note_sink,
+            include_solution=include_solution,
             only_numbers=only_numbers, num_template=num_template,
             boundary_mode=mode)
         md = _intercept_images(

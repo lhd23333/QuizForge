@@ -347,6 +347,9 @@ def _inject_nav_badge():
     with _batch_jobs_lock:
         n = sum(1 for b in _batch_jobs.values()
                 if not all(_group_terminal(g) for g in b["groups"]))
+    with _library_tasks_lock:
+        n += sum(1 for task in _library_tasks.values()
+                 if task.get("status") != "done")
     return {"nav_batch_count": n}
 
 
@@ -1126,7 +1129,182 @@ def _library_task_resolve_output(rel: str | None, suffix: str) -> Path | None:
     return result[0] if result else None
 
 
+_LIBRARY_CARD_OPERATIONS = frozenset({
+    "card_markdown", "card_file", "card_capture",
+})
+
+
+def _library_card_preview(raw: str, params: dict) -> list[dict]:
+    """按制卡模式校验切题结果，避免后台任务静默丢题。"""
+    boundary_mode = _parse_boundary_mode(params.get("boundary_mode", ""))
+    preview, _columns, missing = _build_import_preview(
+        raw,
+        include_solution=bool(params.get("include_solution")),
+        boundary_mode=boundary_mode,
+    )
+    if params.get("split_mode") == "single":
+        if len(preview) > 1:
+            raise library_ops.LibraryOperationError(
+                "单题模式识别出多道题，请缩小选区或改用多题制卡",
+                code="multiple_cards_in_single_mode",
+            )
+    elif boundary_mode == _BOUNDARY_MODE_AUTO:
+        if missing:
+            shown = "、".join(str(number) for number in missing[:20])
+            raise library_ops.LibraryOperationError(
+                f"题号不连续，缺少 {shown}；请检查内容或改用白名单分题",
+                code="missing_question_numbers",
+            )
+        numbers = [
+            item.get("number") for item in preview
+            if isinstance(item.get("number"), int)
+        ]
+        duplicates = sorted({number for number in numbers
+                             if numbers.count(number) > 1})
+        if duplicates:
+            shown = "、".join(str(number) for number in duplicates[:20])
+            raise library_ops.LibraryOperationError(
+                f"题号重复：{shown}；请检查内容或改用白名单分题",
+                code="duplicate_question_numbers",
+            )
+    chosen = [item for item in preview if not item.get("dup")]
+    if not chosen:
+        raise library_ops.LibraryOperationError(
+            "没有可制成题卡的内容", code="empty_card")
+    return chosen
+
+
+def _create_library_cards(chosen: list[dict], params: dict,
+                          source_label: str) -> list[Path]:
+    folder = str(params.get("target_collection") or "").strip()
+    if not folder:
+        folder = filestore.get_or_create_collection("临时卡片", "")
+    source_label = str(source_label or "").strip()
+    # 单题或没有统一题源的散题使用“临时卡x”；题源仍写入 frontmatter，便于回溯。
+    temporary = params.get("split_mode") == "single" or not source_label
+    created = filestore.create_questions_batch(
+        _auto_import_items(chosen, source_label),
+        folder,
+        idempotency_scope=str(params.get("idempotency_scope") or ""),
+        temporary=temporary,
+    )
+    records = filestore.records_from_ids(created)
+    return [config.BANK_DIR / record["path"] for record in records]
+
+
+def _library_card_upload_path(raw: object) -> Path:
+    """解析内部截图暂存名；任务快照永远不保存任意绝对路径。"""
+    name = str(raw or "").strip()
+    if (not name or Path(name).name != name
+            or Path(name).suffix.casefold() not in config.EXAM_IMAGE_EXTS):
+        raise library_ops.LibraryOperationError(
+            "截图暂存参数无效", code="invalid_capture")
+    root = config.BATCH_UPLOAD_DIR.resolve()
+    raw_target = root / name
+    # 先检查未解析的路径。若先 `resolve()`，指向同一暂存目录内的符号链接会
+    # 被还原成普通目标路径，后面的 `is_symlink()` 永远看不到它。
+    if raw_target.is_symlink():
+        raise library_ops.LibraryOperationError(
+            "截图暂存文件不能是符号链接", code="invalid_capture")
+    try:
+        target = raw_target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise library_ops.LibraryOperationError(
+            "截图暂存文件已不存在，请重新截图",
+            code="capture_not_found", status=404) from exc
+    if target.parent != root or target.is_symlink() or not target.is_file():
+        raise library_ops.LibraryOperationError(
+            "截图暂存文件无效", code="invalid_capture")
+    return target
+
+
+def _library_card_source(spec: dict) -> Path:
+    if not isinstance(spec, dict):
+        raise library_ops.LibraryOperationError(
+            "制卡来源无效", code="invalid_capture")
+    if spec.get("kind") == "upload":
+        return _library_card_upload_path(spec.get("name"))
+    if spec.get("kind") == "library":
+        return _library_task_resolve_file(
+            spec.get("path", ""), set(config.EXAM_IMAGE_EXTS))
+    raise library_ops.LibraryOperationError(
+        "制卡来源无效", code="invalid_capture")
+
+
 def _execute_library_task(operation: str, params: dict) -> list[Path]:
+    if operation == "card_markdown":
+        raw = str(params.get("text") or "")
+        chosen = _library_card_preview(raw, params)
+        return _create_library_cards(
+            chosen, params, str(params.get("source_label") or ""))
+    if operation == "card_file":
+        source = _library_task_resolve_file(
+            params["source"], {".pdf", *config.EXAM_IMAGE_EXTS})
+        temporary_pdf = None
+        convert_source = source
+        try:
+            pages = params.get("pages")
+            if pages and source.suffix.casefold() == ".pdf":
+                config.BATCH_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+                temporary_pdf = config.BATCH_UPLOAD_DIR / f"library-card-{uuid.uuid4().hex}.pdf"
+                library_pdf_tools.extract_pages(source, pages, output_path=temporary_pdf)
+                convert_source = temporary_pdf
+            md = _convert_with_ocr_credentials(
+                _parse_ocr_backend(params.get("ocr_backend", "")),
+                lambda token, doc2x_key: converter.convert_file(
+                    convert_source, mineru_token=token,
+                    include_solution=bool(params.get("include_solution")),
+                    provider=providers.resolve_active(),
+                    engine=_parse_engine(params.get("engine", "")),
+                    boundary_mode=_parse_boundary_mode(params.get("boundary_mode", "")),
+                    image_page_count=(1 if converter.is_image_file(convert_source) else 0),
+                    ocr_backend=_parse_ocr_backend(params.get("ocr_backend", "")),
+                    doc2x_api_key=doc2x_key))
+            chosen = _library_card_preview(md, params)
+            source_label = (str(params.get("source_label") or "").strip()
+                            or source.stem)
+            return _create_library_cards(chosen, params, source_label)
+        finally:
+            if temporary_pdf is not None:
+                temporary_pdf.unlink(missing_ok=True)
+    if operation == "card_capture":
+        stem = _library_card_source(params.get("stem_source"))
+        solution_spec = params.get("solution_source")
+        solution = _library_card_source(solution_spec) if solution_spec else None
+        ocr_backend = _parse_ocr_backend(params.get("ocr_backend", ""))
+        if solution is not None:
+            md = _convert_with_ocr_credentials(
+                ocr_backend,
+                lambda token, doc2x_key: converter.convert_exam_and_solution(
+                    stem, solution, mineru_token=token,
+                    provider=providers.resolve_active(),
+                    engine=_parse_engine(params.get("engine", "")),
+                    boundary_mode=_parse_boundary_mode(
+                        params.get("boundary_mode", "")),
+                    exam_image_page_count=1,
+                    solution_image_page_count=1,
+                    ocr_backend=ocr_backend,
+                    doc2x_api_key=doc2x_key,
+                ),
+            )
+        else:
+            md = _convert_with_ocr_credentials(
+                ocr_backend,
+                lambda token, doc2x_key: converter.convert_file(
+                    stem, mineru_token=token,
+                    include_solution=bool(params.get("include_solution")),
+                    provider=providers.resolve_active(),
+                    engine=_parse_engine(params.get("engine", "")),
+                    boundary_mode=_parse_boundary_mode(
+                        params.get("boundary_mode", "")),
+                    image_page_count=1,
+                    ocr_backend=ocr_backend,
+                    doc2x_api_key=doc2x_key,
+                ),
+            )
+        chosen = _library_card_preview(md, params)
+        return _create_library_cards(
+            chosen, params, str(params.get("source_label") or stem.stem))
     if operation == "pdf_merge":
         sources = [_library_task_resolve_file(path, {".pdf"})
                    for path in params["sources"]]
@@ -1181,7 +1359,8 @@ def _library_task_worker(task_id: str) -> None:
                             outputs=result, output=result[0] if result else None)
     except (library_pdf_tools.PdfToolError,
             document_converter.DocumentConversionError,
-            library_ops.LibraryOperationError, OSError, ValueError) as exc:
+            library_ops.LibraryOperationError, converter.ConvertError,
+            OSError, ValueError) as exc:
         code = getattr(exc, "code", "tool_failed")
         _library_task_update(task_id, status="error", finished_at=time.time(),
                             error=str(exc), error_code=code)
@@ -1194,16 +1373,90 @@ def _library_task_worker(task_id: str) -> None:
 def _queue_library_task(operation: str, params: dict) -> dict:
     task_id = uuid.uuid4().hex
     now = time.time()
+    params = dict(params)
+    if operation in _LIBRARY_CARD_OPERATIONS and not params.get("idempotency_scope"):
+        # scope 随任务快照持久化，重试继续认回已经落盘的部分题卡，避免进程在
+        # “写题成功、任务完成状态未写入”之间退出后再造一套重复题。
+        params["idempotency_scope"] = f"library-card:{task_id}"
     task = {
         "task_id": task_id, "operation": operation, "params": params,
         "status": "queued", "created_at": now, "updated_at": now,
     }
     with _library_tasks_lock:
         _library_tasks[task_id] = task
-    _persist_library_task(task_id, task)
+    try:
+        _persist_library_task(task_id, task)
+    except Exception:
+        # 快照是任务的稳定真源；若写盘失败就不能启动后台线程，否则页面重启后
+        # 会丢掉一个可能已经产出文件或题卡的任务。内存登记也同步回滚。
+        with _library_tasks_lock:
+            if _library_tasks.get(task_id) is task:
+                _library_tasks.pop(task_id, None)
+        raise
     threading.Thread(target=_library_task_worker, args=(task_id,),
                      name=f"library-tool-{task_id[:8]}", daemon=True).start()
     return dict(task)
+
+
+def _library_payload_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _prepare_library_card_common(payload: dict) -> dict:
+    split_mode = str(payload.get("split_mode") or "multi").strip().lower()
+    if split_mode not in {"single", "multi"}:
+        raise library_ops.LibraryOperationError("制卡模式无效", code="invalid_split_mode")
+    params = {
+        "target_collection": str(payload.get("target_collection") or "").strip(),
+        "split_mode": split_mode,
+        "include_solution": _library_payload_bool(payload.get("include_solution")),
+        "boundary_mode": _parse_boundary_mode(payload.get("boundary_mode", "")),
+        "ocr_backend": _parse_ocr_backend(payload.get("ocr_backend", "")),
+        "engine": _parse_engine(payload.get("engine", "")),
+    }
+    if not params["target_collection"] or params["target_collection"] == "临时卡片":
+        params["target_collection"] = filestore.get_or_create_collection("临时卡片", "")
+    elif params["target_collection"] and not filestore.get_collection(params["target_collection"]):
+        raise library_ops.LibraryOperationError(
+            "目标题集不存在", code="target_not_found", status=404)
+    return params
+
+
+def _prepare_library_card_task(payload: dict) -> tuple[str, dict]:
+    mode = str(payload.get("mode") or "").strip().lower()
+    params = _prepare_library_card_common(payload)
+    if mode == "markdown":
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise library_ops.LibraryOperationError("没有可制卡的 Markdown 内容", code="empty_card")
+        if len(text.encode("utf-8")) > _LIBRARY_TEXT_LIMIT:
+            raise library_ops.LibraryOperationError("制卡文本超过 8 MB", code="text_too_large")
+        params["text"] = text
+        params["source_label"] = str(payload.get("source") or "").strip()
+        return "card_markdown", params
+    if mode == "file":
+        _target, rel = _library_task_file(
+            payload.get("path"), suffixes={".pdf", *config.EXAM_IMAGE_EXTS})
+        params["source"] = rel
+        params["source_label"] = Path(rel).stem
+        pages = payload.get("pages")
+        if pages is not None:
+            params["pages"] = _library_int_list(pages, "制卡页码")
+        return "card_file", params
+    raise library_ops.LibraryOperationError("制卡模式无效", code="invalid_mode")
+
+
+def _save_library_card_upload(storage) -> str:
+    _check_exam_file(storage)
+    suffix = Path(storage.filename or "").suffix.casefold()
+    if suffix not in config.EXAM_IMAGE_EXTS:
+        raise _UploadRejected("制卡截图只支持 PNG、JPG、WEBP 或 BMP")
+    config.BATCH_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"library-card-{uuid.uuid4().hex}{suffix}"
+    storage.save(str(config.BATCH_UPLOAD_DIR / name))
+    return name
 
 
 @app.route("/api/library/pdf/info")
@@ -1226,6 +1479,66 @@ def library_task_create():
         task = _queue_library_task(operation, params)
     except (library_ops.LibraryOperationError, OSError) as exc:
         return _library_operation_error_response(exc)
+    return jsonify(ok=True, task=task), 202
+
+
+@app.route("/api/library/card-task", methods=["POST"])
+def library_card_task_create():
+    try:
+        operation, params = _prepare_library_card_task(_library_operation_payload())
+        task = _queue_library_task(operation, params)
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, task=task), 202
+
+
+@app.route("/api/library/card-capture", methods=["POST"])
+def library_card_capture_create():
+    """把剪贴板/文件截图登记为制卡任务；暂存名只在内部任务快照中流转。"""
+    stored: list[str] = []
+    try:
+        payload = request.form.to_dict()
+        params = _prepare_library_card_common(payload)
+        context_path = str(payload.get("context_path") or "").strip()
+        context_target = None
+        context_rel = ""
+        if context_path:
+            context_target, context_rel = _library_task_file(
+                context_path,
+                suffixes={".pdf", *config.EXAM_IMAGE_EXTS},
+            )
+            params["source_label"] = context_target.stem
+
+        stem_upload = request.files.get("stem_image")
+        solution_upload = request.files.get("solution_image")
+        if stem_upload and stem_upload.filename:
+            stem_name = _save_library_card_upload(stem_upload)
+            stored.append(stem_name)
+            params["stem_source"] = {"kind": "upload", "name": stem_name}
+        elif (context_target is not None
+              and context_target.suffix.casefold() in config.EXAM_IMAGE_EXTS):
+            params["stem_source"] = {"kind": "library", "path": context_rel}
+        else:
+            raise library_ops.LibraryOperationError(
+                "请先粘贴或选择题干截图", code="capture_required")
+
+        if solution_upload and solution_upload.filename:
+            solution_name = _save_library_card_upload(solution_upload)
+            stored.append(solution_name)
+            params["solution_source"] = {
+                "kind": "upload", "name": solution_name,
+            }
+            params["include_solution"] = True
+        task = _queue_library_task("card_capture", params)
+    except (_UploadRejected, library_ops.LibraryOperationError, OSError) as exc:
+        for name in stored:
+            try:
+                (config.BATCH_UPLOAD_DIR / name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        if isinstance(exc, library_ops.LibraryOperationError):
+            return _library_operation_error_response(exc)
+        return jsonify(ok=False, error=str(exc)), 400
     return jsonify(ok=True, task=task), 202
 
 
@@ -1257,8 +1570,34 @@ def library_task_retry(task_id):
     if old.get("status") in _LIBRARY_ACTIVE_STATUSES:
         return jsonify(ok=False, error="任务仍在执行"), 409
     try:
-        operation, params = _prepare_library_task({
-            "operation": old.get("operation"), **(old.get("params") or {})})
+        retry_payload = {"operation": old.get("operation"),
+                         **(old.get("params") or {})}
+        # 制卡任务和 PDF/DOCX 工具共用队列，但参数校验入口不同。重试时
+        # 必须回到原来的入口，否则 card_markdown/card_file 会被当成未知工具。
+        if old.get("operation") in {"card_markdown", "card_file"}:
+            retry_payload["mode"] = (
+                "markdown" if old.get("operation") == "card_markdown" else "file")
+            if old.get("operation") == "card_markdown":
+                retry_payload["source"] = retry_payload.pop("source_label", "")
+            if old.get("operation") == "card_file":
+                retry_payload["path"] = retry_payload.pop("source", "")
+            operation, params = _prepare_library_card_task(retry_payload)
+            old_scope = str(
+                (old.get("params") or {}).get("idempotency_scope") or "")
+            if old_scope:
+                params["idempotency_scope"] = old_scope
+        elif old.get("operation") == "card_capture":
+            params = dict(old.get("params") or {})
+            _library_card_source(params.get("stem_source"))
+            if params.get("solution_source"):
+                _library_card_source(params.get("solution_source"))
+            target = str(params.get("target_collection") or "")
+            if target and not filestore.get_collection(target):
+                raise library_ops.LibraryOperationError(
+                    "目标题集不存在", code="target_not_found", status=404)
+            operation = "card_capture"
+        else:
+            operation, params = _prepare_library_task(retry_payload)
         task = _queue_library_task(operation, params)
     except (library_ops.LibraryOperationError, OSError) as exc:
         return _library_operation_error_response(exc)
@@ -5153,6 +5492,57 @@ def _all_batches(show_all: bool) -> list[dict]:
     return rows
 
 
+_LIBRARY_TASK_LABELS = {
+    "card_markdown": "Markdown 制卡",
+    "card_file": "文件制卡",
+    "card_capture": "截图制卡",
+    "pdf_merge": "合并 PDF",
+    "pdf_extract": "提取 PDF 页面",
+    "pdf_reorder": "PDF 页面排序",
+    "pdf_split": "拆分 PDF",
+    "pdf_rotate": "旋转 PDF 页面",
+    "docx_markdown": "DOCX 转 Markdown",
+    "docx_pdf": "DOCX 转 PDF",
+}
+
+
+def _library_task_overview(task: dict) -> dict:
+    """把资料库独立任务收敛成总任务页所需的只读摘要。
+
+    资料库任务没有标准批次的“审核入库”阶段，不能伪造 ``groups`` 或
+    ``batch_id``；这里明确标记 kind，前端只提供打开资料库和重试入口。
+    """
+    operation = str(task.get("operation") or "")
+    status = str(task.get("status") or "queued")
+    return {
+        "kind": "library",
+        "task_id": str(task.get("task_id") or ""),
+        "operation": operation,
+        "label": _LIBRARY_TASK_LABELS.get(operation, "资料库任务"),
+        "status": status,
+        "finished": status == "done",
+        "busy": status in _LIBRARY_ACTIVE_STATUSES,
+        "done": 1 if status == "done" else 0,
+        "total": 1,
+        "created_at": task.get("created_at", 0),
+        "updated_at": task.get("updated_at", 0),
+        "error": str(task.get("error") or ""),
+        "outputs": list(task.get("outputs") or []),
+    }
+
+
+def _all_library_tasks(show_all: bool) -> list[dict]:
+    """返回资料库任务摘要；默认保留失败/中断项，方便直接重试。"""
+    with _library_tasks_lock:
+        rows = [_library_task_overview(dict(task))
+                for task in _library_tasks.values()]
+    rows.sort(key=lambda row: (float(row.get("created_at") or 0),
+                               row.get("task_id", "")), reverse=True)
+    if not show_all:
+        rows = [row for row in rows if not row["finished"]]
+    return rows
+
+
 @app.route("/batches")
 def batches_overview():
     """转换任务总面板。默认只列还没处理完的批次。"""
@@ -5160,6 +5550,7 @@ def batches_overview():
     concurrency = max(1, int(getattr(config, "BATCH_CONVERT_CONCURRENCY", 1)))
     return render_template("batches_overview.html",
                            batches=_all_batches(show_all),
+                           library_tasks=_all_library_tasks(show_all),
                            show_all=show_all, concurrency=concurrency)
 
 
@@ -5167,7 +5558,8 @@ def batches_overview():
 def batches_status():
     """总面板轮询。"""
     show_all = request.args.get("all") in ("1", "true", "on")
-    return jsonify(ok=True, batches=_all_batches(show_all))
+    return jsonify(ok=True, batches=_all_batches(show_all),
+                   library_tasks=_all_library_tasks(show_all))
 
 
 @app.route("/batch/<batch_id>/delete", methods=["POST"])

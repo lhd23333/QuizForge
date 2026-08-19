@@ -1612,6 +1612,9 @@ textarea#paste-md.drag-over { border-color: var(--primary); background: var(--pr
 .bo-chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); min-width: 10em; }
 .bo-act { display: inline-flex; gap: var(--sp-2); align-items: center; }
 .batches-page .bo-toolbar { margin-top: 0; }
+.bo-library-section { margin-top: var(--sp-5); }
+.bo-library-section h2 { margin: 0 0 var(--sp-2); font-size: 15px; }
+.bo-library-error, .bo-library-output { min-width: 0; overflow-wrap: anywhere; }
 .recycle-section > .coll-title:first-child { margin-top: 0; }
 .recycle-section .card:last-child { margin-bottom: 0; }
 .settings-page .panel-grid { margin-top: 0; gap: var(--sp-4); }
@@ -2213,13 +2216,18 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
   background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12px;
 }
 .library-word-actions button:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
-.library-tool-dialog, .library-task-dialog {
+.library-tool-dialog, .library-card-dialog, .library-task-dialog {
   width: min(560px, calc(100vw - 30px)); max-height: min(760px, calc(100vh - 30px));
   padding: 0; border: 1px solid var(--border); border-radius: 9px; background: var(--surface);
   color: var(--text); box-shadow: var(--shadow-lg);
 }
 .library-task-dialog { width: min(680px, calc(100vw - 30px)); }
-.library-tool-dialog::backdrop, .library-task-dialog::backdrop { background: rgb(15 23 42 / 35%); }
+.library-tool-dialog::backdrop, .library-card-dialog::backdrop, .library-task-dialog::backdrop { background: rgb(15 23 42 / 35%); }
+.library-card-dialog {
+  position: fixed; z-index: 1150; top: 64px; right: 18px; left: auto; bottom: auto; margin: 0;
+  width: min(390px, calc(100vw - 28px)); max-height: calc(100vh - 86px);
+}
+.library-card-dialog .library-tool-dialog-body { max-height: calc(100vh - 190px); }
 .library-tool-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
 .library-tool-dialog-head h2 { margin: 0; font-size: 15px; }
 .library-tool-dialog-body { display: grid; gap: 10px; padding: 14px 16px; overflow: auto; }
@@ -2231,6 +2239,15 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-tool-field textarea { resize: vertical; min-height: 34px; font-family: Consolas, monospace; }
 .library-tool-field input:focus, .library-tool-field textarea:focus, .library-tool-field select:focus { border-color: var(--primary); outline: 2px solid var(--primary-soft); }
+.library-card-check input[type="checkbox"] { width: auto; justify-self: start; accent-color: var(--primary); }
+.library-capture-area {
+  min-height: 34px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 4px 7px; border: 1px dashed var(--border); border-radius: 6px;
+  background: var(--surface-2); color: var(--muted); font-size: 11px;
+}
+.library-capture-area:focus-visible { border-color: var(--primary); outline: 2px solid var(--primary-soft); }
+.library-capture-area.is-filled { border-color: var(--primary); color: var(--text); }
+.library-capture-hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .library-tool-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 11px 16px 14px; border-top: 1px solid var(--border); }
 .library-tool-dialog-status { flex: 1; min-width: 0; overflow: hidden; color: var(--danger); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .library-task-list { display: grid; gap: 7px; max-height: min(620px, calc(100vh - 150px)); padding: 12px 16px 16px; overflow: auto; }
@@ -2257,6 +2274,11 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
   background: var(--surface-2); color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer;
 }
 .library-tool-open:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.library-card-open {
+  flex: 0 0 auto; padding: 5px 10px; border: 1px solid var(--primary); border-radius: 6px;
+  background: var(--primary-soft); color: var(--primary); font: inherit; font-size: 12px; cursor: pointer;
+}
+.library-card-open:hover { color: #fff; background: var(--primary); }
 .library-md-modes { flex: 0 0 auto; display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
 .library-md-save-area { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
 .library-md-save-status { max-width: min(320px, 28vw); overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -2627,6 +2649,7 @@ html[data-theme="dark"] .handout-conflict, html[data-theme="dark"] .handout-warn
   .library-workspace { grid-row: 2; }
   .library-current-path { display: none; }
   .library-view-toolbar { gap: 8px; padding-inline: 8px; }
+  .library-card-dialog { inset: 52px 10px auto; width: calc(100vw - 20px); max-height: calc(100vh - 64px); }
 
   .handout-shell,
   .handout-shell.has-inspector {

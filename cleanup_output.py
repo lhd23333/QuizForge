@@ -37,8 +37,23 @@ def _payload_paths(value) -> set[Path]:
     for raw in value.get("cleanup_paths") or []:
         if raw:
             found.add(Path(str(raw)))
+    # 资料库截图制卡把上传件封装在制卡来源描述中，不能只扫描旧批量导入
+    # 的顶层 `path` 字段。任务仍在等待或运行时必须保留截图，任务过期后
+    # 才由同一套上传清理逻辑回收；名称只接受单层文件名，避免快照内容变成
+    # 任意路径入口。
+    for source_key in ("stem_source", "solution_source"):
+        source = value.get(source_key)
+        if (isinstance(source, dict)
+                and source.get("kind") == "upload"):
+            name = str(source.get("name") or "").strip()
+            if name and Path(name).name == name:
+                found.add(config.BATCH_UPLOAD_DIR / name)
     for child in value.get("groups") or []:
         found.update(_payload_paths(child))
+    # 兼容资料库任务把业务参数包在 `params` 中的快照结构。
+    params = value.get("params")
+    if isinstance(params, dict):
+        found.update(_payload_paths(params))
     return found
 
 

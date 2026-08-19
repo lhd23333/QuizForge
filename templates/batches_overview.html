@@ -1,14 +1,15 @@
 {% extends "base.html" %}
 {% block title %}转换任务 · QuizForge{% endblock %}
 {% block content %}
-<section class="app-page batches-page">
+<section class="app-page batches-page" id="batches-overview"
+         data-show-all="{{ '1' if show_all else '' }}">
 <header class="app-page-head">
   <h1>转换任务</h1>
 </header>
 
 <div class="bo-toolbar">
   {% if show_all %}
-  <a class="btn btn-ghost" href="{{ url_for('batches_overview') }}">只看进行中</a>
+  <a class="btn btn-ghost" href="{{ url_for('batches_overview') }}">只看待处理</a>
   {% else %}
   <a class="btn btn-ghost" href="{{ url_for('batches_overview', all=1) }}">连已完成一起看</a>
   {% endif %}
@@ -16,7 +17,7 @@
 </div>
 
 {% if batches %}
-<div class="bo-list" id="bo-list" data-show-all="{{ '1' if show_all else '' }}">
+<div class="bo-list" id="bo-list">
   {% for b in batches %}
   <div class="bo-row{% if b['finished'] %} bo-finished{% endif %}" data-bid="{{ b['batch_id'] }}">
     <a class="bo-name" href="{{ url_for('batch_dashboard', batch_id=b['batch_id']) }}">
@@ -45,9 +46,44 @@
   </div>
   {% endfor %}
 </div>
-{% else %}
+{% endif %}
+
+{% if library_tasks %}
+<section class="bo-library-section" aria-label="资料库转换任务">
+  <h2>资料库任务</h2>
+  <div class="bo-list" id="bo-library-list">
+    {% for task in library_tasks %}
+    <div class="bo-row bo-library-row{% if task['finished'] %} bo-finished{% endif %}"
+         data-task-id="{{ task['task_id'] }}">
+      <span class="bo-name">{{ task['label'] }}</span>
+      <span class="bo-prog"><span class="bo-bar"><span class="bo-bar-fill"
+        style="width:{{ 100 if task['finished'] else 0 }}%"></span></span>
+        <span class="bo-num">{% if task['finished'] %}1/1{% elif task['busy'] %}处理中{% else %}已停止{% endif %}</span>
+      </span>
+      <span class="bo-chips">
+        {% if task['status'] == 'queued' %}<span class="bp-st">排队中</span>
+        {% elif task['busy'] %}<span class="bp-st">处理中</span>
+        {% elif task['status'] == 'done' %}<span class="bp-st bp-ready">已完成</span>
+        {% elif task['status'] == 'interrupted' %}<span class="bp-st bp-err-st">已中断</span>
+        {% else %}<span class="bp-st bp-err-st">失败</span>{% endif %}
+        {% if task['error'] %}<span class="muted bo-library-error">{{ task['error'] }}</span>{% endif %}
+        {% if task['outputs'] %}<span class="muted bo-library-output">{{ task['outputs'] | join('、') }}</span>{% endif %}
+      </span>
+      <span class="bo-act">
+        <a class="btn btn-sm" href="{{ url_for('library_page') }}">打开资料库</a>
+        {% if task['status'] in ('error', 'interrupted') %}
+        <button type="button" class="btn btn-sm bo-library-retry">重试</button>
+        {% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{% if not batches and not library_tasks %}
 <div class="app-empty-state app-surface">
-  <strong>{% if show_all %}暂无转换任务{% else %}没有进行中的任务{% endif %}</strong>
+  <strong>{% if show_all %}暂无转换任务{% else %}没有待处理的任务{% endif %}</strong>
   <a class="btn" href="{{ url_for('import_md') }}">新建任务</a>
 </div>
 {% endif %}
@@ -55,7 +91,5 @@
 {% endblock %}
 
 {% block scripts %}
-{% if batches %}
 <script src="{{ static_v('js/batches-overview.js') }}" defer></script>
-{% endif %}
 {% endblock %}

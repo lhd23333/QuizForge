@@ -15,6 +15,7 @@
   const sidebar = tree.closest('.library-sidebar');
 
   const READ_ONLY_ROOTS = new Set(['_assets', '_handouts', '_backups']);
+  const CARD_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
   const pathCollator = new Intl.Collator('zh-CN', {numeric: true, sensitivity: 'base'});
   const tabs = new Map();
   const panes = new Map();
@@ -103,6 +104,292 @@
     if (type !== 'textarea') input.type = type;
     label.append(caption, input);
     return {label, input};
+  }
+
+  function selectedMarkdownText(tab) {
+    if (!tab || tab.kind !== 'markdown') return '';
+    if (tab.editor && !tab.editor.hidden && document.activeElement === tab.editor) {
+      const start = Number(tab.editor.selectionStart);
+      const end = Number(tab.editor.selectionEnd);
+      if (Number.isInteger(start) && Number.isInteger(end) && end > start) {
+        return tab.editor.value.slice(start, end);
+      }
+    }
+    const selection = window.getSelection?.();
+    return (selection && !selection.isCollapsed
+      && tab.panel?.contains(selection.anchorNode)
+      && tab.panel?.contains(selection.focusNode)) ? selection.toString() : '';
+  }
+
+  function imageCaptureField(labelText, className) {
+    const label = document.createElement('label');
+    label.className = 'library-tool-field library-capture-field';
+    const caption = document.createElement('span');
+    caption.textContent = labelText;
+    const area = document.createElement('div');
+    area.className = 'library-capture-area';
+    area.tabIndex = 0;
+    const choose = document.createElement('button');
+    choose.type = 'button';
+    choose.className = 'btn btn-sm';
+    choose.textContent = '选择图片';
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/png,image/jpeg,image/webp,image/bmp';
+    input.className = 'library-capture-file';
+    input.hidden = true;
+    const hint = document.createElement('span');
+    hint.className = 'library-capture-hint';
+    hint.textContent = '也可先用系统截图，再在此处粘贴';
+    area.append(choose, input, hint);
+    label.append(caption, area);
+    let selected = null;
+    const setFile = file => {
+      if (!file || !String(file.type || '').startsWith('image/')) return;
+      const ext = ({'image/jpeg': '.jpg', 'image/webp': '.webp',
+        'image/bmp': '.bmp', 'image/png': '.png'})[file.type] || '.png';
+      selected = file.name && /\.[a-z0-9]+$/i.test(file.name)
+        ? file : new File([file], `截图-${Date.now()}${ext}`, {type: file.type});
+      hint.textContent = selected.name;
+      area.classList.add('is-filled');
+    };
+    choose.addEventListener('click', () => input.click());
+    input.addEventListener('change', () => setFile(input.files?.[0]));
+    area.addEventListener('paste', event => {
+      const items = [...(event.clipboardData?.items || [])];
+      const image = items.find(item => item.kind === 'file'
+        && String(item.type || '').startsWith('image/'));
+      const file = image?.getAsFile();
+      if (file) { event.preventDefault(); setFile(file); }
+    });
+    return {label, area, get file() { return selected; }, className};
+  }
+
+  function openLibraryCardDialog(tab, initialText = '') {
+    if (!tab || !['markdown', 'pdf', 'image'].includes(tab.kind)) return;
+    document.querySelector('.library-card-dialog')?.remove();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'library-card-dialog';
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    const head = document.createElement('div');
+    head.className = 'library-tool-dialog-head';
+    const title = document.createElement('h2');
+    title.textContent = tab.kind === 'markdown' ? 'Markdown 制卡' : '识别制卡';
+    const close = document.createElement('button');
+    close.type = 'button'; close.className = 'icon-btn'; close.textContent = '×';
+    close.title = '关闭';
+    close.addEventListener('click', () => closeLibraryDialog(dialog));
+    head.append(title, close);
+
+    const body = document.createElement('div');
+    body.className = 'library-tool-dialog-body';
+    const modeField = toolDialogField('制卡模式', 'library-card-mode');
+    const mode = document.createElement('select');
+    [['single', '单题制卡'], ['multi', '多题制卡']].forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = label; mode.append(option);
+    });
+    modeField.label.replaceChild(mode, modeField.input);
+    body.append(modeField.label);
+
+    const boundaryField = toolDialogField('题目边界', 'library-card-boundary');
+    const boundary = document.createElement('select');
+    [['auto', '智能审查题号连续性'], ['whitelist', '白名单分题（允许跳号）']]
+      .forEach(([value, label]) => {
+        const option = document.createElement('option');
+        option.value = value; option.textContent = label; boundary.append(option);
+      });
+    boundaryField.label.replaceChild(boundary, boundaryField.input);
+    body.append(boundaryField.label);
+
+    const targetField = toolDialogField('目标题集', 'library-card-target');
+    targetField.input.value = '临时卡片';
+    targetField.input.placeholder = '留空或填写已有题集';
+    body.append(targetField.label);
+
+    let textField = null;
+    if (tab.kind === 'markdown') {
+      textField = toolDialogField('制卡文本', 'library-card-text', 'textarea');
+      textField.input.rows = 9;
+      textField.input.placeholder = '可粘贴或编辑 Markdown；已选中的内容会自动带入';
+      textField.input.value = initialText || selectedMarkdownText(tab);
+      body.append(textField.label);
+    }
+
+    let pagesField = null;
+    let inputModeField = null;
+    let inputMode = null;
+    let stemCapture = null;
+    let solutionCapture = null;
+    if (tab.kind === 'pdf') {
+      inputModeField = toolDialogField('制卡来源', 'library-card-input-mode');
+      inputMode = document.createElement('select');
+      [['pages', '提取 PDF 页面'], ['capture', '截图配对（粘贴题干/解析）']]
+        .forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value; option.textContent = label; inputMode.append(option);
+        });
+      inputModeField.label.replaceChild(inputMode, inputModeField.input);
+      body.append(inputModeField.label);
+      pagesField = toolDialogField('PDF 页码', 'library-card-pages');
+      pagesField.input.placeholder = '留空识别全文，例如 1,3,5';
+      body.append(pagesField.label);
+    }
+    if (tab.kind === 'image') {
+      inputModeField = toolDialogField('制卡来源', 'library-card-input-mode');
+      inputMode = document.createElement('select');
+      [['current', '使用当前图片'], ['capture', '截图配对（粘贴解析）']]
+        .forEach(([value, label]) => {
+          const option = document.createElement('option');
+          option.value = value; option.textContent = label; inputMode.append(option);
+        });
+      inputModeField.label.replaceChild(inputMode, inputModeField.input);
+      body.append(inputModeField.label);
+    }
+    if (inputMode) {
+      stemCapture = imageCaptureField('题干截图', 'library-card-stem-capture');
+      solutionCapture = imageCaptureField('解析截图', 'library-card-solution-capture');
+      body.append(stemCapture.label, solutionCapture.label);
+    }
+
+    const solutionField = document.createElement('label');
+    solutionField.className = 'library-card-check library-tool-field';
+    const solutionText = document.createElement('span');
+    solutionText.textContent = '识别解析';
+    const solution = document.createElement('input');
+    solution.type = 'checkbox'; solution.checked = true;
+    solutionField.append(solutionText, solution);
+    body.append(solutionField);
+
+    const refreshCaptureFields = () => {
+      const capture = inputMode?.value === 'capture';
+      if (pagesField) pagesField.label.hidden = capture;
+      if (stemCapture) stemCapture.label.hidden = !capture || tab.kind !== 'pdf';
+      if (solutionCapture) solutionCapture.label.hidden = !capture;
+      solutionField.hidden = capture && Boolean(solutionCapture?.file);
+    };
+    inputMode?.addEventListener('change', refreshCaptureFields);
+    refreshCaptureFields();
+
+    const footer = document.createElement('div');
+    footer.className = 'library-tool-dialog-actions';
+    const status = document.createElement('span');
+    status.className = 'library-tool-dialog-status';
+    const submit = document.createElement('button');
+    submit.type = 'submit'; submit.className = 'btn primary';
+    submit.textContent = '加入制卡任务';
+    footer.append(status, submit);
+    form.append(head, body, footer);
+    dialog.append(form);
+    document.body.append(dialog);
+
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const capture = inputMode?.value === 'capture';
+      const target = targetField.input.value.trim();
+      const common = {
+        split_mode: mode.value,
+        boundary_mode: boundary.value,
+        include_solution: solution.checked,
+      };
+      if (target && target !== '临时卡片') common.target_collection = target;
+      if (tab.kind === 'markdown') {
+        const payload = {mode: 'markdown', ...common};
+        const text = textField.input.value;
+        if (!text.trim()) {
+          status.textContent = '请先选择或粘贴 Markdown 内容';
+          textField.input.focus();
+          return;
+        }
+        payload.text = text;
+        payload.source = tab.path.split('/').pop().replace(/\.[^.]+$/, '');
+        submit.disabled = true;
+        status.textContent = '正在登记…';
+        try {
+          await fetchJson('/api/library/card-task', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({...payload, text}),
+          });
+          closeLibraryDialog(dialog);
+          showLibraryToast('已加入制卡任务');
+          openLibraryTasksDialog();
+        } catch (error) {
+          status.textContent = error.message || '任务登记失败';
+          submit.disabled = false;
+        }
+        return;
+      } else {
+        if (capture) {
+          if (tab.kind === 'pdf' && !stemCapture?.file) {
+            status.textContent = '请先粘贴或选择题干截图';
+            stemCapture?.area.focus();
+            return;
+          }
+          const formData = new FormData();
+          formData.append('context_path', tab.path);
+          Object.entries(common).forEach(([key, value]) =>
+            formData.append(key, String(value)));
+          if (stemCapture?.file) formData.append('stem_image', stemCapture.file);
+          if (solutionCapture?.file) {
+            formData.append('solution_image', solutionCapture.file);
+            formData.set('include_solution', 'true');
+          }
+          submit.disabled = true;
+          status.textContent = '正在登记…';
+          try {
+            await fetchJson('/api/library/card-capture', {
+              method: 'POST', body: formData,
+            });
+            closeLibraryDialog(dialog);
+            showLibraryToast('已加入制卡任务');
+            openLibraryTasksDialog();
+          } catch (error) {
+            status.textContent = error.message || '任务登记失败';
+            submit.disabled = false;
+          }
+          return;
+        }
+        const payload = {mode: 'file', ...common, path: tab.path};
+        if (pagesField) {
+          const rawPages = pagesField.input.value.trim();
+          if (rawPages) {
+            payload.pages = parsePageNumbers(rawPages);
+            if (!payload.pages) {
+              status.textContent = 'PDF 页码格式无效';
+              pagesField.input.focus();
+              return;
+            }
+          }
+        }
+        submit.disabled = true;
+        status.textContent = '正在登记…';
+        try {
+          await fetchJson('/api/library/card-task', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+          });
+          closeLibraryDialog(dialog);
+          showLibraryToast('已加入制卡任务');
+          openLibraryTasksDialog();
+        } catch (error) {
+          status.textContent = error.message || '任务登记失败';
+          submit.disabled = false;
+        }
+        return;
+      }
+    });
+    dialog.addEventListener('cancel', event => {
+      event.preventDefault(); closeLibraryDialog(dialog);
+    });
+    dialog.addEventListener('keydown', event => {
+      if (event.key === 'Escape') closeLibraryDialog(dialog);
+    });
+    // 以非模态侧栏打开，用户仍可回到 PDF/Markdown 选择内容；提交后再进入任务列表。
+    dialog.show();
+    if (textField) textField.input.focus();
+    else if (pagesField) pagesField.input.focus();
+    else mode.focus();
   }
 
   function parsePageNumbers(raw) {
@@ -540,8 +827,19 @@
       toolbar.append(saveArea);
       tab.saveButton = save;
       tab.saveStatus = status;
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'library-card-open';
+      card.dataset.libraryCardTab = tab.key;
+      card.textContent = '选中制卡';
+      card.title = '将选中的 Markdown 制成题卡；未选中时可粘贴文本';
+      card.addEventListener('mousedown', () => {
+        card.dataset.librarySelectedText = selectedMarkdownText(tab);
+      });
+      toolbar.append(card);
     }
-    if (tab.kind === 'pdf' || tab.kind === 'word') {
+    const convertibleWord = tab.kind === 'word' && /\.docx$/i.test(tab.path);
+    if (tab.kind === 'pdf' || convertibleWord) {
       const tools = document.createElement('button');
       tools.type = 'button';
       tools.className = 'library-tool-open';
@@ -549,6 +847,17 @@
       tools.textContent = '工具';
       tools.title = tab.kind === 'pdf' ? 'PDF 页面工具' : 'DOCX 转换工具';
       toolbar.append(tools);
+    }
+    const suffix = (tab.path.match(/\.[^.\/]+$/) || [''])[0].toLowerCase();
+    if (tab.kind === 'pdf'
+        || (tab.kind === 'image' && CARD_IMAGE_EXTENSIONS.has(suffix))) {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'library-card-open';
+      card.dataset.libraryCardTab = tab.key;
+      card.textContent = '制卡';
+      card.title = tab.kind === 'pdf' ? '按页码或全文识别并制卡' : '识别图片并制卡';
+      toolbar.append(card);
     }
     return toolbar;
   }
@@ -700,20 +1009,27 @@
       mark.className = 'library-word-mark';
       mark.textContent = 'W';
       const title = document.createElement('h2');
-      title.textContent = '需要转换后查看';
+      const convertible = /\.docx$/i.test(tab.path);
+      title.textContent = convertible ? '需要转换后查看' : '旧版 Word 暂不支持转换';
       const message = document.createElement('p');
-      message.textContent = '请选择 Markdown 或 PDF 作为查看格式。';
+      message.textContent = convertible
+        ? '请选择 Markdown 或 PDF 作为查看格式。'
+        : '请先用 Word 或 WPS 另存为 .docx，再回到资料库转换。';
       const actions = document.createElement('div');
       actions.className = 'library-word-actions';
-      [['转为 Markdown', 'docx_markdown'], ['转为 PDF', 'docx_pdf']].forEach(([label, operation]) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = label;
-        button.dataset.libraryWordTool = operation;
-        button.title = label;
-        actions.append(button);
-      });
-      state.append(mark, title, message, actions);
+      if (convertible) {
+        [['转为 Markdown', 'docx_markdown'], ['转为 PDF', 'docx_pdf']]
+          .forEach(([label, operation]) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.textContent = label;
+            button.dataset.libraryWordTool = operation;
+            button.title = label;
+            actions.append(button);
+          });
+      }
+      state.append(mark, title, message);
+      if (convertible) state.append(actions);
       panel.append(state);
     } else {
       const error = document.createElement('div');
@@ -1549,6 +1865,12 @@
   panesHost.addEventListener('click', event => {
     const paneRoot = event.target.closest('[data-library-pane]');
     if (paneRoot) setFocusedPane(paneRoot.dataset.paneId);
+    const cardButton = event.target.closest('.library-card-open');
+    if (cardButton) {
+      openLibraryCardDialog(tabs.get(cardButton.dataset.libraryCardTab),
+        cardButton.dataset.librarySelectedText || '');
+      return;
+    }
     const toolButton = event.target.closest('.library-tool-open');
     if (toolButton) {
       openLibraryToolDialog(tabs.get(toolButton.dataset.libraryToolTab));
@@ -1615,6 +1937,13 @@
     }
     const active = focusedPane()?.active;
     const tab = active ? tabs.get(active) : null;
+    if ((event.ctrlKey || event.metaKey) && event.shiftKey
+        && event.key.toLowerCase() === 's'
+        && ['markdown', 'pdf', 'image'].includes(tab?.kind)) {
+      event.preventDefault();
+      openLibraryCardDialog(tab);
+      return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's'
         && tab?.kind === 'markdown') {
       event.preventDefault();
