@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from PIL import Image
 from pypdf import PdfReader, PdfWriter
 
 import pdf_collection
@@ -36,6 +37,12 @@ def _plain_pdf_bytes(pages: int = 2) -> bytes:
         writer.add_blank_page(width=595, height=842)
     stream = io.BytesIO()
     writer.write(stream)
+    return stream.getvalue()
+
+
+def _png_bytes(color: str) -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (4, 4), color).save(stream, format="PNG")
     return stream.getvalue()
 
 
@@ -138,6 +145,8 @@ class PdfCollectionTests(unittest.TestCase):
                 data={
                     "_csrf_token": quiz_app._WRITE_TOKEN,
                     "ocr_backend": "doc2x",
+                    "engine": "whole",
+                    "boundary_mode": "whitelist",
                     "groups[0][collection_mode]": "1",
                     "groups[0][file]": (io.BytesIO(exam), "题干合集.pdf"),
                     "groups[0][solution_file]": (io.BytesIO(answer), "答案合集.pdf"),
@@ -155,6 +164,13 @@ class PdfCollectionTests(unittest.TestCase):
                 self.assertTrue(all(group["collection_mode"] for group in groups))
                 self.assertTrue(all(group["include_solution"] for group in groups))
                 self.assertTrue(all(group["ocr_backend"] == "doc2x" for group in groups))
+                self.assertTrue(all(group["boundary_mode"] == "whitelist"
+                                    for group in groups))
+                self.assertTrue(all(group["engine"] == "block" for group in groups))
+                self.assertTrue(all(group["image_page_count"] == 0
+                                    and group["exam_image_page_count"] == 0
+                                    and group["solution_image_page_count"] == 0
+                                    for group in groups))
                 self.assertEqual([len(group["cleanup_paths"]) for group in groups], [4, 2])
                 self.assertEqual([
                     len(PdfReader(group["file_path"]).pages) for group in groups], [3, 2])
@@ -192,8 +208,73 @@ class PdfCollectionTests(unittest.TestCase):
                 group = quiz_app._batch_jobs[batch_id]["groups"][0]
                 self.assertEqual("ocr_structure", group["collection_strategy"])
                 self.assertFalse(group["collection_unit"])
+                self.assertEqual("auto", group["boundary_mode"])
+                self.assertEqual(0, group["image_page_count"])
+                self.assertEqual(0, group["exam_image_page_count"])
+                self.assertEqual(0, group["solution_image_page_count"])
                 self.assertEqual(2, len(group["cleanup_paths"]))
                 thread_cls.return_value.start.assert_called_once()
+            finally:
+                batch = quiz_app._batch_jobs.pop(batch_id, None)
+                for group in (batch or {}).get("groups", []):
+                    quiz_app._jobs.pop(group["job_id"], None)
+
+    def test_no_bookmark_collection_rejects_whitelist_boundary(self):
+        import app as quiz_app
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(quiz_app.config, "BATCH_UPLOAD_DIR", Path(tmp)), \
+                mock.patch.object(quiz_app.threading, "Thread") as thread_cls:
+            response = quiz_app.app.test_client().post(
+                "/batch-convert/create",
+                data={
+                    "_csrf_token": quiz_app._WRITE_TOKEN,
+                    "boundary_mode": "whitelist",
+                    "groups[0][collection_mode]": "1",
+                    "groups[0][file]": (
+                        io.BytesIO(_plain_pdf_bytes()), "无书签合集.pdf"),
+                }, content_type="multipart/form-data")
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("强制白名单不能用于无书签合集",
+                      response.get_json()["error"])
+        thread_cls.assert_not_called()
+
+    def test_batch_route_persists_image_sequence_page_counts(self):
+        import app as quiz_app
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(quiz_app.config, "BATCH_UPLOAD_DIR", Path(tmp)), \
+                mock.patch.object(quiz_app, "_history_record_for_sources",
+                                  return_value="history-images"), \
+                mock.patch.object(quiz_app, "_persist_job"), \
+                mock.patch.object(quiz_app, "_persist_batch"), \
+                mock.patch.object(quiz_app.threading, "Thread"):
+            response = quiz_app.app.test_client().post(
+                "/batch-convert/create",
+                data={
+                    "_csrf_token": quiz_app._WRITE_TOKEN,
+                    "boundary_mode": "whitelist",
+                    "groups[0][file]": [
+                        (io.BytesIO(_png_bytes("red")), "题干1.png"),
+                        (io.BytesIO(_png_bytes("blue")), "题干2.png"),
+                    ],
+                    "groups[0][solution_file]": [
+                        (io.BytesIO(_png_bytes("white")), "解析1.png"),
+                        (io.BytesIO(_png_bytes("gray")), "解析2.png"),
+                        (io.BytesIO(_png_bytes("black")), "解析3.png"),
+                    ],
+                }, content_type="multipart/form-data")
+
+            self.assertEqual(200, response.status_code,
+                             response.get_data(as_text=True))
+            batch_id = response.get_json()["batch_id"]
+            try:
+                group = quiz_app._batch_jobs[batch_id]["groups"][0]
+                self.assertEqual("whitelist", group["boundary_mode"])
+                self.assertEqual(2, group["image_page_count"])
+                self.assertEqual(2, group["exam_image_page_count"])
+                self.assertEqual(3, group["solution_image_page_count"])
             finally:
                 batch = quiz_app._batch_jobs.pop(batch_id, None)
                 for group in (batch or {}).get("groups", []):
@@ -234,9 +315,12 @@ class PdfCollectionTests(unittest.TestCase):
                 "gid": 4, "job_id": parent_job_id,
                 "file_path": str(exam), "solution_path": str(solution),
                 "include_solution": True, "only_numbers": None,
-                "filename": "合集.pdf", "engine": "block",
+                "filename": "合集.pdf", "engine": "whole",
                 "ocr_backend": "mineru", "block_mode": "manual",
-                "num_template": "", "cleanup_paths": [str(exam), str(solution)],
+                "num_template": "", "boundary_mode": "whitelist",
+                "image_page_count": 9, "exam_image_page_count": 9,
+                "solution_image_page_count": 8,
+                "cleanup_paths": [str(exam), str(solution)],
                 "cleanup_dirs": [], "collection_mode": True,
                 "collection_strategy": "ocr_structure", "collection_unit": False,
                 "status": "pending", "md": None, "error": None,
@@ -261,6 +345,14 @@ class PdfCollectionTests(unittest.TestCase):
                 self.assertTrue(all(group["collection_unit"] for group in groups))
                 self.assertEqual([unit["raw_path"] for unit in units],
                                  [group["collection_raw_path"] for group in groups])
+                self.assertTrue(all(group["boundary_mode"] == "whitelist"
+                                    for group in groups))
+                self.assertTrue(all(group["engine"] == "block"
+                                    for group in groups))
+                self.assertTrue(all(group["image_page_count"] == 0
+                                    and group["exam_image_page_count"] == 0
+                                    and group["solution_image_page_count"] == 0
+                                    for group in groups))
                 self.assertEqual(2, len(groups[0]["cleanup_paths"]))
                 self.assertEqual([], groups[1]["cleanup_paths"])
                 self.assertEqual(

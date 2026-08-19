@@ -429,7 +429,8 @@ def _repair_solution_run(run: list) -> None:
 
 def split_and_prep(raw_md: str, *, keep_images: bool = True,
                    num_template: str = "", only_numbers=None,
-                   note_sink=None, run_quality_checks: bool = True) -> list:
+                   note_sink=None, run_quality_checks: bool = True,
+                   boundary_mode: str = blocksplit.BOUNDARY_MODE_AUTO) -> list:
     """切块 + 机械排版，不跑 LLM。是 run() 的前半段，拆出来供人工审核暂停点复用
     （见 converter.convert_file_to_blocks）：暂停点要先切好块给人工看，LLM 判定
     要等审核完（合并/拆分/删除/调序）之后才跑。
@@ -438,8 +439,9 @@ def split_and_prep(raw_md: str, *, keep_images: bool = True,
     人工审核页应该只看到用户要的这些题，多余的块摆在审核页里只会让人误以为
     还得管它们。
     """
+    mode = blocksplit.normalize_boundary_mode(boundary_mode)
     blocks, note = blocksplit.split_blocks_with_note(
-        raw_md, num_template=num_template)
+        raw_md, num_template=num_template, boundary_mode=mode)
     if note and note_sink is not None:
         note_sink(note)
     if not blocks:
@@ -447,7 +449,8 @@ def split_and_prep(raw_md: str, *, keep_images: bool = True,
         return []
     for b in blocks:
         b.text = mechfix.normalize_block(b.text, keep_images=keep_images)
-    blocks = _recover_unnumbered_choice_blocks(blocks)
+    if mode != blocksplit.BOUNDARY_MODE_WHITELIST:
+        blocks = _recover_unnumbered_choice_blocks(blocks)
     blocks = _repair_choice_section_drift(blocks)
     blocks = _repair_fill_section_drift(blocks)
     blocks = _repair_generic_choice_section(blocks)
@@ -455,7 +458,11 @@ def split_and_prep(raw_md: str, *, keep_images: bool = True,
     blocks = _repair_fill_prefix_in_solution_section(blocks)
     # 体检在过滤之前（理由同 run()：过滤后的题号序列本来就不连续）
     if run_quality_checks and note_sink is not None:
-        for line in qualcheck.report(blocks, blocksplit.pair_blocks(blocks)):
+        check_numbering = mode != blocksplit.BOUNDARY_MODE_WHITELIST
+        pairing = blocksplit.pair_blocks(
+            blocks, check_number_gaps=check_numbering)
+        for line in qualcheck.report(
+                blocks, pairing, check_numbering=check_numbering):
             note_sink(line)
     if only_numbers:
         blocks = _filter_by_numbers(blocks, only_numbers)
@@ -490,7 +497,9 @@ def _coordinate_group(blocks) -> list[tuple]:
     return [(st, [so] if so is not None else []) for st, so in pr.paired]
 
 
-def group_blocks(blocks) -> list[tuple]:
+def group_blocks(
+        blocks, *,
+        boundary_mode: str = blocksplit.BOUNDARY_MODE_AUTO) -> list[tuple]:
     """题块 → [(题块, [解析块…])…]，坐标配对优先、顺序分组兜底。
 
     **顺序分组不能当首选**（2026-08-07 在 60 份真实产物上标定后改的）：真实试卷
@@ -507,14 +516,20 @@ def group_blocks(blocks) -> list[tuple]:
     两条路都产出同一个形状，调用方（render_without_ai / normalize_and_render）
     不需要知道走了哪档。
     """
+    mode = blocksplit.normalize_boundary_mode(boundary_mode)
     stems = [b for b in blocks if b.zone == "stem"]
     if not stems:
-        return _order_complete_numbered_groups(_sequential_group(blocks))
+        groups = _sequential_group(blocks)
+        return (groups if mode == blocksplit.BOUNDARY_MODE_WHITELIST
+                else _order_complete_numbered_groups(groups))
     missing = sum(1 for b in stems if b.number is None)
     if missing * 2 > len(stems):
         logger.info("题块题号缺失 %d/%d，配对退化为按顺序分组", missing, len(stems))
-        return _order_complete_numbered_groups(_sequential_group(blocks))
-    return _order_complete_numbered_groups(_coordinate_group(blocks))
+        groups = _sequential_group(blocks)
+    else:
+        groups = _coordinate_group(blocks)
+    return (groups if mode == blocksplit.BOUNDARY_MODE_WHITELIST
+            else _order_complete_numbered_groups(groups))
 
 
 def _order_complete_numbered_groups(groups: list[tuple]) -> list[tuple]:
@@ -553,7 +568,9 @@ def _strip_repeated_stem_from_solution(stem_text: str, solution_text: str) -> st
     return trimmed or solution_text
 
 
-def render_without_ai(blocks, *, include_solution: bool = True) -> str:
+def render_without_ai(
+        blocks, *, include_solution: bool = True,
+        boundary_mode: str = blocksplit.BOUNDARY_MODE_AUTO) -> str:
     """跳过 AI 标准化：把块渲染成老格式 `- [题型]` 块。
 
     题型必须在这里利用 block.section 判定并带给下游。机械切块时还看得到
@@ -567,7 +584,7 @@ def render_without_ai(blocks, *, include_solution: bool = True) -> str:
     `strip_leading_number` 两边口径都认的那一种；解析块的题号只剥不补（解析不入
     库成题，带号只会残留进正文）。
     """
-    groups = group_blocks(blocks)
+    groups = group_blocks(blocks, boundary_mode=boundary_mode)
     out: list[str] = []
     for stem, sols in groups:
         qtype = blocknorm._guess_type(stem.text, stem.section, stem.number)
@@ -591,7 +608,8 @@ def render_without_ai(blocks, *, include_solution: bool = True) -> str:
 
 
 def normalize_and_render(blocks, client, *, keep_images: bool = True,
-                         include_solution: bool = True) -> str:
+                         include_solution: bool = True,
+                         boundary_mode: str = blocksplit.BOUNDARY_MODE_AUTO) -> str:
     """人工审核过的块 → 逐块 LLM 判定 + 规范化渲染，供「送入 AI 标准化」分支用。
 
     与 run() 的差别只在配对入口：这里走 group_blocks（坐标配对为主、题号大面积
@@ -602,7 +620,7 @@ def normalize_and_render(blocks, client, *, keep_images: bool = True,
     """
     normed = blocknorm.normalize_blocks(blocks, client, keep_images=keep_images)
     by_index = _reconcile(blocks, normed)
-    groups = group_blocks(blocks)
+    groups = group_blocks(blocks, boundary_mode=boundary_mode)
 
     out: list[str] = []
     for stem, sols in groups:
@@ -626,7 +644,8 @@ def normalize_and_render(blocks, client, *, keep_images: bool = True,
 def run(raw_md: str, client, *, keep_images: bool = True,
         include_solution: bool = True, only_numbers=None,
         artifact_dir=None, name: str = "blocks",
-        num_template: str = "", note_sink=None) -> str:
+        num_template: str = "", note_sink=None,
+        boundary_mode: str = blocksplit.BOUNDARY_MODE_AUTO) -> str:
     """跑完整条逐块路径，返回老格式的规范化 md。
 
     include_solution=False 时仍然照常判类型（判「哪段是解析」才知道该扔掉哪段），
@@ -639,8 +658,9 @@ def run(raw_md: str, client, *, keep_images: bool = True,
     blocksplit.split_blocks_with_note）。返回值是 md 文本、没地方捎带这句话，
     而这句话不能只进日志——用户看不到日志，只会对着切歪的结果猜原因。
     """
+    mode = blocksplit.normalize_boundary_mode(boundary_mode)
     blocks, note = blocksplit.split_blocks_with_note(
-        raw_md, num_template=num_template)
+        raw_md, num_template=num_template, boundary_mode=mode)
     if note and note_sink is not None:
         note_sink(note)
     if not blocks:
@@ -648,7 +668,8 @@ def run(raw_md: str, client, *, keep_images: bool = True,
         return ""
     for b in blocks:
         b.text = mechfix.normalize_block(b.text, keep_images=keep_images)
-    blocks = _recover_unnumbered_choice_blocks(blocks)
+    if mode != blocksplit.BOUNDARY_MODE_WHITELIST:
+        blocks = _recover_unnumbered_choice_blocks(blocks)
     blocks = _repair_choice_section_drift(blocks)
     blocks = _repair_fill_section_drift(blocks)
     blocks = _repair_generic_choice_section(blocks)
@@ -658,7 +679,11 @@ def run(raw_md: str, client, *, keep_images: bool = True,
     # 体检在过滤之前、也在 LLM 之前：题号空洞这类结构信号要看**整份文档**才成立，
     # 过滤完只剩用户要的那几道题，序列本来就是不连续的，检出来的全是噪声。
     if note_sink is not None:
-        for line in qualcheck.report(blocks, blocksplit.pair_blocks(blocks)):
+        check_numbering = mode != blocksplit.BOUNDARY_MODE_WHITELIST
+        pairing = blocksplit.pair_blocks(
+            blocks, check_number_gaps=check_numbering)
+        for line in qualcheck.report(
+                blocks, pairing, check_numbering=check_numbering):
             note_sink(line)
 
     # only_numbers 在 LLM **之前**过滤。原先是在渲染时按题号跳过的，意味着「只取
@@ -672,12 +697,16 @@ def run(raw_md: str, client, *, keep_images: bool = True,
 
     normed = blocknorm.normalize_blocks(blocks, client, keep_images=keep_images)
     by_index = _reconcile(blocks, normed)
-    res = blocksplit.pair_blocks(blocks)
+    res = blocksplit.pair_blocks(
+        blocks, check_number_gaps=(
+            mode != blocksplit.BOUNDARY_MODE_WHITELIST))
     _dump(artifact_dir, name, blocks, normed, res)
 
     out: list[str] = []
-    ordered_pairs = _order_complete_numbered_groups(
-        [(stem, [sol] if sol is not None else []) for stem, sol in res.paired])
+    ordered_pairs = [
+        (stem, [sol] if sol is not None else []) for stem, sol in res.paired]
+    if mode != blocksplit.BOUNDARY_MODE_WHITELIST:
+        ordered_pairs = _order_complete_numbered_groups(ordered_pairs)
     for stem, solutions in ordered_pairs:
         sol = solutions[0] if solutions else None
         nb = by_index.get(stem.index)

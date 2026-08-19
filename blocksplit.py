@@ -45,6 +45,19 @@ from importer import _cn_to_int
 
 logger = logging.getLogger(__name__)
 
+BOUNDARY_MODE_AUTO = "auto"
+BOUNDARY_MODE_WHITELIST = "whitelist"
+SOURCE_PAGE_BREAK = "<!-- quizforge:source-page-break -->"
+
+
+def normalize_boundary_mode(boundary_mode: str = BOUNDARY_MODE_AUTO) -> str:
+    """校验并规范化切题边界策略，旧任务缺字段时继续按自动模式处理。"""
+    mode = str(boundary_mode or BOUNDARY_MODE_AUTO).strip().lower()
+    if mode not in {BOUNDARY_MODE_AUTO, BOUNDARY_MODE_WHITELIST}:
+        raise ValueError("切题边界模式只能是 auto 或 whitelist")
+    return mode
+
+
 # 行首 markdown 标题记号：MinerU 常把题号/小标题提成 `## `，判定时先剥掉再看正文
 _MD_HEAD_RE = re.compile(r"^\s*#{1,6}\s*")
 
@@ -237,6 +250,15 @@ def compile_dialect(template: str, *, name: str = "custom",
     return _Dialect(name=name, strict=pat, loose=pat,
                     guard_chain=not has_anchor, weight=weight,
                     numeral=numeral, prefixed=prefixed)
+
+
+# 白名单模式不在这些写法之间竞争：同一行命中任意一条就是强边界。自定义模板会在
+# 每次切分时作为第四条追加，继续复用上面的模板语法和 OCR 空格／全半角容错。
+_BUILTIN_WHITELIST_DIALECTS = (
+    compile_dialect("x.", name="whitelist-arabic-dot"),
+    compile_dialect("第x题", name="whitelist-di-ti"),
+    compile_dialect("第X题", name="whitelist-di-ti-cn"),
+)
 
 
 # 默认方言 = 老实现的行为。它必须排在第一位且在打平时胜出，
@@ -512,7 +534,8 @@ def _gaps_in_run(run: list[int]) -> list[int]:
     return out
 
 
-def pair_blocks(blocks: list[Block]) -> PairResult:
+def pair_blocks(blocks: list[Block], *,
+                check_number_gaps: bool = True) -> PairResult:
     """按 (group, number) 把解析块配到题块上。
 
     配对只认坐标，不做任何文本相似度猜测——坐标是原文自带的事实，猜测会引入
@@ -520,6 +543,8 @@ def pair_blocks(blocks: list[Block]) -> PairResult:
 
     题块自带解析（题目+解析混合块，`kind == "mixed"` 或块内已有解析标记）不在
     这里处理：它的解析就在自己块内，配 None 即可，由下游按块内标记切开。
+
+    check_number_gaps=False 只关闭自然题号连续性账本，配对和其它冲突仍照常保留。
     """
     stems = [b for b in blocks if b.zone == "stem"]
     sols = [b for b in blocks if b.zone == "solution"]
@@ -552,10 +577,11 @@ def pair_blocks(blocks: list[Block]) -> PairResult:
     # 题号空洞按组分别找：分组卷（A 卷/B 卷）两组各自从 1 起号，混在一起看
     # 序列会一直"不递增"，把整份文档切成一堆单元素段，什么也检不出来。
     gaps: list[int] = []
-    for grp in dict.fromkeys(st.group for st in stems):
-        gaps.extend(find_number_gaps(
-            [st.number for st in stems if st.group == grp]))
-    gaps = sorted(dict.fromkeys(gaps))
+    if check_number_gaps:
+        for grp in dict.fromkeys(st.group for st in stems):
+            gaps.extend(find_number_gaps(
+                [st.number for st in stems if st.group == grp]))
+        gaps = sorted(dict.fromkeys(gaps))
     if gaps:
         shown = "、".join(str(n) for n in gaps[:10])
         more = f" 等 {len(gaps)} 道" if len(gaps) > 10 else ""
@@ -1398,7 +1424,136 @@ def _repair_embedded_numbered_material(blocks: list[Block]) -> list[Block]:
     return repaired
 
 
-def split_blocks(raw_md: str, *, num_template: str = "") -> list[Block]:
+def _whitelist_dialects(num_template: str) -> tuple[_Dialect, ...]:
+    """返回内置白名单与用户追加模板，彼此取并集而不是择优。"""
+    dialects = list(_BUILTIN_WHITELIST_DIALECTS)
+    if num_template.strip():
+        dialects.append(compile_dialect(
+            num_template, name="whitelist-custom"))
+    return tuple(dialects)
+
+
+def _match_whitelist_boundary(
+        body: str, dialects: tuple[_Dialect, ...]) -> tuple[int, str] | None:
+    """匹配任一白名单题号，不应用自动模式的零号、链式数字等启发式排除。"""
+    for dialect in dialects:
+        match = dialect.strict.match(body)
+        if not match and dialect.prefixed is not None:
+            match = dialect.prefixed.match(body)
+        if not match:
+            continue
+        if dialect.numeral == "chinese":
+            number = _cn_to_int(match.group(1))
+            if number is None:
+                continue
+        else:
+            number = int(match.group(1))
+        return number, match.group(2).strip()
+    return None
+
+
+def _split_by_whitelist(
+        raw_md: str, *, num_template: str = "",
+        drop_sink: list[str] | None = None) -> tuple[list[Block], list[int]]:
+    """只按白名单强边界切块，并返回没有任何边界的有内容页码。
+
+    这条路径刻意不调用自动模式的方言竞争、降级、补界、改号、重复号合并和题号
+    回卷分区。每个命中行都原样开启新块；显式分区、组与参考答案标题仍作为上下文
+    保留。多图片 OCR 注入的页界只在这里消费，页界后的无号内容不会污染上一页题目。
+    """
+    dialects = _whitelist_dialects(num_template)
+    lines = raw_md.splitlines()
+    blocks: list[Block] = []
+    cur_lines: list[str] = []
+    cur_num: int | None = None
+    cur_line_no = 0
+    section: str | None = None
+    group: str | None = None
+    zone = "stem"
+
+    page_number = 1
+    page_has_visible_content = False
+    page_has_boundary = False
+    pages_without_boundary: list[int] = []
+
+    def close_block() -> None:
+        nonlocal cur_lines, cur_num, cur_line_no
+        if cur_lines:
+            text = "\n".join(cur_lines).strip()
+            if text:
+                blocks.append(Block(
+                    index=len(blocks), number=cur_num, text=text,
+                    section=section, group=group, zone=zone,
+                    line_no=cur_line_no, kind=_classify(text),
+                ))
+        cur_lines = []
+        cur_num = None
+        cur_line_no = 0
+
+    def close_page() -> None:
+        if page_has_visible_content and not page_has_boundary:
+            pages_without_boundary.append(page_number)
+
+    for index, raw_line in enumerate(lines):
+        if raw_line.strip() == SOURCE_PAGE_BREAK:
+            close_block()
+            close_page()
+            page_number += 1
+            page_has_visible_content = False
+            page_has_boundary = False
+            continue
+
+        body = _strip_head(raw_line)
+        if not body:
+            if cur_lines:
+                cur_lines.append(raw_line)
+            continue
+        page_has_visible_content = True
+
+        boundary = _match_whitelist_boundary(body, dialects)
+        if boundary is not None:
+            close_block()
+            cur_num, _rest = boundary
+            cur_lines = [raw_line]
+            cur_line_no = index + 1
+            page_has_boundary = True
+            continue
+
+        match = _GRP_LINE_RE.match(body)
+        if match:
+            close_block()
+            group = match.group(1).strip()
+            continue
+
+        if _ANS_LINE_RE.match(body):
+            close_block()
+            zone = "solution"
+            group = None
+            continue
+
+        if _PRACTICE_SECTION_RE.match(body):
+            close_block()
+            section = body
+            continue
+
+        section_match = _SEC_LINE_RE.match(body)
+        if section_match and _SEC_KEYWORD_RE.search(body):
+            close_block()
+            section = body
+            continue
+
+        if cur_lines:
+            cur_lines.append(raw_line)
+        elif drop_sink is not None:
+            drop_sink.append(raw_line)
+
+    close_block()
+    close_page()
+    return blocks, pages_without_boundary
+
+
+def split_blocks(raw_md: str, *, num_template: str = "",
+                 boundary_mode: str = BOUNDARY_MODE_AUTO) -> list[Block]:
     """把 MinerU 原文切成带元数据的块列表。不修改正文，只做结构。
 
     三档降级取第一个切出 ≥2 块的结果：
@@ -1412,7 +1567,12 @@ def split_blocks(raw_md: str, *, num_template: str = "") -> list[Block]:
     为什么"切不开"是个必须修的问题：下游 blocknorm 按块调 LLM，整份退化成一个
     巨块等于回到整篇规范化，漏题/错配这些本模块要解决的问题会原封不动地回来。
 
-    num_template 非空时按用户写的题号模板钉死方言（语法见 compile_dialect），
+    boundary_mode="whitelist" 时改走强边界：内置 `x.`、`第x题`、`第X题`
+    三类写法，num_template 若非空则作为额外白名单。该模式不检查题号是否连续，
+    也不做自动模式的竞争、回退、补界、改号或重复合并。
+
+    auto 模式下，num_template 非空时按用户写的题号模板钉死方言（语法见
+    compile_dialect），
     自动判方言与三档降级都不再参与——降级的意义是「我猜不准，换个宽度再试」，
     而用户已经明确说了题号长什么样，再降级只会把他指定的口径悄悄换掉。
 
@@ -1421,7 +1581,8 @@ def split_blocks(raw_md: str, *, num_template: str = "") -> list[Block]:
     比不指定更糟。回退这件事必须让用户知道，所以由调用方拿
     `split_blocks_with_note` 取回说明，而不是静默咽下。
     """
-    blocks, _note = split_blocks_with_note(raw_md, num_template=num_template)
+    blocks, _note = split_blocks_with_note(
+        raw_md, num_template=num_template, boundary_mode=boundary_mode)
     return blocks
 
 
@@ -1459,8 +1620,9 @@ def _drop_note(raw_md: str, dropped: list[str]) -> str:
         f"请对照原文检查是否缺题，必要时在「题号格式」里手动指定题号写法。")
 
 
-def split_blocks_with_note(raw_md: str, *,
-                           num_template: str = "") -> tuple[list[Block], str]:
+def split_blocks_with_note(
+        raw_md: str, *, num_template: str = "",
+        boundary_mode: str = BOUNDARY_MODE_AUTO) -> tuple[list[Block], str]:
     """同 split_blocks，另返回一句给用户看的说明（正常时为空串）。
 
     说明有两种：
@@ -1473,8 +1635,29 @@ def split_blocks_with_note(raw_md: str, *,
     无关，混进来只会虚报。marker 档没有那条丢弃分支（它按标记切，不需要先见到
     题号），所以走到第三档时天然没有这类丢弃可报。
     """
+    mode = normalize_boundary_mode(boundary_mode)
     if not raw_md or not raw_md.strip():
         return [], ""
+
+    if mode == BOUNDARY_MODE_WHITELIST:
+        sink: list[str] = []
+        blocks, pages_without_boundary = _split_by_whitelist(
+            raw_md, num_template=num_template, drop_sink=sink)
+        notes = []
+        drop_note = _drop_note(raw_md.replace(SOURCE_PAGE_BREAK, ""), sink)
+        if drop_note:
+            notes.append(drop_note)
+        if pages_without_boundary:
+            import qualcheck
+            notes.extend(
+                qualcheck.mark_manual_review(
+                    f"第 {page} 页未找到白名单题号，未归入题目。"
+                    "请对照原页检查题号写法或改用自动切题。"
+                )
+                for page in pages_without_boundary
+            )
+        return blocks, "\n".join(notes)
+
     raw_md = _expand_answer_key_structures(raw_md)
 
     if num_template.strip():

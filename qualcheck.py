@@ -427,19 +427,25 @@ def check_unpaired_content(blocks, pair_result) -> str:
     )
 
 
-def report(blocks, pair_result=None) -> list[str]:
+def report(blocks, pair_result=None, *,
+           check_numbering: bool = True) -> list[str]:
     """跑全部体检项，返回给用户看的话（没问题就是空列表）。
 
     顺序即重要性，也是可信度排序：前两条（题号空洞、声明数不符）的判据是原文
     自带的事实，后两条带阈值。语料上 41 份里 28 份一条都不报——这个比例是刻意的，
     见模块头。
+
+    check_numbering=False 仅跳过题号空洞和分区声明题数，孤儿内容、OCR 噪声、
+    超长块和选项完整性等检查仍照常执行。
     """
     notes = []
-    if pair_result is not None:
+    if pair_result is not None and check_numbering:
         notes.append(mark_manual_review(
             check_number_gaps(getattr(pair_result, "number_gaps", []))))
+    if pair_result is not None:
         notes.append(check_unpaired_content(blocks, pair_result))
-    notes.append(mark_manual_review(check_declared_count(blocks)))
+    if check_numbering:
+        notes.append(mark_manual_review(check_declared_count(blocks)))
     notes.append(mark_manual_review(check_ocr_noise(blocks)))
     notes.append(check_long_blocks(blocks))
     notes.append(mark_manual_review(check_option_count(blocks)))

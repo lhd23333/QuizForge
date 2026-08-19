@@ -33,15 +33,21 @@
           onsubmit="return confirm('识别结果不对，重新送去转换？转换期间可先离开此页，转好后回看板继续审核。');">
       <input type="text" name="only_numbers" class="input" placeholder="只重转题号，如 3,7；留空=整份重转"
              style="width:170px;font-size:12px;padding:3px 6px">
+      <select name="boundary_mode" class="input"
+              title="强制白名单只按内置或自定义题号边界切题，并自动使用逐题识别"
+              style="width:auto;font-size:12px;padding:3px 6px">
+        <option value="auto"{% if boundary_mode != 'whitelist' %} selected{% endif %}>智能识别题号</option>
+        <option value="whitelist"{% if boundary_mode == 'whitelist' %} selected{% endif %}>强制白名单边界</option>
+      </select>
       {# 题号模板：切歪了在这里指定后重跑。value 回填当前值，留空＝沿用上次
          （后端不会因为留空而清掉，见 batch_group_reconvert）。 #}
       <input type="text" name="num_template" class="input" value="{{ num_template or '' }}"
              placeholder="题号写法，如 第x题；留空=沿用"
-             title="x＝阿拉伯数字、X＝中文数字，其余字符原样匹配。例：x.  x、  (x)  第x题  第X题  【第x题】"
+             title="x＝阿拉伯数字、X＝中文数字，其余字符原样匹配；白名单模式下会追加到内置格式。例：x.  x、  (x)  第x题  第X题  【第x题】"
              style="width:160px;font-size:12px;padding:3px 6px">
       {% if num_template %}
       <label class="muted" style="font-size:12px">
-        <input type="checkbox" name="num_template_clear" value="1"> 改回自动
+        <input type="checkbox" name="num_template_clear" value="1"> 清除自定义模板
       </label>
       {% endif %}
       <button type="submit" class="btn" title="用原文件重新跑一次识别转换">🔁 重新转换</button>

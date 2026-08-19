@@ -51,6 +51,16 @@ import collection_recovery
 
 logger = logging.getLogger(__name__)
 
+BOUNDARY_AUTO = "auto"
+BOUNDARY_WHITELIST = "whitelist"
+
+
+def normalize_boundary_mode(raw: str) -> str:
+    """拆题边界策略。未知值保持旧版的智能识别行为。"""
+    return (BOUNDARY_WHITELIST
+            if str(raw or "").strip() == BOUNDARY_WHITELIST
+            else BOUNDARY_AUTO)
+
 # project-alpha 的中间产物根目录（MinerU 解压的 md 与图片都落在这里）。
 # 以前这里用的是相对路径 "output/raw_md"，靠调用前 os.chdir 到 project-alpha
 # 根来解析；现在改成绝对路径。原因：CWD 是**进程级**状态、不是线程级，方式四
@@ -650,6 +660,206 @@ def normalize_ocr_backend(raw: str) -> str:
     return OCR_DOC2X if (raw or "").strip().lower() == OCR_DOC2X else OCR_MINERU
 
 
+def _normalize_image_page_count(raw) -> int:
+    """旧任务没有页数字段，非法值也只能按普通单文件处理。"""
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _content_row_anchor_groups(row: dict) -> list[list[str]]:
+    """按渲染先后提取 MinerU 内容块在 Markdown 中可能留下的锚点。"""
+    def _strings(*values) -> list[str]:
+        output: list[str] = []
+        for value in values:
+            items = value if isinstance(value, list) else [value]
+            for item in items:
+                if not isinstance(item, str):
+                    continue
+                text = item.strip()
+                if text and text not in output:
+                    output.append(text)
+        return output
+
+    kind = str(row.get("type") or "")
+    image_path = row.get("img_path")
+    image_anchor = []
+    if isinstance(image_path, str) and image_path.strip():
+        image_anchor = [f"images/{Path(image_path).name}"]
+    if kind == "table":
+        # MinerU 先写表题，再在 HTML 表体和表格截图中择一输出，最后写脚注。
+        groups = [
+            _strings(row.get("table_caption")),
+            _strings(row.get("table_body"), *image_anchor),
+            _strings(row.get("table_footnote")),
+        ]
+    elif kind in {"image", "chart"}:
+        groups = [
+            image_anchor,
+            _strings(row.get("image_caption")),
+            _strings(row.get("image_footnote")),
+        ]
+    else:
+        # list_items 的第一个项目才是块首；后续项目唯一命中也不能证明页界。
+        list_items = _strings(row.get("list_items"))
+        first_list_item = list_items[:1]
+        groups = [_strings(
+            row.get("text"), row.get("content"), *first_list_item)]
+    return [group for group in groups if group]
+
+
+def _anchor_occurrences(text: str, anchor: str) -> list[int]:
+    """返回精确锚点的全部位置；页界证据只接受恰好一处。"""
+    positions: list[int] = []
+    cursor = 0
+    while True:
+        position = text.find(anchor, cursor)
+        if position < 0:
+            return positions
+        positions.append(position)
+        cursor = position + max(1, len(anchor))
+
+
+def _anchor_is_strong(anchor: str) -> bool:
+    """短标签即使全篇唯一也不足以证明页首，宁可转人工校对。"""
+    if anchor.startswith("images/") or anchor.lstrip().startswith("<table"):
+        return True
+    visible = re.sub(r"[\s`*_#$\\{}<>]+", "", anchor)
+    return len(visible) >= 4
+
+
+def _locate_page_start(raw_md: str, rows: list[dict]
+                       ) -> tuple[int | None, str]:
+    """定位本页首个实际内容块；不越过无法定位的块尝试后续正文。"""
+    for row in rows:
+        groups = _content_row_anchor_groups(row)
+        if not groups:
+            continue
+        for group in groups:
+            occurrences = {
+                anchor: _anchor_occurrences(raw_md, anchor)
+                for anchor in group
+            }
+            if not any(occurrences.values()):
+                # 表题或图片载荷可能未被输出，可继续检查同一块的下一种载荷。
+                continue
+            hits = [positions[0]
+                    for anchor, positions in occurrences.items()
+                    if len(positions) == 1 and _anchor_is_strong(anchor)]
+            if not hits:
+                return None, "首个内容块在 Markdown 中重复或锚点过短"
+            position = min(hits)
+            return raw_md.rfind("\n", 0, position) + 1, ""
+        return None, "首个内容块未进入 Markdown 或无法精确对应"
+    return None, "没有可定位的可见内容"
+
+
+def _inject_source_page_breaks(raw_md: str, extract_dir: Path,
+                               image_page_count: int
+                               ) -> tuple[str, int, str]:
+    """用最终 MinerU content_list 为多图片合成 PDF 注入可靠页界。
+
+    这里只接受三项同时成立的证据：content_list 页数与上传图片数一致、页码按
+    0..N-1 连续出现、每个下一页的首个可见块能在同轮 Markdown 中唯一且顺序
+    定位。任一项不成立都返回原文与原因，调用方据此暂停免审，绝不猜测位置。
+    """
+    import blocksplit
+
+    count = _normalize_image_page_count(image_page_count)
+    if count <= 1:
+        return raw_md, 0, ""
+    candidates = [
+        path for path in Path(extract_dir).glob("*_content_list.json")
+        if not path.name.endswith("_content_list_v2.json")
+    ]
+    if not candidates:
+        return raw_md, 0, "未找到最终轮次的 content_list.json"
+    try:
+        latest = max(candidates, key=lambda path: path.stat().st_mtime_ns)
+        rows = json.loads(latest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return raw_md, 0, f"content_list.json 无法读取：{exc}"
+    if not isinstance(rows, list) or not rows:
+        return raw_md, 0, "content_list.json 没有页面内容"
+
+    page_rows: dict[int, list[dict]] = {}
+    page_order: list[int] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return raw_md, 0, "content_list.json 含无效内容块"
+        page = row.get("page_idx")
+        if not isinstance(page, int) or page < 0:
+            return raw_md, 0, "content_list.json 缺少合法页码"
+        page_order.append(page)
+        page_rows.setdefault(page, []).append(row)
+    if any(right < left for left, right in zip(page_order, page_order[1:])):
+        return raw_md, 0, "content_list.json 页码顺序逆序"
+    expected_pages = list(range(count))
+    if sorted(page_rows) != expected_pages:
+        actual = ",".join(str(page + 1) for page in sorted(page_rows)) or "无"
+        return raw_md, 0, (
+            f"content_list.json 页面为 {actual}，与上传的 {count} 张图片不一致")
+
+    page_positions: list[int] = []
+    previous = -1
+    # 第 1 页也必须定位：否则“第 2 页锚点误命中文首”的错误仍会通过单调性检查。
+    # 页眉、页脚和页码若实际进入 Markdown，同样属于必须在页界后丢弃的游离文字，
+    # 不能跳过；首个实际块无法唯一定位时整份转人工校对。
+    for page in range(count):
+        position, error = _locate_page_start(raw_md, page_rows[page])
+        if position is None:
+            return raw_md, 0, f"第 {page + 1} 页{error}"
+        if position <= previous:
+            return raw_md, 0, f"第 {page + 1} 页页界在 Markdown 中逆序或重复"
+        page_positions.append(position)
+        previous = position
+
+    marker = blocksplit.SOURCE_PAGE_BREAK
+    # 从后往前插入，前面已确定的位置不会被后续插入偏移。
+    output = raw_md
+    for position in reversed(page_positions[1:]):
+        output = output[:position] + marker + "\n" + output[position:]
+    return output, len(page_positions) - 1, ""
+
+
+def _apply_image_page_boundaries(raw_md: str, extract_dir: Path, *,
+                                 boundary_mode: str, image_page_count: int,
+                                 ocr_backend: str, note_sink=None,
+                                 label: str = "") -> tuple[str, dict]:
+    """按白名单模式需要应用多图片分页隔离，并返回可留档的证据状态。"""
+    mode = normalize_boundary_mode(boundary_mode)
+    count = _normalize_image_page_count(image_page_count)
+    if mode != BOUNDARY_WHITELIST or count <= 1:
+        return raw_md, {}
+
+    prefix = f"（{label}）" if label else ""
+    meta = {"image_page_count": count}
+    backend = normalize_ocr_backend(ocr_backend)
+    if backend != OCR_MINERU:
+        error = "Doc2X 当前不提供可与 Markdown 可靠对应的页界坐标"
+        separated, inserted = raw_md, 0
+    else:
+        separated, inserted, error = _inject_source_page_breaks(
+            raw_md, extract_dir, count)
+    if error:
+        meta.update(source_page_boundary_status="unavailable",
+                    source_page_break_count=0)
+        note = qualcheck.mark_manual_review(
+            f"{prefix}{count} 张图片合成后的分页隔离失败（{error}），已保留原文；"
+            "请在拆题校对页逐页核对首尾内容，避免相邻图片文字串入同一道题")
+        logger.warning("[WARN] %s", note)
+        if note_sink is not None:
+            note_sink(note)
+        return raw_md, meta
+
+    meta.update(source_page_boundary_status="reliable",
+                source_page_break_count=inserted)
+    logger.info("[OK] %s已根据 MinerU 页面证据隔离 %d 张上传图片的 %d 处页界",
+                prefix, count, inserted)
+    return separated, meta
+
+
 def _check_options(raw_md: str, note_sink, *, label: str = "") -> None:
     """扫 MinerU 原文里「只剩选项标签、没有选项内容」的行，有则经 note_sink 告警。
 
@@ -682,7 +892,19 @@ def _repair_choice_images(raw_md: str, extract_dir: Path, note_sink=None,
                           *, label: str = "") -> str:
     """用 MinerU 的 bbox 恢复“题干图 + A-D 各一图”的二维归属。"""
     try:
-        repaired, count = imgorder.repair_document(raw_md, extract_dir)
+        # 页界是白名单切题的内部控制标记，不能让图片坐标修复把它并入题块后
+        # 重排或丢掉。逐页修复再原位拼回，既保护页界，也杜绝跨页移动图片。
+        import blocksplit
+        marker = blocksplit.SOURCE_PAGE_BREAK
+        parts = raw_md.split(marker)
+        repaired_parts = []
+        count = 0
+        for part in parts:
+            repaired_part, repaired_count = imgorder.repair_document(
+                part, extract_dir)
+            repaired_parts.append(repaired_part)
+            count += repaired_count
+        repaired = marker.join(repaired_parts)
     except Exception as e:
         # 坐标修复是增强档；任何第三方 JSON 形态变化都只能降级为原 Markdown，
         # 不能让原本可导入的试卷整体失败。
@@ -1386,18 +1608,22 @@ def _merge_collection_ocr_variants(primary_markdown: str, primary_dir: Path,
 
 def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
                                   *, note_sink=None, label: str = "",
-                                  collection: bool = False):
+                                  collection: bool = False,
+                                  boundary_mode: str = BOUNDARY_AUTO,
+                                  num_template: str = ""):
     """MinerU 文本层含替换符、题号断档或选项错序时，强制 OCR 重跑一次。
 
     U+FFFD 已经写进服务端返回的合法 UTF-8 Markdown，客户端下载后无法反解。MinerU
     v4 的 ``file.is_ocr`` 正是为乱码 PDF 准备；只在首轮确实出现替换符时重跑，正常
-    文件不增加调用。第二轮仍有乱码则交给既有告警，绝不静默删除未知字符。
+    文件不增加调用。白名单模式刻意不把缺号和题号覆盖率用于触发或择优，但乱码、
+    选项异常和数学噪声仍照常检查。第二轮仍有乱码则交给既有告警。
     """
     def _gaps(text: str) -> list[int]:
         # 复用真正的机械切块器，而不是另写一套题号正则。只看题干区，答案区从 1
         # 重启不应被当成主卷断档；少于 8 题或不是从 1/2 起步的材料不作此推断。
         import blocksplit
-        numbers = [b.number for b in blocksplit.split_blocks(text)
+        numbers = [b.number for b in blocksplit.split_blocks(
+            text, num_template=num_template, boundary_mode=mode)
                    if b.zone == "stem" and b.number is not None]
         if len(numbers) < 8 or min(numbers) > 2:
             return []
@@ -1408,7 +1634,8 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
         """统计主卷识别出的不同题号数，防止“无断档的短前缀”冒充更好结果。"""
         import blocksplit
         return len({
-            b.number for b in blocksplit.split_blocks(text)
+            b.number for b in blocksplit.split_blocks(
+                text, num_template=num_template, boundary_mode=mode)
             if (b.zone == "stem" and isinstance(b.number, int)
                 and 1 <= b.number <= 60)
         })
@@ -1423,7 +1650,8 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
         import mechfix
         import qualcheck
         broad_bad = 0
-        for block in blocksplit.split_blocks(text):
+        for block in blocksplit.split_blocks(
+                text, num_template=num_template, boundary_mode=mode):
             if block.zone != "stem":
                 continue
             candidate = mechfix.normalize_embedded_choice_labels(block.text)
@@ -1437,7 +1665,8 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
         # “答题括号也被吃掉、只剩 1—3 个选项”的旧卷形态。两者可能命中同一题，
         # 择优只需要异常严重度，不需要精确并集，因此取较大值避免重复计数。
         section_bad = len(qualcheck.find_option_count_anomalies(
-            blockpipe.split_and_prep(text)))
+            blockpipe.split_and_prep(
+                text, num_template=num_template, boundary_mode=mode)))
         return max(broad_bad, section_bad)
 
     def _image_choice_coverage(text: str) -> int:
@@ -1445,7 +1674,8 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
         import blocksplit
         import mechfix
         counts = []
-        for block in blocksplit.split_blocks(text):
+        for block in blocksplit.split_blocks(
+                text, num_template=num_template, boundary_mode=mode):
             if block.zone != "stem" or not mechfix.has_choice_answer_blank(block.text):
                 continue
             count = len(re.findall(r"!\[[^\]]*\]\([^)]*\)", block.text))
@@ -1461,7 +1691,8 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
             r"<sup(?:\s[^>]*)?>\s*#\s*</sup\s*>\s*"
             r"<sup(?:\s[^>]*)?>\s*[»→]\s*</sup\s*>", re.I)
         return sum(
-            1 for block in blocksplit.split_blocks(text)
+            1 for block in blocksplit.split_blocks(
+                text, num_template=num_template, boundary_mode=mode)
             if (block.zone == "stem"
                 and (qualcheck.has_dense_ocr_math_noise(block.text)
                      or vector_artifact.search(block.text))))
@@ -1502,6 +1733,7 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
     import tempfile
 
     extract_dir = Path(extract_dir)
+    mode = normalize_boundary_mode(boundary_mode)
     extract_dir.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(
         prefix=f".{extract_dir.name}.ocr-", dir=extract_dir.parent))
@@ -1522,8 +1754,9 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
         # “全卷题号断档/选项错序”体检，会把合法的重启误当故障，甚至触发
         # 119+89 页的第二轮强制 OCR。合集只在整本阶段处理不可逆乱码，
         # 选项与题号质量等切成单元后再检查。
-        first_gaps = [] if collection else _gaps(raw_md)
-        first_coverage = 0 if collection else _number_coverage(raw_md)
+        check_numbering = not collection and mode != BOUNDARY_WHITELIST
+        first_gaps = _gaps(raw_md) if check_numbering else []
+        first_coverage = _number_coverage(raw_md) if check_numbering else 0
         first_choice_bad = 0 if collection else _choice_anomalies(raw_md)
         first_image_coverage = 0 if collection else _image_choice_coverage(raw_md)
         first_ocr_bad = 0 if collection else _ocr_noise_anomalies(raw_md)
@@ -1573,8 +1806,8 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
                     logger.info(
                         "%s%s 两轮合集结构不能唯一对应，回落整本择优",
                         prefix, path.name)
-            retry_gaps = [] if collection else _gaps(retry_md)
-            retry_coverage = 0 if collection else _number_coverage(retry_md)
+            retry_gaps = _gaps(retry_md) if check_numbering else []
+            retry_coverage = _number_coverage(retry_md) if check_numbering else 0
             retry_choice_bad = 0 if collection else _choice_anomalies(retry_md)
             retry_image_coverage = 0 if collection else _image_choice_coverage(retry_md)
             retry_ocr_bad = 0 if collection else _ocr_noise_anomalies(retry_md)
@@ -1619,9 +1852,14 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
                 raw_md, name = retry_md, retry_name
                 selected_dir = retry_dir
             elif note_sink is not None and not coverage_shrunk:
-                note_sink(
-                    f"{prefix}{path.name} 强制 OCR 仅识别出 {retry_coverage} 个题号，"
-                    f"少于/劣于文本层的 {first_coverage} 个，已保留文本层结果")
+                if check_numbering:
+                    note_sink(
+                        f"{prefix}{path.name} 强制 OCR 仅识别出 {retry_coverage} 个题号，"
+                        f"少于/劣于文本层的 {first_coverage} 个，已保留文本层结果")
+                else:
+                    note_sink(
+                        f"{prefix}{path.name} 强制 OCR 的选项/数学噪声质量未优于文本层，"
+                        "已保留文本层结果")
             # 质量门只看最终实际采用的那一版。重试更差而被弃用时不能按 retry_*
             # 误报警；保留的文本层仍异常时也不能被“重试无异常”掩盖。
             final_gaps = retry_gaps if use_retry else first_gaps
@@ -1649,7 +1887,10 @@ def _parse_mineru_with_ocr_retry(mineru, path: Path, extract_dir: Path,
 def _parse_with_ocr_backend(path: Path, extract_dir: Path, cfg, *,
                             ocr_backend: str, doc2x_api_key: str = "",
                             note_sink=None, label: str = "",
-                            collection: bool = False):
+                            collection: bool = False,
+                            boundary_mode: str = BOUNDARY_AUTO,
+                            num_template: str = "",
+                            image_page_count: int = 0):
     """统一 OCR 入口，返回 ``(原文, 文件名, 归因信息)``。
 
     MinerU 的强制 OCR 重试与坐标图片修复只属于 MinerU；Doc2X 自己已经给出排版
@@ -1701,7 +1942,13 @@ def _parse_with_ocr_backend(path: Path, extract_dir: Path, cfg, *,
                 "doc2x_uid": result.uid,
                 "doc2x_page_scores": list(result.page_scores),
             }
-            return result.markdown, result.markdown_name, meta
+            markdown, page_meta = _apply_image_page_boundaries(
+                result.markdown, final_dir,
+                boundary_mode=boundary_mode,
+                image_page_count=image_page_count,
+                ocr_backend=backend, note_sink=note_sink, label=label)
+            meta.update(page_meta)
+            return markdown, result.markdown_name, meta
         finally:
             # 成功时 staging 已被 move，失败时清掉未完成解包；固定目录只会包含
             # 一次完整结果，不会暴露半轮产物。
@@ -1712,11 +1959,16 @@ def _parse_with_ocr_backend(path: Path, extract_dir: Path, cfg, *,
         OCR_MINERU,
         lambda token: _parse_mineru_with_ocr_retry(
             MineruClient(token, cfg.mineru_model_version), path, extract_dir,
-            note_sink=note_sink, label=label, collection=collection),
+            note_sink=note_sink, label=label, collection=collection,
+            boundary_mode=boundary_mode, num_template=num_template),
         fallback=cfg.mineru_token)
+    raw_md, page_meta = _apply_image_page_boundaries(
+        raw_md, extract_dir, boundary_mode=boundary_mode,
+        image_page_count=image_page_count, ocr_backend=backend,
+        note_sink=note_sink, label=label)
     raw_md = _repair_choice_images(
         raw_md, extract_dir, note_sink, label=label)
-    return raw_md, name, {}
+    return raw_md, name, page_meta
 
 
 def _ensure_raw_text(raw_md: str, path: Path, label: str = "", *,
@@ -1755,7 +2007,8 @@ def _ensure_normalized(md: str, path: Path) -> str:
 
 
 def _corpus_meta(cfg, engine: str, num_template: str = "", *,
-                 ocr_backend: str = OCR_MINERU, ocr_meta=None) -> dict:
+                 ocr_backend: str = OCR_MINERU, ocr_meta=None,
+                 boundary_mode: str = BOUNDARY_AUTO) -> dict:
     """语料留档的归因信息（见 corpus.archive 的 meta 参数）。
 
     `mineru_model_version` 是这里最有价值的一项：MinerU 在 2026-08 把 `vlm` 从
@@ -1767,6 +2020,7 @@ def _corpus_meta(cfg, engine: str, num_template: str = "", *,
     payload = {
         "engine": engine,
         "num_template": num_template or "",
+        "boundary_mode": normalize_boundary_mode(boundary_mode),
         "ocr_backend": normalize_ocr_backend(ocr_backend),
     }
     if payload["ocr_backend"] == OCR_MINERU:
@@ -3914,6 +4168,7 @@ def _recover_collection_choice_options(blocks, *, raw_path: Path,
 
 def convert_collection_unit_to_blocks(raw_path, *, keep_images: bool = True,
                                       num_template: str = "",
+                                      boundary_mode: str = BOUNDARY_AUTO,
                                       only_numbers=None, note_sink=None,
                                       source_name: str = "合集单元",
                                       source_pdf=None,
@@ -3922,6 +4177,7 @@ def convert_collection_unit_to_blocks(raw_path, *, keep_images: bool = True,
     """已完成整本 OCR 的单元只切块，不再调用 OCR。"""
     import blockpipe
 
+    mode = normalize_boundary_mode(boundary_mode)
     raw_path = Path(raw_path).resolve()
     if not raw_path.is_file():
         raise ConvertError(f"合集单元原文不存在: {raw_path}")
@@ -3929,7 +4185,7 @@ def convert_collection_unit_to_blocks(raw_path, *, keep_images: bool = True,
     blocks = blockpipe.split_and_prep(
         raw_md, keep_images=keep_images, num_template=num_template,
         only_numbers=None, note_sink=note_sink,
-        run_quality_checks=False)
+        run_quality_checks=False, boundary_mode=mode)
     if not blocks:
         raise ConvertError(
             f"已识别出「{source_name}」的原文，但没能切出任何题目")
@@ -3943,7 +4199,11 @@ def convert_collection_unit_to_blocks(raw_path, *, keep_images: bool = True,
     _check_options("\n\n".join(block.text for block in blocks), note_sink)
     if note_sink is not None:
         import blocksplit
-        for line in qualcheck.report(blocks, blocksplit.pair_blocks(blocks)):
+        check_numbering = mode != BOUNDARY_WHITELIST
+        pairing = blocksplit.pair_blocks(
+            blocks, check_number_gaps=check_numbering)
+        for line in qualcheck.report(
+                blocks, pairing, check_numbering=check_numbering):
             note_sink(line)
     if only_numbers:
         blocks = blockpipe._filter_by_numbers(blocks, only_numbers)
@@ -3956,6 +4216,7 @@ def convert_collection_unit_to_blocks(raw_path, *, keep_images: bool = True,
                           "intercept_images": True}],
         "keep_images": keep_images,
         "source_name": source_name,
+        "boundary_mode": mode,
         "ocr_backend": normalize_ocr_backend(ocr_backend),
         "ocr_meta": ocr_meta or {},
         # 合集单元在整批结束前要支持“重新转换”，所以此处收尾
@@ -3967,7 +4228,9 @@ def convert_collection_unit_to_blocks(raw_path, *, keep_images: bool = True,
 def convert_collection_unit(raw_path, *, include_solution: bool,
                             only_numbers=None, provider=None,
                             engine: str = ENGINE_WHOLE,
-                            num_template: str = "", note_sink=None,
+                            num_template: str = "",
+                            boundary_mode: str = BOUNDARY_AUTO,
+                            note_sink=None,
                             source_name: str = "合集单元",
                             ocr_backend: str = OCR_MINERU,
                             ocr_meta=None) -> str:
@@ -3975,6 +4238,7 @@ def convert_collection_unit(raw_path, *, include_solution: bool,
     _ensure_src_on_path()
     from src.normalizer import normalize
 
+    mode = normalize_boundary_mode(boundary_mode)
     raw_path = Path(raw_path).resolve()
     if not raw_path.is_file():
         raise ConvertError(f"合集单元原文不存在: {raw_path}")
@@ -3991,16 +4255,20 @@ def convert_collection_unit(raw_path, *, include_solution: bool,
                 keep_images=True, only_numbers=only_numbers,
                 artifact_dir=raw_path.parent,
                 name=raw_path.name.removesuffix("_raw.md"),
-                num_template=num_template, note_sink=note_sink)
+                num_template=num_template, note_sink=note_sink,
+                boundary_mode=mode)
         else:
+            import blocksplit
             client = _make_llm_client(cfg, provider)
+            llm_raw = raw_md.replace(blocksplit.SOURCE_PAGE_BREAK, "")
             md = normalize(
-                raw_md, client, include_solution=include_solution,
+                llm_raw, client, include_solution=include_solution,
                 keep_images=True, only_numbers=only_numbers)
         _check_preserved_image_refs(
             raw_md, md, note_sink=note_sink,
             include_solution=include_solution,
-            only_numbers=only_numbers, num_template=num_template)
+            only_numbers=only_numbers, num_template=num_template,
+            boundary_mode=mode)
         scope = raw_path.name.removesuffix("_raw.md")
         (raw_path.parent / f"{scope}_normalized.md").write_text(
             md, encoding="utf-8")
@@ -4010,7 +4278,7 @@ def convert_collection_unit(raw_path, *, include_solution: bool,
             raw_path.parent, scope,
             meta=_corpus_meta(
                 cfg, engine, num_template, ocr_backend=ocr_backend,
-                ocr_meta=ocr_meta or {}),
+                ocr_meta=ocr_meta or {}, boundary_mode=mode),
             texts={f"{scope}_normalized.md": md})
         return _ensure_normalized(md, Path(source_name))
     except ConvertError:
@@ -4024,6 +4292,8 @@ def convert_collection_unit(raw_path, *, include_solution: bool,
 
 def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
                            keep_images: bool = True, num_template: str = "",
+                           boundary_mode: str = BOUNDARY_AUTO,
+                           image_page_count: int = 0,
                            only_numbers=None, note_sink=None,
                            ocr_backend: str = OCR_MINERU,
                            doc2x_api_key: str = "") -> dict:
@@ -4042,6 +4312,7 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
     """
     import blockpipe
 
+    mode = normalize_boundary_mode(boundary_mode)
     source_path = Path(file_path).resolve()
     if not source_path.is_file():
         raise ConvertError(f"文件不存在: {source_path}")
@@ -4058,7 +4329,9 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
                 mineru_token, require_mineru=(backend == OCR_MINERU))
         raw_md, _, ocr_meta = _parse_with_ocr_backend(
             file_path, extract_dir, cfg, ocr_backend=backend,
-            doc2x_api_key=doc2x_api_key, note_sink=note_sink)
+            doc2x_api_key=doc2x_api_key, note_sink=note_sink,
+            boundary_mode=mode, num_template=num_template,
+            image_page_count=image_page_count)
         raw_md = _clean_mineru_text(raw_md, file_path, note_sink=note_sink)
         # 图片输入原先不落原文。改成一律落盘：审核暂停可能持续很久（快照保留 7 天），
         # 收尾时的语料留档只能从磁盘上取原文，不落盘等于图片上传永远收不到语料。
@@ -4076,7 +4349,8 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
 
         blocks = blockpipe.split_and_prep(
             raw_md, keep_images=keep_images, num_template=num_template,
-            only_numbers=only_numbers, note_sink=note_sink)
+            only_numbers=only_numbers, note_sink=note_sink,
+            boundary_mode=mode)
         if not blocks:
             reason = ("指定的「只取题号」没有匹配到任何题" if only_numbers else
                       "可能是题号写法没被认出（可在「重新转换」里指定题号模板），"
@@ -4088,6 +4362,7 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
             "extract_dirs": [{"dir": str(extract_dir), "stem": source_stem}],
             "keep_images": keep_images,
             "source_name": source_path.name,
+            "boundary_mode": mode,
             "ocr_backend": backend,
             "ocr_meta": ocr_meta,
         }
@@ -4101,6 +4376,9 @@ def convert_exam_and_solution_to_blocks(exam_path, solution_path,
                                         mineru_token: str = "",
                                         *, keep_images: bool = True,
                                         num_template: str = "",
+                                        boundary_mode: str = BOUNDARY_AUTO,
+                                        exam_image_page_count: int = 0,
+                                        solution_image_page_count: int = 0,
                                         only_numbers=None, note_sink=None,
                                         ocr_backend: str = OCR_MINERU,
                                         doc2x_api_key: str = "") -> dict:
@@ -4111,6 +4389,7 @@ def convert_exam_and_solution_to_blocks(exam_path, solution_path,
     """
     import blockpipe
 
+    mode = normalize_boundary_mode(boundary_mode)
     exam_path = Path(exam_path).resolve()
     sol_path = Path(solution_path).resolve()
     if not exam_path.is_file():
@@ -4130,15 +4409,20 @@ def convert_exam_and_solution_to_blocks(exam_path, solution_path,
         exam_in = _prep_for_ocr(exam_path, backend, work_dir=exam_dir)
         sol_in = _prep_for_ocr(sol_path, backend, work_dir=sol_dir)
 
-        def _parse(p: Path, extract_dir: Path, label: str):
+        def _parse(p: Path, extract_dir: Path, label: str,
+                   image_page_count: int):
             return _parse_with_ocr_backend(
                 p, extract_dir, cfg, ocr_backend=backend,
                 doc2x_api_key=doc2x_api_key,
-                note_sink=note_sink, label=label)
+                note_sink=note_sink, label=label,
+                boundary_mode=mode, num_template=num_template,
+                image_page_count=image_page_count)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_exam = pool.submit(_parse, exam_in, exam_dir, "题干")
-            fut_sol = pool.submit(_parse, sol_in, sol_dir, "解析")
+            fut_exam = pool.submit(
+                _parse, exam_in, exam_dir, "题干", exam_image_page_count)
+            fut_sol = pool.submit(
+                _parse, sol_in, sol_dir, "解析", solution_image_page_count)
             exam_raw, _, exam_ocr_meta = fut_exam.result()
             sol_raw, _, sol_ocr_meta = fut_sol.result()
 
@@ -4166,7 +4450,8 @@ def convert_exam_and_solution_to_blocks(exam_path, solution_path,
 
         blocks = blockpipe.split_and_prep(
             combined, keep_images=keep_images, num_template=num_template,
-            only_numbers=only_numbers, note_sink=note_sink)
+            only_numbers=only_numbers, note_sink=note_sink,
+            boundary_mode=mode)
         if not blocks:
             reason = ("指定的「只取题号」没有匹配到任何题" if only_numbers else
                       "可能是题号写法没被认出（可在「重新转换」里指定题号模板），"
@@ -4183,6 +4468,7 @@ def convert_exam_and_solution_to_blocks(exam_path, solution_path,
             ],
             "keep_images": keep_images,
             "source_name": exam_path.name,
+            "boundary_mode": mode,
             "ocr_backend": backend,
             "ocr_meta": {"exam": exam_ocr_meta, "solution": sol_ocr_meta},
         }
@@ -4208,6 +4494,7 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
     _ensure_src_on_path()
     blocks = [blocksplit.Block(**d) for d in pending["blocks"]]
     keep_images = bool(pending.get("keep_images", True))
+    mode = normalize_boundary_mode(pending.get("boundary_mode"))
 
     if action == "ai":
         cfg = None
@@ -4217,16 +4504,16 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
         client = _make_llm_client(cfg, provider)
         md = blockpipe.normalize_and_render(
             blocks, client, keep_images=keep_images,
-            include_solution=include_solution)
+            include_solution=include_solution, boundary_mode=mode)
     else:
         md = blockpipe.render_without_ai(
-            blocks, include_solution=include_solution)
+            blocks, include_solution=include_solution, boundary_mode=mode)
 
     if keep_images:
         _check_preserved_image_refs(
             "\n\n".join(block.text for block in blocks), md,
             note_sink=note_sink, include_solution=include_solution,
-            blocks=blocks)
+            blocks=blocks, boundary_mode=mode)
 
     from src.pipeline import _cleanup_temp
 
@@ -4240,6 +4527,7 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
         # 之后 provider/cfg 不一定在手，engine 则是确定的：能走到人工审核就是逐块。
         corpus.archive(extract_dir, stem,
                        meta={"engine": ENGINE_BLOCK, "review": action,
+                             "boundary_mode": mode,
                              "ocr_backend": pending.get("ocr_backend", OCR_MINERU),
                              "ocr_meta": pending.get("ocr_meta") or {}},
                        texts={f"{stem}_normalized.md": md})
@@ -4256,7 +4544,8 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
 def _run_block_engine(raw_md: str, cfg, provider, *, include_solution: bool,
                       keep_images: bool, only_numbers, artifact_dir,
                       name: str, num_template: str = "",
-                      note_sink=None) -> str:
+                      note_sink=None,
+                      boundary_mode: str = BOUNDARY_AUTO) -> str:
     """逐块路径入口。放在这里而不是 blockpipe 里，是为了让 LLM 客户端的构造
     方式（provider / 回落 DeepSeek）与老路径完全一致，两条路径共用同一套配置。
     """
@@ -4267,13 +4556,16 @@ def _run_block_engine(raw_md: str, cfg, provider, *, include_solution: bool,
                          include_solution=include_solution,
                          only_numbers=only_numbers,
                          artifact_dir=artifact_dir, name=name,
-                         num_template=num_template, note_sink=note_sink)
+                         num_template=num_template, note_sink=note_sink,
+                         boundary_mode=normalize_boundary_mode(boundary_mode))
 
 
 def convert_file(file_path, mineru_token: str = "", *, is_image=False,
                  include_solution=False, keep_images=True,
                  only_numbers=None, provider=None,
                  engine: str = ENGINE_WHOLE, num_template: str = "",
+                 boundary_mode: str = BOUNDARY_AUTO,
+                 image_page_count: int = 0,
                  note_sink=None, ocr_backend: str = OCR_MINERU,
                  doc2x_api_key: str = "") -> str:
     """把一个 PDF/图片文件转换为规范化 md 文本。
@@ -4301,6 +4593,7 @@ def convert_file(file_path, mineru_token: str = "", *, is_image=False,
     source_path = Path(file_path).resolve()
     if not source_path.is_file():
         raise ConvertError(f"文件不存在: {source_path}")
+    mode = normalize_boundary_mode(boundary_mode)
     backend = normalize_ocr_backend(ocr_backend)
     is_image_input = is_image or is_image_file(source_path.name)
     source_stem = source_path.stem
@@ -4325,11 +4618,15 @@ def convert_file(file_path, mineru_token: str = "", *, is_image=False,
         if is_image_input:
             return _convert_image(file_path, cfg, keep_images, only_numbers,
                                   provider, engine, num_template, note_sink,
+                                  boundary_mode=mode,
+                                  image_page_count=image_page_count,
                                   extract_dir=extract_dir,
                                   source_path=source_path)
         return _convert_pdf(file_path, cfg, include_solution, keep_images,
                             only_numbers, provider, engine, num_template,
                             note_sink, backend, doc2x_api_key,
+                            boundary_mode=mode,
+                            image_page_count=image_page_count,
                             extract_dir=extract_dir,
                             source_path=source_path)
     except ConvertError:
@@ -4347,7 +4644,10 @@ def _convert_pdf(file_path: Path, cfg, include_solution: bool,
                  provider=None, engine: str = ENGINE_WHOLE,
                  num_template: str = "", note_sink=None,
                  ocr_backend: str = OCR_MINERU,
-                 doc2x_api_key: str = "", *, extract_dir: Path | None = None,
+                 doc2x_api_key: str = "", *,
+                 boundary_mode: str = BOUNDARY_AUTO,
+                 image_page_count: int = 0,
+                 extract_dir: Path | None = None,
                  source_path: Path | None = None) -> str:
     """PDF/Word：MinerU 拿原文 → LLM 规范化，与 _convert_image 同一套编排。
 
@@ -4368,11 +4668,14 @@ def _convert_pdf(file_path: Path, cfg, include_solution: bool,
     # 否则同一次任务会拆成两个目录，预处理件也无法随 OCR 发布/清理一起收走。
     source_path = Path(source_path) if source_path is not None else file_path
     source_stem = source_path.stem
+    mode = normalize_boundary_mode(boundary_mode)
     extract_dir = (Path(extract_dir) if extract_dir is not None
                    else _raw_md_dir(source_stem))
     raw_md, _, ocr_meta = _parse_with_ocr_backend(
         file_path, extract_dir, cfg, ocr_backend=ocr_backend,
-        doc2x_api_key=doc2x_api_key, note_sink=note_sink)
+        doc2x_api_key=doc2x_api_key, note_sink=note_sink,
+        boundary_mode=mode, num_template=num_template,
+        image_page_count=image_page_count)
     (extract_dir / f"{source_stem}_raw.md").write_text(raw_md, encoding="utf-8")
     # 落盘留的是 MinerU 未清洗的原文（诊断用，要看得出乱码本来的样子）；
     # 往下走的这份才清洗，不能让乱码字节混进 LLM 输入
@@ -4388,16 +4691,20 @@ def _convert_pdf(file_path: Path, cfg, include_solution: bool,
             raw_md, cfg, provider, include_solution=include_solution,
             keep_images=keep_images, only_numbers=only_numbers,
             artifact_dir=extract_dir, name=source_stem,
-            num_template=num_template, note_sink=note_sink)
+            num_template=num_template, note_sink=note_sink,
+            boundary_mode=mode)
     else:
+        import blocksplit
         client = _make_llm_client(cfg, provider)
-        md = normalize(raw_md, client, include_solution=include_solution,
+        # 页界标记只供机械白名单切分器消费，整篇 LLM 路径绝不能看到内部协议。
+        llm_raw = raw_md.replace(blocksplit.SOURCE_PAGE_BREAK, "")
+        md = normalize(llm_raw, client, include_solution=include_solution,
                        keep_images=keep_images, only_numbers=only_numbers)
     if keep_images:
         _check_preserved_image_refs(
             raw_md, md, note_sink=note_sink,
             include_solution=include_solution, only_numbers=only_numbers,
-            num_template=num_template)
+            num_template=num_template, boundary_mode=mode)
     (extract_dir / f"{source_stem}_normalized.md").write_text(
         md, encoding="utf-8")
 
@@ -4408,7 +4715,7 @@ def _convert_pdf(file_path: Path, cfg, include_solution: bool,
     corpus.archive(extract_dir, source_stem,
                    meta=_corpus_meta(
                        cfg, engine, num_template, ocr_backend=ocr_backend,
-                       ocr_meta=ocr_meta))
+                       ocr_meta=ocr_meta, boundary_mode=mode))
     _cleanup_temp(extract_dir, source_stem, keep_images=keep_images)
     return _ensure_normalized(md, source_path)
 
@@ -4416,7 +4723,11 @@ def _convert_pdf(file_path: Path, cfg, include_solution: bool,
 def convert_exam_and_solution(exam_path, solution_path, mineru_token: str = "",
                               only_numbers=None, provider=None,
                               engine: str = ENGINE_WHOLE,
-                              num_template: str = "", note_sink=None,
+                              num_template: str = "",
+                              boundary_mode: str = BOUNDARY_AUTO,
+                              exam_image_page_count: int = 0,
+                              solution_image_page_count: int = 0,
+                              note_sink=None,
                               ocr_backend: str = OCR_MINERU,
                               doc2x_api_key: str = "") -> str:
     """题干文件 + 单独的解析/答案文件 → 合并后一次规范化，按题号关联解析。
@@ -4431,6 +4742,7 @@ def convert_exam_and_solution(exam_path, solution_path, mineru_token: str = "",
         raise ConvertError(f"题干文件不存在: {exam_path}")
     if not sol_path.is_file():
         raise ConvertError(f"解析文件不存在: {sol_path}")
+    mode = normalize_boundary_mode(boundary_mode)
     backend = normalize_ocr_backend(ocr_backend)
 
     _ensure_src_on_path()
@@ -4449,15 +4761,20 @@ def convert_exam_and_solution(exam_path, solution_path, mineru_token: str = "",
 
         # 两次 MinerU 相互独立、且是纯 I/O（上传/轮询/下载，不占 GIL），
         # 并行跑把墙钟时间砍掉近一半，两边的轮询等待也重叠。
-        def _parse(p: Path, extract_dir: Path, label: str):
+        def _parse(p: Path, extract_dir: Path, label: str,
+                   image_page_count: int):
             return _parse_with_ocr_backend(
                 p, extract_dir, cfg, ocr_backend=backend,
                 doc2x_api_key=doc2x_api_key,
-                note_sink=note_sink, label=label)
+                note_sink=note_sink, label=label,
+                boundary_mode=mode, num_template=num_template,
+                image_page_count=image_page_count)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_exam = pool.submit(_parse, exam_in, exam_dir, "题干")
-            fut_sol = pool.submit(_parse, sol_in, sol_dir, "解析")
+            fut_exam = pool.submit(
+                _parse, exam_in, exam_dir, "题干", exam_image_page_count)
+            fut_sol = pool.submit(
+                _parse, sol_in, sol_dir, "解析", solution_image_page_count)
             exam_raw, _, exam_ocr_meta = fut_exam.result()  # 线程内异常在此重新抛出
             sol_raw, _, sol_ocr_meta = fut_sol.result()
 
@@ -4498,14 +4815,18 @@ def convert_exam_and_solution(exam_path, solution_path, mineru_token: str = "",
                 keep_images=True, only_numbers=only_numbers,
                 artifact_dir=exam_dir,
                 name=exam_scope + "_combined",
-                num_template=num_template, note_sink=note_sink)
+                num_template=num_template, note_sink=note_sink,
+                boundary_mode=mode)
         else:
+            import blocksplit
             client = _make_llm_client(cfg, provider)
-            md = normalize(combined, client, include_solution=True,
+            llm_raw = combined.replace(blocksplit.SOURCE_PAGE_BREAK, "")
+            md = normalize(llm_raw, client, include_solution=True,
                            keep_images=True, only_numbers=only_numbers)
         _check_preserved_image_refs(
             combined, md, note_sink=note_sink, include_solution=True,
-            only_numbers=only_numbers, num_template=num_template)
+            only_numbers=only_numbers, num_template=num_template,
+            boundary_mode=mode)
         # 题干与解析各自的图都解压在 <project-alpha>/output/raw_md/<stem>/images/
         # 下。两个 extract_dir 都要扫。
         md = _intercept_images(
@@ -4518,7 +4839,8 @@ def convert_exam_and_solution(exam_path, solution_path, mineru_token: str = "",
                        meta=_corpus_meta(
                            cfg, engine, num_template, ocr_backend=backend,
                            ocr_meta={"exam": exam_ocr_meta,
-                                     "solution": sol_ocr_meta}),
+                                     "solution": sol_ocr_meta},
+                           boundary_mode=mode),
                        texts={f"{exam_scope}_normalized.md": md})
         return _ensure_normalized(md, exam_path)
     except ConvertError:
@@ -4570,7 +4892,10 @@ def _prep_for_ocr(path: Path, ocr_backend: str, *, force_image=False,
 def _convert_image(file_path: Path, cfg, keep_images: bool = True,
                    only_numbers=None, provider=None,
                    engine: str = ENGINE_WHOLE, num_template: str = "",
-                   note_sink=None, *, extract_dir: Path | None = None,
+                   note_sink=None, *,
+                   boundary_mode: str = BOUNDARY_AUTO,
+                   image_page_count: int = 0,
+                   extract_dir: Path | None = None,
                    source_path: Path | None = None) -> str:
     """图片（预留点①）：绕过 run_parse 的白名单，直接 MinerU + normalize。"""
     from src.mineru_client import MineruClient
@@ -4578,14 +4903,20 @@ def _convert_image(file_path: Path, cfg, keep_images: bool = True,
 
     source_path = Path(source_path) if source_path is not None else file_path
     source_stem = source_path.stem
+    mode = normalize_boundary_mode(boundary_mode)
     extract_dir = (Path(extract_dir) if extract_dir is not None
                    else _raw_md_dir(source_stem))
     raw_md, _ = ocr_pool.run(
         OCR_MINERU,
         lambda token: _parse_mineru_with_ocr_retry(
             MineruClient(token, cfg.mineru_model_version), file_path,
-            extract_dir, note_sink=note_sink),
+            extract_dir, note_sink=note_sink, boundary_mode=mode,
+            num_template=num_template),
         fallback=cfg.mineru_token)
+    raw_md, page_meta = _apply_image_page_boundaries(
+        raw_md, extract_dir, boundary_mode=mode,
+        image_page_count=image_page_count, ocr_backend=OCR_MINERU,
+        note_sink=note_sink)
     raw_md = _clean_mineru_text(raw_md, source_path, note_sink=note_sink)
     raw_md = _repair_choice_images(raw_md, extract_dir, note_sink)
     _ensure_raw_text(raw_md, source_path)
@@ -4595,21 +4926,27 @@ def _convert_image(file_path: Path, cfg, keep_images: bool = True,
             raw_md, cfg, provider, include_solution=False,
             keep_images=keep_images, only_numbers=only_numbers,
             artifact_dir=extract_dir, name=source_stem,
-            num_template=num_template, note_sink=note_sink)
+            num_template=num_template, note_sink=note_sink,
+            boundary_mode=mode)
     else:
+        import blocksplit
         client = _make_llm_client(cfg, provider)
-        md = normalize(raw_md, client, include_solution=False,
+        llm_raw = raw_md.replace(blocksplit.SOURCE_PAGE_BREAK, "")
+        md = normalize(llm_raw, client, include_solution=False,
                        keep_images=keep_images, only_numbers=only_numbers)
     if keep_images:
         _check_preserved_image_refs(
             raw_md, md, note_sink=note_sink, include_solution=False,
-            only_numbers=only_numbers, num_template=num_template)
+            only_numbers=only_numbers, num_template=num_template,
+            boundary_mode=mode)
         md = _intercept_images(
             md, extract_dir, source_stem, note_sink=note_sink)
     # 图片这条路径**从不把原文落盘**（也不调 _cleanup_temp），所以 raw_md 只能
     # 从内存里给。照片/截图是 OCR 最易出错的一类输入，正是最该攒的语料。
     corpus.archive(extract_dir, source_stem,
-                   meta=_corpus_meta(cfg, engine, num_template),
+                   meta=_corpus_meta(
+                       cfg, engine, num_template, ocr_meta=page_meta,
+                       boundary_mode=mode),
                    texts={f"{source_stem}_raw.md": raw_md,
                           f"{source_stem}_normalized.md": md})
     return _ensure_normalized(md, source_path)
@@ -4636,12 +4973,14 @@ def _image_ref_counter(text: str):
 
 def _expected_image_refs(raw_md: str, *, include_solution: bool,
                          only_numbers=None, num_template: str = "",
-                         blocks=None):
+                         blocks=None,
+                         boundary_mode: str = BOUNDARY_AUTO):
     """算出本次输出范围内理应保留的图片引用；无法可靠切题时返回 ``None``。
 
     全量且带解析时无需判断归属，原文引用全部守恒。其余情形要排除未选题号或答案区
     中本来就不要求输出的图片，避免把“按用户要求省略”误报成模型丢图。
     """
+    mode = normalize_boundary_mode(boundary_mode)
     provided_blocks = blocks is not None
     if blocks is None and include_solution and not only_numbers:
         return _image_ref_counter(raw_md)
@@ -4650,7 +4989,8 @@ def _expected_image_refs(raw_md: str, *, include_solution: bool,
         try:
             import blocksplit
 
-            blocks = blocksplit.split_blocks(raw_md, num_template=num_template)
+            blocks = blocksplit.split_blocks(
+                raw_md, num_template=num_template, boundary_mode=mode)
         except Exception as exc:
             logger.warning("[WARN] 图片引用守恒检查无法切题，已跳过: %s", exc)
             return None
@@ -4677,7 +5017,8 @@ def _expected_image_refs(raw_md: str, *, include_solution: bool,
         try:
             import blocksplit
 
-            paired = blocksplit.pair_blocks(blocks)
+            paired = blocksplit.pair_blocks(
+                blocks, check_number_gaps=(mode != BOUNDARY_WHITELIST))
             selected = []
             for stem, solution in paired.paired:
                 if wanted and stem.number not in wanted:
@@ -4694,7 +5035,8 @@ def _expected_image_refs(raw_md: str, *, include_solution: bool,
 def _check_preserved_image_refs(raw_md: str, normalized_md: str, *,
                                 note_sink=None, include_solution: bool,
                                 only_numbers=None, num_template: str = "",
-                                blocks=None) -> None:
+                                blocks=None,
+                                boundary_mode: str = BOUNDARY_AUTO) -> None:
     """阻止 OCR 原文中的题图被规范化模型静默删掉。
 
     不自动把引用塞回结果：脱离题块归属后盲目补图可能把 A 题的图挂到 B 题。这里只
@@ -4702,7 +5044,8 @@ def _check_preserved_image_refs(raw_md: str, normalized_md: str, *,
     """
     expected = _expected_image_refs(
         raw_md, include_solution=include_solution,
-        only_numbers=only_numbers, num_template=num_template, blocks=blocks)
+        only_numbers=only_numbers, num_template=num_template, blocks=blocks,
+        boundary_mode=boundary_mode)
     if not expected:
         return
     missing = expected - _image_ref_counter(normalized_md)

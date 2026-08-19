@@ -51,9 +51,19 @@
           <option value="no_ai" selected>全部不送入 AI，机械渲染（默认）</option>
         </select>
       </label>
-      <label class="conv-sol">题号模板（可选）
+      <label class="conv-sol" title="选择强制白名单后会自动使用逐题识别；它不改变切块后是否送 AI">
+        题号边界
+        <select id="batch-boundary-mode" class="input" style="width:auto;margin-left:6px">
+          <option value="auto" selected>智能识别</option>
+          <option value="whitelist">强制白名单</option>
+        </select>
+      </label>
+      <label class="conv-sol"
+             title="智能识别时用于指定题号写法；强制白名单时作为内置 x.、第x题、第X题之外的额外白名单">
+        题号模板（可选）
         <input type="text" id="batch-num-template" class="input"
-               style="width:200px;margin-left:6px" placeholder="留空=自动判定，如 第X题">
+               style="width:220px;margin-left:6px"
+               placeholder="智能模式=指定格式；白名单=额外格式">
       </label>
     </div>
 

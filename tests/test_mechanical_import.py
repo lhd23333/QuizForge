@@ -973,6 +973,98 @@ ${2}.{x}=1$
         self.assertIn("已回退到自动判定", fallback_note)
         self.assertNotIn(qualcheck.MANUAL_REVIEW_MARKER, fallback_note)
 
+    def test_whitelist_boundaries_are_union_and_preserve_explicit_context(self):
+        raw = """# 一、选择题
+A 组
+1．第一题
+第 7 题 第二题
+第 三 题 第三题
+【第9题】第四题
+# 参考答案
+1. 【答案】甲
+"""
+
+        blocks = blocksplit.split_blocks(
+            raw, boundary_mode="whitelist", num_template="【第x题】")
+
+        self.assertEqual([1, 7, 3, 9, 1], [block.number for block in blocks])
+        self.assertTrue(all(block.section == "一、选择题" for block in blocks))
+        self.assertTrue(all(block.group == "A" for block in blocks[:4]))
+        self.assertTrue(all(block.zone == "stem" for block in blocks[:4]))
+        self.assertEqual("solution", blocks[-1].zone)
+        self.assertIsNone(blocks[-1].group)
+
+    def test_whitelist_keeps_repeated_out_of_order_boundaries_as_four_blocks(self):
+        raw = """1. 第一块
+7. 第二块
+2. 第三块
+7. 第四块
+"""
+
+        blocks = blockpipe.split_and_prep(raw, boundary_mode="whitelist")
+        groups = blockpipe.group_blocks(blocks, boundary_mode="whitelist")
+
+        self.assertEqual([1, 7, 2, 7], [block.number for block in blocks])
+        self.assertEqual([1, 7, 2, 7], [stem.number for stem, _ in groups])
+        self.assertEqual(4, len(blocks))
+
+    def test_whitelist_zero_or_one_match_never_falls_back_to_auto(self):
+        no_match = "1、第一题\n2、第二题"
+        one_match = "1. 第一题\n2、仍属于第一题正文\n3、仍属于第一题正文"
+
+        empty, empty_note = blocksplit.split_blocks_with_note(
+            no_match, boundary_mode="whitelist")
+        single, single_note = blocksplit.split_blocks_with_note(
+            one_match, boundary_mode="whitelist")
+
+        self.assertEqual([], empty)
+        self.assertIn("第 1 页未找到白名单题号", empty_note)
+        self.assertEqual([1], [block.number for block in single])
+        self.assertIn("2、仍属于第一题正文", single[0].text)
+        self.assertNotIn("已回退", single_note)
+
+    def test_whitelist_disables_numbering_checks_but_keeps_other_warnings(self):
+        raw = """一、选择题，本题共5小题
+1. 请选择正确答案 ( ) (A) 甲 (B) 乙
+7. 普通题目
+"""
+        notes = []
+
+        blocks = blockpipe.split_and_prep(
+            raw, boundary_mode="whitelist", note_sink=notes.append)
+
+        self.assertEqual([1, 7], [block.number for block in blocks])
+        self.assertTrue(any("选项不足四项" in note for note in notes))
+        self.assertFalse(any("题号不连续" in note for note in notes))
+        self.assertFalse(any("题数与原卷声明不符" in note for note in notes))
+
+    def test_whitelist_page_break_drops_next_page_prefix_without_pollution(self):
+        raw = ("1. 第一页题目\n第一页正文\n"
+               f"{blocksplit.SOURCE_PAGE_BREAK}\n"
+               "第二页页眉杂文\n2. 第二页题目\n第二页正文")
+
+        blocks, _note = blocksplit.split_blocks_with_note(
+            raw, boundary_mode="whitelist")
+
+        self.assertEqual([1, 2], [block.number for block in blocks])
+        self.assertNotIn("第二页页眉杂文", blocks[0].text)
+        self.assertNotIn("第二页页眉杂文", blocks[1].text)
+        self.assertTrue(all(
+            blocksplit.SOURCE_PAGE_BREAK not in block.text for block in blocks))
+
+    def test_whitelist_page_without_boundary_requires_manual_review(self):
+        raw = ("1. 第一页题目\n"
+               f"{blocksplit.SOURCE_PAGE_BREAK}\n"
+               "第二页只有无法归属的正文")
+
+        blocks, note = blocksplit.split_blocks_with_note(
+            raw, boundary_mode="whitelist")
+
+        self.assertEqual([1], [block.number for block in blocks])
+        self.assertNotIn("第二页只有无法归属的正文", blocks[0].text)
+        self.assertIn("第 2 页未找到白名单题号，未归入题目", note)
+        self.assertIn(qualcheck.MANUAL_REVIEW_MARKER, note)
+
     def test_significant_orphan_solution_is_reported_but_short_answer_is_quiet(self):
         long_solution = "无法配对但不得静默丢失的详细推导。" * 20
         raw = f"""1. 第一题题干

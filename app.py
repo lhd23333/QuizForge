@@ -2395,6 +2395,10 @@ def folder_paper_reconvert(cid):
     with _jobs_lock:
         _jobs[job_id] = {"status": "pending", "md": None, "error": None,
                          "filename": exam.name, "path": str(exam),
+                         "boundary_mode": _BOUNDARY_MODE_AUTO,
+                         "image_page_count": 0,
+                         "exam_image_page_count": 0,
+                         "solution_image_page_count": 0,
                          "history_id": history_id}
         _persist_job(job_id, _jobs[job_id])
     grp = {
@@ -2404,7 +2408,9 @@ def folder_paper_reconvert(cid):
         "only_numbers": None, "filename": disp_name,
         "engine": _DEFAULT_ENGINE, "ocr_backend": ocr_backend,
         "block_mode": _parse_block_mode(""),
-        "num_template": "",
+        "num_template": "", "boundary_mode": _BOUNDARY_MODE_AUTO,
+        "image_page_count": 0, "exam_image_page_count": 0,
+        "solution_image_page_count": 0,
         "cleanup_paths": [],    # 不删原卷文件——它们在题库目录里，不是临时上传件
         "status": "pending", "md": None, "error": None,
         "pending": None, "note": "",
@@ -2545,6 +2551,15 @@ def restore_persisted_tasks() -> None:
                 "solution_path": group.get("solution_path"),
                 "ocr_backend": _parse_ocr_backend(
                     group.get("ocr_backend", "")),
+                "boundary_mode": _parse_boundary_mode(
+                    group.get("boundary_mode", "")),
+                "image_page_count": max(
+                    0, int(group.get("image_page_count") or 0)),
+                "exam_image_page_count": max(0, int(
+                    group.get("exam_image_page_count",
+                              group.get("image_page_count")) or 0)),
+                "solution_image_page_count": max(
+                    0, int(group.get("solution_image_page_count") or 0)),
             }
             restored_jobs[job_id] = job
             changed_jobs.append((job_id, job))
@@ -2633,11 +2648,23 @@ _BLOCK_MODE_MANUAL = "manual"
 _BLOCK_MODE_NO_AI = "no_ai"
 _BLOCK_MODES = (_BLOCK_MODE_ALL_AI, _BLOCK_MODE_MANUAL, _BLOCK_MODE_NO_AI)
 
+# 切题边界与“切完后是否送 AI”是两件独立的事。旧任务没有这个字段，必须稳定
+# 回落到智能识别，不能因为升级后读取不到键而改变既有任务的切题语义。
+_BOUNDARY_MODE_AUTO = "auto"
+_BOUNDARY_MODE_WHITELIST = "whitelist"
+_BOUNDARY_MODES = (_BOUNDARY_MODE_AUTO, _BOUNDARY_MODE_WHITELIST)
+
 
 def _parse_block_mode(raw: str) -> str:
     """表单里的拆题处理方式。同 _parse_engine：不认识的值一律落回默认。"""
     val = (raw or "").strip()
     return val if val in _BLOCK_MODES else _BLOCK_MODE_NO_AI
+
+
+def _parse_boundary_mode(raw: str) -> str:
+    """表单里的题号边界策略；未知值按旧版智能识别处理。"""
+    val = (raw or "").strip()
+    return val if val in _BOUNDARY_MODES else _BOUNDARY_MODE_AUTO
 
 
 def _parse_num_template(raw: str) -> str:
@@ -2688,7 +2715,11 @@ def _archive_group_markdown(group: dict, markdown: str,
     history_store.attach_markdown(
         record_id, markdown,
         title=Path(group.get("filename") or "识别记录").stem,
-        metadata={"include_solution": bool(group.get("include_solution"))},
+        metadata={
+            "include_solution": bool(group.get("include_solution")),
+            "boundary_mode": _parse_boundary_mode(
+                group.get("boundary_mode", "")),
+        },
     )
 
 
@@ -2726,7 +2757,10 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
                     only_numbers=None, provider=None,
                     engine: str = _DEFAULT_ENGINE,
                     num_template: str = "",
-                    ocr_backend: str = _DEFAULT_OCR_BACKEND):
+                    ocr_backend: str = _DEFAULT_OCR_BACKEND,
+                    boundary_mode: str = _BOUNDARY_MODE_AUTO,
+                    image_page_count: int = 0,
+                    solution_image_page_count: int = 0):
     """后台线程：跑转换，结果写回 _jobs。
 
     solution_path 非空 → 走「题干+解析双文件」路径，按题号关联解析。
@@ -2735,6 +2769,10 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
     上传文件不在此删除——保留供预览对照，由下次转换前 _clean_uploads 清理。
     """
     notes: list[str] = []
+    boundary_mode = _parse_boundary_mode(boundary_mode)
+    image_page_count = max(0, int(image_page_count or 0))
+    solution_image_page_count = max(
+        0, int(solution_image_page_count or 0))
     try:
         if solution_path is not None:
             md = _convert_with_ocr_credentials(
@@ -2743,6 +2781,9 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
                     saved_path, solution_path, mineru_token=tok,
                     only_numbers=only_numbers,
                     provider=provider, engine=engine, num_template=num_template,
+                    boundary_mode=boundary_mode,
+                    exam_image_page_count=image_page_count,
+                    solution_image_page_count=solution_image_page_count,
                     note_sink=notes.append, ocr_backend=ocr_backend,
                     doc2x_api_key=doc2x_key))
         else:
@@ -2752,7 +2793,8 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
                     saved_path, mineru_token=tok,
                     include_solution=include_solution,
                     only_numbers=only_numbers, provider=provider, engine=engine,
-                    num_template=num_template, note_sink=notes.append,
+                    num_template=num_template, boundary_mode=boundary_mode,
+                    image_page_count=image_page_count, note_sink=notes.append,
                     ocr_backend=ocr_backend, doc2x_api_key=doc2x_key))
         with _jobs_lock:
             history_job = dict(_jobs.get(job_id) or {})
@@ -2809,6 +2851,14 @@ def _convert_one_group(batch_id: str, g: dict):
     engine = g.get("engine") or _DEFAULT_ENGINE
     ocr_backend = _parse_ocr_backend(g.get("ocr_backend", ""))
     num_template = g.get("num_template") or ""
+    boundary_mode = _parse_boundary_mode(g.get("boundary_mode", ""))
+    if boundary_mode == _BOUNDARY_MODE_WHITELIST:
+        engine = converter.ENGINE_BLOCK
+    image_page_count = max(0, int(g.get("image_page_count") or 0))
+    exam_image_page_count = max(0, int(
+        g.get("exam_image_page_count", image_page_count) or 0))
+    solution_image_page_count = max(
+        0, int(g.get("solution_image_page_count") or 0))
     block_mode = g.get("block_mode") or _BLOCK_MODE_NO_AI
     with _batch_jobs_lock:
         batch = _batch_jobs.get(batch_id)
@@ -2829,6 +2879,7 @@ def _convert_one_group(batch_id: str, g: dict):
                 pending = converter.convert_collection_unit_to_blocks(
                     collection_raw_path,
                     num_template=num_template,
+                    boundary_mode=boundary_mode,
                     only_numbers=g["only_numbers"],
                     note_sink=notes.append,
                     source_name=g.get("filename") or "合集单元",
@@ -2840,7 +2891,10 @@ def _convert_one_group(batch_id: str, g: dict):
                     ocr_backend,
                     lambda tok, doc2x_key: converter.convert_exam_and_solution_to_blocks(
                         g["file_path"], g["solution_path"], mineru_token=tok,
-                        num_template=num_template, only_numbers=g["only_numbers"],
+                        num_template=num_template, boundary_mode=boundary_mode,
+                        only_numbers=g["only_numbers"],
+                        exam_image_page_count=exam_image_page_count,
+                        solution_image_page_count=solution_image_page_count,
                         note_sink=notes.append, ocr_backend=ocr_backend,
                         doc2x_api_key=doc2x_key))
             else:
@@ -2848,7 +2902,8 @@ def _convert_one_group(batch_id: str, g: dict):
                     ocr_backend,
                     lambda tok, doc2x_key: converter.convert_file_to_blocks(
                         g["file_path"], mineru_token=tok,
-                        num_template=num_template,
+                        num_template=num_template, boundary_mode=boundary_mode,
+                        image_page_count=image_page_count,
                         only_numbers=g["only_numbers"], note_sink=notes.append,
                         ocr_backend=ocr_backend, doc2x_api_key=doc2x_key))
             if block_mode == _BLOCK_MODE_MANUAL:
@@ -2881,7 +2936,8 @@ def _convert_one_group(batch_id: str, g: dict):
                 include_solution=g["include_solution"],
                 only_numbers=g["only_numbers"],
                 provider=provider, engine=engine,
-                num_template=num_template, note_sink=notes.append,
+                num_template=num_template, boundary_mode=boundary_mode,
+                note_sink=notes.append,
                 source_name=g.get("filename") or "合集单元",
                 ocr_backend=ocr_backend,
                 ocr_meta=g.get("collection_ocr_meta") or {})
@@ -2892,6 +2948,9 @@ def _convert_one_group(batch_id: str, g: dict):
                     g["file_path"], g["solution_path"], mineru_token=tok,
                     only_numbers=g["only_numbers"],
                     provider=provider, engine=engine, num_template=num_template,
+                    boundary_mode=boundary_mode,
+                    exam_image_page_count=exam_image_page_count,
+                    solution_image_page_count=solution_image_page_count,
                     note_sink=notes.append, ocr_backend=ocr_backend,
                     doc2x_api_key=doc2x_key))
         else:
@@ -2902,6 +2961,8 @@ def _convert_one_group(batch_id: str, g: dict):
                     include_solution=g["include_solution"],
                     only_numbers=g["only_numbers"],
                     provider=provider, engine=engine, num_template=num_template,
+                    boundary_mode=boundary_mode,
+                    image_page_count=image_page_count,
                     note_sink=notes.append, ocr_backend=ocr_backend,
                     doc2x_api_key=doc2x_key))
         with _batch_jobs_lock:
@@ -3103,11 +3164,23 @@ def _expand_collection_parent_inner(batch_id: str, parent: dict) -> None:
                                      or parent.get("include_solution", False)),
                 "only_numbers": parent.get("only_numbers"),
                 "filename": filename,
-                "engine": parent.get("engine") or _DEFAULT_ENGINE,
+                "engine": (converter.ENGINE_BLOCK
+                           if _parse_boundary_mode(
+                               parent.get("boundary_mode", ""))
+                           == _BOUNDARY_MODE_WHITELIST
+                           else parent.get("engine") or _DEFAULT_ENGINE),
                 "ocr_backend": _parse_ocr_backend(
                     parent.get("ocr_backend", "")),
                 "block_mode": parent.get("block_mode") or _BLOCK_MODE_NO_AI,
                 "num_template": parent.get("num_template") or "",
+                # 新提交的白名单模式不会进入无书签结构展开，但旧快照可能已有
+                # 进行中的父组；子组仍复制原值，避免恢复后悄悄改回智能识别。
+                "boundary_mode": _parse_boundary_mode(
+                    parent.get("boundary_mode", "")),
+                # 结构合集子组读取整本 OCR 的 Markdown，不属于图片序列直接转换。
+                "image_page_count": 0,
+                "exam_image_page_count": 0,
+                "solution_image_page_count": 0,
                 # 原始两本合集只挂在第一个子组上，整批终态时统一删；
                 # 其余子组不重复登记整本大文件。
                 "cleanup_paths": (list(parent.get("cleanup_paths") or [])
@@ -3140,6 +3213,10 @@ def _expand_collection_parent_inner(batch_id: str, parent: dict) -> None:
                 "filename": filename, "path": parent["file_path"],
                 "solution_path": parent.get("solution_path"),
                 "ocr_backend": child["ocr_backend"],
+                "boundary_mode": child["boundary_mode"],
+                "image_page_count": 0,
+                "exam_image_page_count": 0,
+                "solution_image_page_count": 0,
                 "history_id": child["history_id"],
             }))
 
@@ -3393,6 +3470,9 @@ def convert_start():
     # 识别引擎：整篇规范化（默认）/ 逐块识别
     engine = _parse_engine(request.form.get("engine", ""))
     ocr_backend = _parse_ocr_backend(request.form.get("ocr_backend", ""))
+    boundary_mode = _parse_boundary_mode(request.form.get("boundary_mode", ""))
+    if boundary_mode == _BOUNDARY_MODE_WHITELIST:
+        engine = converter.ENGINE_BLOCK
     # 题号模板（仅逐块识别有效）。写法不合法就当场退回，别等后台线程才失败
     try:
         num_template = _parse_num_template(request.form.get("num_template", ""))
@@ -3428,6 +3508,9 @@ def convert_start():
     solution_path = None
     if sol_file and sol_file.filename:
         solution_path = _save(sol_file, uuid.uuid4().hex)
+    image_page_count = 1 if converter.is_image_file(saved_path) else 0
+    solution_image_page_count = (
+        1 if solution_path and converter.is_image_file(solution_path) else 0)
 
     try:
         history_id = _history_record_for_sources(
@@ -3454,12 +3537,17 @@ def convert_start():
                          "include_solution": include_solution,
                          "only_numbers": only_numbers, "note": "",
                          "ocr_backend": ocr_backend,
+                         "boundary_mode": boundary_mode,
+                         "image_page_count": image_page_count,
+                         "exam_image_page_count": image_page_count,
+                         "solution_image_page_count": solution_image_page_count,
                          "history_id": history_id}
         _persist_job(job_id, _jobs[job_id])
     threading.Thread(target=_convert_worker,
                      args=(job_id, saved_path, orig_filename, include_solution,
                            solution_path, only_numbers, provider, engine,
-                           num_template, ocr_backend),
+                           num_template, ocr_backend, boundary_mode,
+                           image_page_count, solution_image_page_count),
                      daemon=True).start()
     return jsonify(ok=True, job_id=job_id, filename=orig_filename)
 
@@ -3665,6 +3753,7 @@ def batch_convert_create():
 
     # 拆题选项整批统一（前端只在逐题识别时才发这两个字段）
     block_mode = _parse_block_mode(request.form.get("block_mode", ""))
+    boundary_mode = _parse_boundary_mode(request.form.get("boundary_mode", ""))
     # OCR 服务默认整批统一；保留组内字段是为了程序化调用和将来的细粒度重试。
     batch_ocr_backend = _parse_ocr_backend(request.form.get("ocr_backend", ""))
     # 落点与免审开关，整批统一。层层依赖照抄服务器版：没勾上一层的，下一层直接
@@ -3702,10 +3791,10 @@ def batch_convert_create():
         return [_save(f) for f in files if f and f.filename]
 
     def _resolve_input(paths, generated_paths):
-        """把一组已落盘的文件解析成单个待转换文件路径：
-        - 空 → None（无此文件）；
-        - 单个 → 原样返回（PDF/Word/单图走各自原有分支）；
-        - 多个 → 若全为图片，按序合成一个 PDF（复用 PDF 转换链路）；
+        """把一组已落盘的文件解析成 ``(转换路径, 图片页数)``：
+        - 空 → ``(None, 0)``（无此文件）；
+        - 单个 → 原样返回；单图记 1，PDF/Word 记 0；
+        - 多个 → 若全为图片，按序合成一个 PDF，并记录原图片页数；
           含非图片的多文件明确拒绝。PDF/Word 不能安全拼接，取第一个会让其余文件
           在任务显示成功后被清理，属于不可接受的静默丢失。
 
@@ -3713,14 +3802,14 @@ def batch_convert_create():
         ——见下面循环里的注释。
         """
         if not paths:
-            return None
+            return None, 0
         if len(paths) == 1:
-            return paths[0]
+            return paths[0], (1 if converter.is_image_file(paths[0]) else 0)
         if all(converter.is_image_file(p) for p in paths):
             merged = config.BATCH_UPLOAD_DIR / f"{uuid.uuid4().hex}.pdf"
             generated_paths.append(str(merged))
             converter.images_to_pdf(paths, merged)
-            return str(merged)
+            return str(merged), len(paths)
         raise converter.ConvertError(
             "同一组同一侧选择多个文件时只支持全部为图片；"
             "多个 PDF/Word 或图片与文档混选，请拆成不同任务组")
@@ -3746,6 +3835,8 @@ def batch_convert_create():
         # 引擎可整批统一给（表单顶层 engine），也可每组单独给，组内优先
         engine = _parse_engine(request.form.get(f"groups[{i}][engine]", "")
                                or request.form.get("engine", ""))
+        if boundary_mode == _BOUNDARY_MODE_WHITELIST:
+            engine = converter.ENGINE_BLOCK
         ocr_backend = _parse_ocr_backend(
             request.form.get(f"groups[{i}][ocr_backend]", "")
             or batch_ocr_backend)
@@ -3771,6 +3862,13 @@ def batch_convert_create():
                     file_list[0], sol_list[0] if sol_list else None,
                     config.BATCH_UPLOAD_DIR, max_parts=_MAX_BATCH_GROUPS)
             except pdf_collection.NoBookmarksError:
+                if boundary_mode == _BOUNDARY_MODE_WHITELIST:
+                    _discard(list(file_list) + list(sol_list))
+                    reason = ("强制白名单不能用于无书签合集：内容结构展开依赖"
+                              "从 1 开始的连续题号，请关闭合集模式或改用智能识别")
+                    failed.append((i + 1, reason))
+                    logger.warning("第 %d 组建组失败，已跳过：%s", i + 1, reason)
+                    continue
                 # 结构合集的实际份数要等 OCR 后才知道。先登记一个
                 # 可持久化占位组，应用重启时不会自动重放付费识别。
                 prepared.append({
@@ -3781,6 +3879,10 @@ def batch_convert_create():
                     "filename": (request.files.getlist(
                         f"groups[{i}][file]")[0].filename or "无书签合集.pdf"),
                     "engine": engine, "ocr_backend": ocr_backend,
+                    "boundary_mode": boundary_mode,
+                    "image_page_count": 0,
+                    "exam_image_page_count": 0,
+                    "solution_image_page_count": 0,
                     "cleanup_paths": list(file_list) + list(sol_list),
                     "cleanup_dirs": [],
                     "collection_mode": True,
@@ -3810,6 +3912,10 @@ def batch_convert_create():
                     "only_numbers": only_numbers,
                     "filename": f"{part.title}.pdf",
                     "engine": engine, "ocr_backend": ocr_backend,
+                    "boundary_mode": boundary_mode,
+                    "image_page_count": 0,
+                    "exam_image_page_count": 0,
+                    "solution_image_page_count": 0,
                     "cleanup_paths": cleanup,
                     "cleanup_dirs": [],
                     "collection_mode": True,
@@ -3826,8 +3932,10 @@ def batch_convert_create():
         # 前面几百组已落盘的文件还全留在 uploads/batch/ 里没人清。
         generated_paths = []
         try:
-            file_path = _resolve_input(file_list, generated_paths)
-            solution_path = _resolve_input(sol_list, generated_paths)
+            file_path, image_page_count = _resolve_input(
+                file_list, generated_paths)
+            solution_path, solution_image_page_count = _resolve_input(
+                sol_list, generated_paths)
         except converter.ConvertError as e:
             _discard(list(file_list) + list(sol_list) + generated_paths)
             failed.append((i + 1, str(e)))
@@ -3852,6 +3960,10 @@ def batch_convert_create():
             "include_solution": include_solution,
             "only_numbers": only_numbers, "filename": disp_name,
             "engine": engine, "ocr_backend": ocr_backend,
+            "boundary_mode": boundary_mode,
+            "image_page_count": image_page_count,
+            "exam_image_page_count": image_page_count,
+            "solution_image_page_count": solution_image_page_count,
             "cleanup_paths": extra, "cleanup_dirs": [],
             "collection_mode": False,
             "collection_strategy": "",
@@ -3898,6 +4010,10 @@ def batch_convert_create():
                 "status": "pending", "md": None, "error": None,
                 "filename": item["filename"], "path": item["file_path"],
                 "ocr_backend": item["ocr_backend"],
+                "boundary_mode": item["boundary_mode"],
+                "image_page_count": item["image_page_count"],
+                "exam_image_page_count": item["exam_image_page_count"],
+                "solution_image_page_count": item["solution_image_page_count"],
                 "history_id": item["history_id"],
             }
             _persist_job(job_id, _jobs[job_id])
@@ -3910,6 +4026,10 @@ def batch_convert_create():
             "filename": item["filename"],
             "engine": item["engine"], "ocr_backend": item["ocr_backend"],
             "block_mode": block_mode, "num_template": num_template,
+            "boundary_mode": item["boundary_mode"],
+            "image_page_count": item["image_page_count"],
+            "exam_image_page_count": item["exam_image_page_count"],
+            "solution_image_page_count": item["solution_image_page_count"],
             "cleanup_paths": item["cleanup_paths"],
             "cleanup_dirs": item.get("cleanup_dirs") or [],
             "collection_mode": item["collection_mode"],
@@ -4078,11 +4198,13 @@ def batch_group_review(batch_id, gid):
         include_solution = bool(g.get("include_solution"))
         split_note = g.get("note") or ""
         num_template = g.get("num_template") or ""
+        boundary_mode = _parse_boundary_mode(g.get("boundary_mode", ""))
         # 批量创建时勾了「该批全部放入同一文件夹」的，把名字带到校对页预填
         pack_folder_name = batch.get("pack_folder_name") or ""
 
     preview, all_cols, missing_numbers = _build_import_preview(
-        md, include_solution=include_solution, only_numbers=only_numbers)
+        md, include_solution=include_solution, only_numbers=only_numbers,
+        boundary_mode=boundary_mode)
     batch_tag = Path(filename).stem
     return render_template(
         "import.html", preview=preview, raw=md, batch_tag=batch_tag,
@@ -4090,7 +4212,8 @@ def batch_group_review(batch_id, gid):
         batch_id=batch_id, batch_gid=gid, queue_filename=filename,
         pack_folder_name=pack_folder_name, batch_source=batch_tag,
         missing_numbers=missing_numbers, split_note=split_note,
-        num_template=num_template, include_solution=include_solution)
+        num_template=num_template, boundary_mode=boundary_mode,
+        include_solution=include_solution)
 
 
 @app.route("/batch/<batch_id>/group/<int:gid>/skip", methods=["POST"])
@@ -4126,6 +4249,9 @@ def batch_group_reconvert(batch_id, gid):
     only_numbers_raw = request.form.get("only_numbers", "")
     tpl_raw = request.form.get("num_template", "")
     tpl_clear = request.form.get("num_template_clear") in ("1", "true", "on")
+    # 缺字段表示旧表单或只修改了别的选项，必须保留任务原值；select 显式提交时
+    # 才更新。这样重转不会把白名单任务悄悄改回智能识别。
+    boundary_raw = request.form.get("boundary_mode")
     refresh_imported = request.form.get("refresh_imported") in (
         "1", "true", "on")
     try:
@@ -4168,6 +4294,15 @@ def batch_group_reconvert(batch_id, gid):
         is_collection_parent = (
             g.get("collection_strategy") == "ocr_structure"
             and not g.get("collection_unit"))
+        boundary_mode = (_parse_boundary_mode(boundary_raw)
+                         if boundary_raw is not None
+                         else _parse_boundary_mode(g.get("boundary_mode", "")))
+        if (is_collection_parent
+                and boundary_mode == _BOUNDARY_MODE_WHITELIST):
+            flash("无书签合集的内容结构展开依赖连续题号，不能使用强制白名单", "err")
+            return redirect(url_for(
+                "batch_dashboard", batch_id=batch_id))
+        g["boundary_mode"] = boundary_mode
         if only_numbers_raw.strip():
             g["only_numbers"] = _parse_number_spec(only_numbers_raw)
         if tpl_clear:
@@ -4177,15 +4312,20 @@ def batch_group_reconvert(batch_id, gid):
         # 指定了模板但引擎还是整篇识别时，自动切到逐题识别——模板只在逐块路径
         # 有效（整篇路径的切题在 LLM 里做，没有代码层的题号正则可钉）。不切的话
         # 用户填了模板却毫无变化，看不出是引擎不对。
-        if g.get("num_template") and g.get("engine") != converter.ENGINE_BLOCK:
+        if ((g.get("num_template")
+             or boundary_mode == _BOUNDARY_MODE_WHITELIST)
+                and g.get("engine") != converter.ENGINE_BLOCK):
             g["engine"] = converter.ENGINE_BLOCK
-            flash("题号模板只在「逐题识别」下生效，已自动切换识别方式", "ok")
+            reason = ("强制白名单" if boundary_mode == _BOUNDARY_MODE_WHITELIST
+                      else "题号模板")
+            flash(f"{reason}只在「逐题识别」下生效，已自动切换识别方式", "ok")
         refresh_previous_items = None
         if is_imported_refresh and not g.get("refresh_in_progress"):
             previous_preview, _, previous_missing = _build_import_preview(
                 g.get("md") or "",
                 include_solution=g.get("include_solution", True),
                 only_numbers=g.get("only_numbers"),
+                boundary_mode=boundary_mode,
                 existing_fps=set(), all_cols=[])
             previous_chosen = [item for item in previous_preview
                                if not item["dup"]]
@@ -4226,7 +4366,11 @@ def batch_group_reconvert(batch_id, gid):
         if job_id in _jobs:
             _jobs[job_id].update(
                 status="pending" if is_collection_parent else "converting",
-                md=None, error=None, history_id=history_id)
+                md=None, error=None, history_id=history_id,
+                boundary_mode=g["boundary_mode"],
+                engine=g.get("engine"),
+                num_template=g.get("num_template") or "",
+                only_numbers=g.get("only_numbers"))
             _persist_job(job_id, _jobs[job_id])
     with _batch_jobs_lock:
         batch = _batch_jobs.get(batch_id)
@@ -4820,22 +4964,30 @@ def history_reimport(record_id):
     batch_id = uuid.uuid4().hex
     job_id = uuid.uuid4().hex
     title = record.get("title") or "历史识别结果"
-    ocr_backend = _parse_ocr_backend(
-        (record.get("metadata") or {}).get("ocr_backend", ""))
+    metadata = record.get("metadata") or {}
+    ocr_backend = _parse_ocr_backend(metadata.get("ocr_backend", ""))
+    boundary_mode = _parse_boundary_mode(metadata.get("boundary_mode", ""))
+    include_solution = bool(metadata.get("include_solution", True))
     job = {
         "status": "done", "md": markdown, "error": None,
         "filename": f"{title}.md", "path": str(source),
-        "solution_path": None, "include_solution": True,
+        "solution_path": None, "include_solution": include_solution,
         "only_numbers": None, "note": "", "ocr_backend": ocr_backend,
+        "boundary_mode": boundary_mode,
+        "image_page_count": 0, "exam_image_page_count": 0,
+        "solution_image_page_count": 0,
         "history_id": record_id, "history_reimport": True,
         "history_source_name": first_file["name"],
     }
     group = {
         "gid": 0, "job_id": job_id, "file_path": str(source),
-        "solution_path": None, "include_solution": True,
+        "solution_path": None, "include_solution": include_solution,
         "only_numbers": None, "filename": f"{title}.md",
         "engine": _DEFAULT_ENGINE, "ocr_backend": ocr_backend,
         "block_mode": _BLOCK_MODE_NO_AI, "num_template": "",
+        "boundary_mode": boundary_mode,
+        "image_page_count": 0, "exam_image_page_count": 0,
+        "solution_image_page_count": 0,
         "cleanup_paths": [], "cleanup_dirs": [],
         "collection_mode": False, "collection_strategy": "",
         "collection_unit": False, "collection_raw_path": None,
@@ -5487,14 +5639,15 @@ def settings_llm():
 
 def _build_import_preview(raw: str, *, include_solution: bool = True,
                           only_numbers=None, existing_fps=None,
-                          all_cols=None):
+                          all_cols=None,
+                          boundary_mode: str = _BOUNDARY_MODE_AUTO):
     """把规范化 md 文本切成预览题卡列表，附查重标记。
 
     返回 `(preview, all_cols, missing_numbers)`。单文件预览与批量 md 队列共用，
     保证两条路的切分/查重规则一致。
 
     **解析归位分两种形态**（症状是解析全混在题干里）：
-      · 文档里有**两套题号**（题目 1..N 之后答案又从 1 数一遍，docx/PDF 卷子的
+      · 智能模式下，文档里有**两套题号**（题目 1..N 之后答案又从 1 数一遍，docx/PDF 卷子的
         常见排版）→ `importer.pair_duplicate_numbering` 按题号把后一套配成前一套
         的解析。这一档与 include_solution 无关地先做：要丢解析也得先知道哪半是
         解析，否则那一半会当成题留在库里。
@@ -5502,16 +5655,20 @@ def _build_import_preview(raw: str, *, include_solution: bool = True,
         （`split_solution(scan_markers=True)`）。
     `include_solution=False`（用户选了「丢弃解析」）时两档都照切，只是切出来的
     解析扔掉、不入库——比「假装没看见」稳，也免得答案文字残留在题干里。
+    强制白名单允许跳号、重复和回卷，因此不把第二套题号猜成答案区；只保留转换器
+    已经输出的顶层题块，再在每块内部识别显式的答案/解析标记。
     """
+    boundary_mode = _parse_boundary_mode(boundary_mode)
     # 两套题号先试：`split_questions` 取最长递增序列，第二套题号编号更小会被当成
     # 小问丢掉（那是它对的行为），所以两套题号必须由 split_questions_with_restart
     # 单独切一次。配好对之后 blocks 只剩前一套，解析由 paired 提供。
-    restart = importer.split_questions_with_restart(raw)
     paired = None
-    if restart is not None:
-        rblocks, cut = restart
-        paired = importer.pair_duplicate_numbering(
-            [mechfix.fix_subq_parens(b) for b in rblocks], cut)
+    if boundary_mode == _BOUNDARY_MODE_AUTO:
+        restart = importer.split_questions_with_restart(raw)
+        if restart is not None:
+            rblocks, cut = restart
+            paired = importer.pair_duplicate_numbering(
+                [mechfix.fix_subq_parens(b) for b in rblocks], cut)
     if paired is not None:
         blocks = [b for b, _ in paired]
         pre_solutions = [s for _, s in paired]
@@ -5612,8 +5769,11 @@ def _build_import_preview(raw: str, *, include_solution: bool = True,
         miss = sorted(set(only_numbers) - found_numbers)
         if miss:
             missing_numbers = miss
-    elif len(found_numbers) >= 2:
-        # 全卷导入也必须报自然题号断档。此前只在用户手动勾“指定题号”时检查，
+    elif (boundary_mode == _BOUNDARY_MODE_AUTO
+          and len(found_numbers) >= 2):
+        # 智能模式的全卷导入必须报自然题号断档。白名单模式刻意允许跳号；但上面
+        # only_numbers 是用户明确点名要取的题，两种模式都必须报告显式缺失。
+        # 此前只在用户手动勾“指定题号”时检查，
         # 2025 三份真卷分别漏 3/12/18 题却全部显示可入库，质量门禁形同虚设。
         miss = sorted(set(range(min(found_numbers), max(found_numbers) + 1))
                       - found_numbers)
@@ -5834,9 +5994,11 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
             _persist_batch(batch_id, current)
         return
     try:
+        boundary_mode = _parse_boundary_mode(grp.get("boundary_mode", ""))
         preview, _, missing_numbers = _build_import_preview(
             md, include_solution=grp.get("include_solution", True),
             only_numbers=grp.get("only_numbers"),
+            boundary_mode=boundary_mode,
             # 免审路径既不需要历史题库指纹，也不渲染文件夹下拉；显式传空值让
             # 这条性能边界不依赖 _build_import_preview 将来的默认行为。
             existing_fps=set(), all_cols=[])
@@ -5870,7 +6032,7 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
         duplicate_numbers = sorted({
             number for number in numbered if numbered.count(number) > 1
         })
-        if duplicate_numbers:
+        if (boundary_mode == _BOUNDARY_MODE_AUTO and duplicate_numbers):
             shown = "、".join(str(number) for number in duplicate_numbers)
             _block_auto_import(
                 f"识别结果存在重复题号 {shown}，已停止自动入库，请重新转换后检查")
@@ -6088,19 +6250,24 @@ def import_md():
         split_note = ""
         include_solution = True
         only_numbers = None
+        boundary_mode = _BOUNDARY_MODE_AUTO
         with _jobs_lock:
             job = _jobs.get(job_id) if job_id else None
             if job:
                 split_note = job.get("note") or ""
                 include_solution = bool(job.get("include_solution", True))
                 only_numbers = job.get("only_numbers")
+                boundary_mode = _parse_boundary_mode(
+                    job.get("boundary_mode", ""))
         preview, all_cols, missing_numbers = _build_import_preview(
-            raw, include_solution=include_solution, only_numbers=only_numbers)
+            raw, include_solution=include_solution, only_numbers=only_numbers,
+            boundary_mode=boundary_mode)
         return render_template("import.html", preview=preview, raw=raw,
                                batch_tag=batch_tag, all_collections=all_cols,
                                job_id=job_id, batch_source=batch_source,
                                missing_numbers=missing_numbers,
                                split_note=split_note,
+                               boundary_mode=boundary_mode,
                                include_solution=include_solution)
 
     # confirm：按 body_<idx> 读逐题（用户改后）内容入库，不重新 split raw。

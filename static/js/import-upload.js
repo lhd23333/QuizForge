@@ -330,6 +330,7 @@
     const engSel = document.getElementById('batch-engine');
     const modeWrap = document.getElementById('batch-block-mode-wrap');
     const modeSel = document.getElementById('batch-block-mode');
+    const boundarySel = document.getElementById('batch-boundary-mode');
     const numTpl = document.getElementById('batch-num-template');
     const stayCb = document.getElementById('batch-stay');
     const folderBtn = document.getElementById('import-folder');
@@ -481,6 +482,12 @@
     // 那一项禁掉并回落——两处口径必须一致，不然用户选了「先人工审核拆题结果」
     // 却不生效，转换直接跑到底，看不出是被谁改的。
     function syncEngine() {
+      // 白名单是题号边界策略，与切块后是否送 AI 独立；但边界判断本身只存在于
+      // 逐题链路，所以用户选中后把引擎钉回 block，后端也做同样的兜底。
+      if (boundarySel && boundarySel.value === 'whitelist'
+          && engSel.value !== 'block') {
+        engSel.value = 'block';
+      }
       if (modeWrap) modeWrap.style.display = engSel.value === 'block' ? '' : 'none';
       if (!modeSel) return;
       const manualOpt = modeSel.querySelector('option[value="manual"]');
@@ -490,6 +497,7 @@
       if (noReview && modeSel.value === 'manual') modeSel.value = 'all_ai';
     }
     if (engSel) { engSel.addEventListener('change', syncEngine); }
+    if (boundarySel) { boundarySel.addEventListener('change', syncEngine); }
     if (autoCb) { autoCb.addEventListener('change', syncEngine); }
     if (engSel) syncEngine();
 
@@ -746,6 +754,7 @@
       if (engSel) fd.append('engine', engSel.value);
       if (engSel && engSel.value === 'block') {
         if (modeSel) fd.append('block_mode', modeSel.value);
+        if (boundarySel) fd.append('boundary_mode', boundarySel.value);
         if (numTpl && numTpl.value.trim()) fd.append('num_template', numTpl.value.trim());
       }
       // 落点与免审（整批统一）。只在勾上时才发，层级与后端一致。

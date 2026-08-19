@@ -192,10 +192,36 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         batch_id = response.headers["Location"].rstrip("/").split("/")[-1]
         group = app_module._batch_jobs[batch_id]["groups"][0]
+        job = app_module._jobs[group["job_id"]]
         self.assertEqual(group["status"], "done")
         self.assertTrue(group["history_reimport"])
         self.assertIn("历史题目", group["md"])
         self.assertEqual(group["history_id"], record["id"])
+        self.assertTrue(group["include_solution"])
+        self.assertEqual("auto", group["boundary_mode"])
+        self.assertTrue(job["include_solution"])
+        self.assertEqual("auto", job["boundary_mode"])
+
+    def test_history_reimport_restores_boundary_and_solution_metadata(self):
+        source = config.UPLOAD_DIR / "history-whitelist.pdf"
+        source.write_bytes(b"%PDF-1.4\nwhitelist")
+        record = app_module.history_store.create_record("散题记录", [source])
+        app_module.history_store.attach_markdown(
+            record["id"], "1. 散题",
+            metadata={"include_solution": False,
+                      "boundary_mode": "whitelist"})
+
+        response = self.client.post(
+            f"/history/{record['id']}/reimport", headers=self.headers)
+
+        self.assertEqual(response.status_code, 302)
+        batch_id = response.headers["Location"].rstrip("/").split("/")[-1]
+        group = app_module._batch_jobs[batch_id]["groups"][0]
+        job = app_module._jobs[group["job_id"]]
+        self.assertFalse(group["include_solution"])
+        self.assertEqual("whitelist", group["boundary_mode"])
+        self.assertFalse(job["include_solution"])
+        self.assertEqual("whitelist", job["boundary_mode"])
 
     def test_history_delete_restore_and_purge_routes(self):
         source = config.UPLOAD_DIR / "history-trash.pdf"
@@ -228,6 +254,7 @@ class HistoryRouteTests(unittest.TestCase):
         group = {
             "filename": "重试任务.pdf", "file_path": str(source),
             "solution_path": None, "ocr_backend": "mineru",
+            "include_solution": False, "boundary_mode": "whitelist",
             "history_id": current["id"],
         }
 
@@ -237,6 +264,9 @@ class HistoryRouteTests(unittest.TestCase):
         self.assertEqual(
             app_module.history_store.read_markdown(previous["id"]),
             "旧轮次结果")
+        metadata = app_module.history_store.get(previous["id"])["metadata"]
+        self.assertFalse(metadata["include_solution"])
+        self.assertEqual("whitelist", metadata["boundary_mode"])
         with self.assertRaises(app_module.history_store.HistoryError):
             app_module.history_store.read_markdown(current["id"])
 
@@ -491,6 +521,27 @@ class PageTests(unittest.TestCase):
         self.assertIsNone(preview[0]["dup"])
         self.assertEqual(preview[1]["dup"], "本批重复")
 
+    def test_whitelist_preview_preserves_number_restarts_and_skips_only_natural_gaps(self):
+        raw = ("- [解答] 1. 第一题\n\n- [解答] 2. 第二题\n\n"
+               "- [解答] 3. 第三题\n\n- [解答] 4. 第四题\n\n"
+               "- [解答] 5. 第五题\n\n- [解答] 1. 回卷第一题\n\n"
+               "- [解答] 2. 回卷第二题\n\n- [解答] 3. 回卷第三题")
+        preview, _folders, missing = app_module._build_import_preview(
+            raw, all_cols=[], boundary_mode="whitelist")
+
+        self.assertEqual(
+            [item["number"] for item in preview], [1, 2, 3, 4, 5, 1, 2, 3])
+        self.assertIsNone(missing)
+
+        gap_raw = "- [解答] 1. 第一题\n\n- [解答] 3. 第三题"
+        _preview, _folders, natural_missing = app_module._build_import_preview(
+            gap_raw, all_cols=[], boundary_mode="whitelist")
+        _preview, _folders, requested_missing = app_module._build_import_preview(
+            gap_raw, all_cols=[], boundary_mode="whitelist",
+            only_numbers=[1, 2, 3])
+        self.assertIsNone(natural_missing)
+        self.assertEqual([2], requested_missing)
+
     def test_auto_import_uses_one_batch_write_without_bank_dedup(self):
         batch_id = "auto-import-performance"
         grp = {
@@ -537,7 +588,7 @@ class PageTests(unittest.TestCase):
 
         build_preview.assert_called_once_with(
             "转换结果", include_solution=True, only_numbers=None,
-            existing_fps=set(), all_cols=[])
+            boundary_mode="auto", existing_fps=set(), all_cols=[])
         create_batch.assert_called_once_with([
             {"body": "题目一", "solution": "解析一", "type": "填空题",
              "source": "测试卷", "number": 1},
@@ -691,6 +742,51 @@ class PageTests(unittest.TestCase):
         self.assertIsNone(grp["md"])
         self.assertFalse(app_module._group_terminal(grp))
 
+    def test_reconvert_missing_boundary_field_keeps_whitelist_and_forces_block(self):
+        batch_id = "reconvert-whitelist-preserve"
+        grp = {
+            "gid": 0, "job_id": "job-whitelist-preserve",
+            "filename": "散题.pdf", "file_path": None, "solution_path": None,
+            "include_solution": False, "only_numbers": None,
+            "num_template": "", "boundary_mode": "whitelist",
+            "engine": "whole", "collection_strategy": "",
+            "collection_unit": False, "status": "error", "reviewed": None,
+            "attempt": 0, "in_flight": False, "cancelled": False,
+        }
+        app_module._batch_jobs[batch_id] = {
+            "status": "done", "groups": [grp], "files_cleaned": False,
+        }
+        job = {
+            "status": "error", "boundary_mode": "auto", "engine": "whole",
+            "num_template": "", "only_numbers": None,
+        }
+        app_module._jobs[grp["job_id"]] = job
+        try:
+            with mock.patch.object(app_module, "_persist_batch"), \
+                    mock.patch.object(app_module, "_persist_job") as persist_job, \
+                    mock.patch.object(app_module.threading, "Thread") as thread:
+                response = app_module.app.test_client().post(
+                    f"/batch/{batch_id}/group/0/reconvert",
+                    data={"only_numbers": "2-3", "num_template": "第x题"},
+                    headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+        finally:
+            app_module._batch_jobs.pop(batch_id, None)
+            app_module._jobs.pop(grp["job_id"], None)
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("whitelist", grp["boundary_mode"])
+        self.assertEqual("block", grp["engine"])
+        self.assertEqual([2, 3], grp["only_numbers"])
+        self.assertEqual("第x题", grp["num_template"])
+        self.assertEqual("whitelist", job["boundary_mode"])
+        self.assertEqual("block", job["engine"])
+        self.assertEqual([2, 3], job["only_numbers"])
+        self.assertEqual("第x题", job["num_template"])
+        persist_job.assert_called_once_with(grp["job_id"], job)
+        thread.return_value.start.assert_called_once_with()
+        self.assertIsNone(grp["md"])
+        self.assertFalse(app_module._group_terminal(grp))
+
     def test_auto_import_stops_for_required_manual_review(self):
         batch_id = "auto-import-quality-guard"
         grp = {
@@ -753,7 +849,7 @@ class PageTests(unittest.TestCase):
 
         build_preview.assert_called_once_with(
             grp["md"], include_solution=True, only_numbers=None,
-            existing_fps=set(), all_cols=[])
+            boundary_mode="auto", existing_fps=set(), all_cols=[])
         self.assertTrue(grp["auto_review_blocked"])
         self.assertIsNone(grp["reviewed"])
         self.assertIn(app_module.qualcheck.MANUAL_REVIEW_MARKER, grp["note"])
@@ -804,6 +900,49 @@ class PageTests(unittest.TestCase):
         self.assertIn("重复题号 9", grp["note"])
         persist.assert_called_once_with(batch_id, batch)
         finish.assert_not_called()
+
+    def test_whitelist_auto_import_allows_repeated_numbers(self):
+        batch_id = "auto-import-whitelist-repeat"
+        grp = {
+            "gid": 0, "filename": "散题.pdf", "md": "转换结果", "note": "",
+            "include_solution": True, "only_numbers": None,
+            "boundary_mode": "whitelist", "status": "done", "reviewed": None,
+            "imported_count": 0, "attempt": 0,
+        }
+        batch = {"status": "done", "groups": [grp], "files_cleaned": False}
+        preview = [
+            {"body": "第一题甲", "solution": "", "type": "解答题",
+             "dup": None, "number": 1},
+            {"body": "第一题乙", "solution": "", "type": "解答题",
+             "dup": None, "number": 1},
+            {"body": "第一题乙", "solution": "", "type": "解答题",
+             "dup": "本批重复", "number": 2},
+        ]
+        app_module._batch_jobs[batch_id] = batch
+        try:
+            with mock.patch.object(
+                    app_module, "_build_import_preview",
+                    return_value=(preview, [], None)) as build_preview, \
+                    mock.patch.object(app_module, "_auto_import_folder",
+                                      return_value="散题"), \
+                    mock.patch.object(
+                        app_module.filestore, "create_questions_batch",
+                        return_value=["q1", "q2"]) as create_batch, \
+                    mock.patch.object(app_module, "_persist_batch"), \
+                    mock.patch.object(app_module, "_maybe_finish_batch"):
+                app_module._auto_import_after_convert(
+                    batch_id, grp, attempt=0, md_snapshot=grp["md"])
+        finally:
+            app_module._batch_jobs.pop(batch_id, None)
+
+        build_preview.assert_called_once_with(
+            "转换结果", include_solution=True, only_numbers=None,
+            boundary_mode="whitelist", existing_fps=set(), all_cols=[])
+        create_batch.assert_called_once()
+        self.assertEqual(2, len(create_batch.call_args.args[0]))
+        self.assertEqual("imported", grp["reviewed"])
+        self.assertEqual(2, grp["imported_count"])
+        self.assertNotIn("auto_review_blocked", grp)
 
     def test_structure_collection_auto_import_requires_complete_numbered_unit(self):
         batch_id = "auto-import-collection-number-guard"
@@ -1456,6 +1595,52 @@ class PageTests(unittest.TestCase):
             html,
         )
         self.assertNotIn('<option value="all_ai" selected>', html)
+
+    def test_import_boundary_mode_defaults_to_auto_and_exposes_whitelist(self):
+        self.assertEqual("auto", app_module._parse_boundary_mode(""))
+        self.assertEqual("auto", app_module._parse_boundary_mode("unknown"))
+        self.assertEqual("whitelist", app_module._parse_boundary_mode("whitelist"))
+        html = app_module.app.test_client().get("/import").get_data(as_text=True)
+        self.assertIn('id="batch-boundary-mode"', html)
+        self.assertIn('<option value="auto" selected>智能识别</option>', html)
+        self.assertIn('<option value="whitelist">强制白名单</option>', html)
+
+    def test_legacy_convert_start_persists_and_passes_whitelist_mode(self):
+        image = io.BytesIO()
+        Image.new("RGB", (4, 4), "white").save(image, format="PNG")
+        image.seek(0)
+        try:
+            with mock.patch.object(
+                    app_module, "_history_record_for_sources",
+                    return_value="history-legacy"), \
+                    mock.patch.object(app_module, "_persist_job"), \
+                    mock.patch.object(app_module.threading, "Thread") as thread:
+                response = app_module.app.test_client().post(
+                    "/convert/start",
+                    data={
+                        "file": (image, "单页.png"),
+                        "engine": "whole",
+                        "boundary_mode": "whitelist",
+                    }, content_type="multipart/form-data",
+                    headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+
+            self.assertEqual(200, response.status_code,
+                             response.get_data(as_text=True))
+            job_id = response.get_json()["job_id"]
+            job = app_module._jobs[job_id]
+            self.assertEqual("whitelist", job["boundary_mode"])
+            self.assertEqual(1, job["image_page_count"])
+            args = thread.call_args.kwargs["args"]
+            self.assertIs(app_module._convert_worker,
+                          thread.call_args.kwargs["target"])
+            self.assertEqual("block", args[7])
+            self.assertEqual("whitelist", args[10])
+            self.assertEqual((1, 0), args[11:13])
+        finally:
+            job_id = locals().get("job_id")
+            job = app_module._jobs.pop(job_id, None) if job_id else None
+            if job and job.get("path"):
+                Path(job["path"]).unlink(missing_ok=True)
 
     def test_health_exposes_identity_for_safe_plugin_restart(self):
         data = app_module.app.test_client().get("/healthz").get_json()
