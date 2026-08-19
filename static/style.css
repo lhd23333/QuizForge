@@ -2212,6 +2212,37 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
   min-width: 104px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12px;
 }
+.library-word-actions button:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.library-tool-dialog, .library-task-dialog {
+  width: min(560px, calc(100vw - 30px)); max-height: min(760px, calc(100vh - 30px));
+  padding: 0; border: 1px solid var(--border); border-radius: 9px; background: var(--surface);
+  color: var(--text); box-shadow: var(--shadow-lg);
+}
+.library-task-dialog { width: min(680px, calc(100vw - 30px)); }
+.library-tool-dialog::backdrop, .library-task-dialog::backdrop { background: rgb(15 23 42 / 35%); }
+.library-tool-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 16px; border-bottom: 1px solid var(--border); }
+.library-tool-dialog-head h2 { margin: 0; font-size: 15px; }
+.library-tool-dialog-body { display: grid; gap: 10px; padding: 14px 16px; overflow: auto; }
+.library-tool-field { display: grid; grid-template-columns: 155px minmax(0, 1fr); align-items: center; gap: 10px; color: var(--text-2); font-size: 12px; }
+.library-tool-field > span { text-align: right; }
+.library-tool-field input, .library-tool-field textarea, .library-tool-field select {
+  min-width: 0; width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); color: var(--text); font: inherit; font-size: 12px;
+}
+.library-tool-field textarea { resize: vertical; min-height: 34px; font-family: Consolas, monospace; }
+.library-tool-field input:focus, .library-tool-field textarea:focus, .library-tool-field select:focus { border-color: var(--primary); outline: 2px solid var(--primary-soft); }
+.library-tool-dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 11px 16px 14px; border-top: 1px solid var(--border); }
+.library-tool-dialog-status { flex: 1; min-width: 0; overflow: hidden; color: var(--danger); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.library-task-list { display: grid; gap: 7px; max-height: min(620px, calc(100vh - 150px)); padding: 12px 16px 16px; overflow: auto; }
+.library-task-empty { padding: 28px; color: var(--muted); text-align: center; font-size: 12px; }
+.library-task-row { display: grid; grid-template-columns: minmax(130px, 1fr) auto minmax(120px, 1.5fr) auto; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
+.library-task-name { overflow: hidden; color: var(--text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.library-task-state { font-size: 11px; white-space: nowrap; }
+.library-task-state.is-done { color: #15803d; }
+.library-task-state.is-error, .library-task-state.is-interrupted { color: var(--danger); }
+.library-task-state.is-running, .library-task-state.is-queued { color: var(--primary); }
+.library-task-detail { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.library-task-actions { display: flex; gap: 4px; }
 .library-document-panel { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--surface); }
 .library-document-panel[hidden] { display: none !important; }
 .library-view-toolbar {
@@ -2221,6 +2252,11 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 }
 .library-current-path { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; }
 .library-current-path-only { color: var(--muted); font-size: 11px; }
+.library-tool-open {
+  flex: 0 0 auto; padding: 5px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface-2); color: var(--text-2); font: inherit; font-size: 12px; cursor: pointer;
+}
+.library-tool-open:hover { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
 .library-md-modes { flex: 0 0 auto; display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-2); }
 .library-md-save-area { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
 .library-md-save-status { max-width: min(320px, 28vw); overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }

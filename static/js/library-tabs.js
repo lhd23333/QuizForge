@@ -10,6 +10,7 @@
   const paneTemplate = document.getElementById('library-pane-template');
   const newMarkdownButton = document.getElementById('library-new-markdown');
   const newFolderButton = document.getElementById('library-new-folder');
+  const tasksButton = document.getElementById('library-tasks-button');
   if (!tree || !panesHost || !paneTemplate) return;
   const sidebar = tree.closest('.library-sidebar');
 
@@ -84,6 +85,234 @@
       toast.classList.remove('show');
       window.setTimeout(() => toast.remove(), 180);
     }, 2200);
+  }
+
+  function closeLibraryDialog(dialog) {
+    if (!dialog) return;
+    dialog.close?.();
+    dialog.remove();
+  }
+
+  function toolDialogField(labelText, className, type = 'text') {
+    const label = document.createElement('label');
+    label.className = 'library-tool-field';
+    const caption = document.createElement('span');
+    caption.textContent = labelText;
+    const input = document.createElement(type === 'textarea' ? 'textarea' : 'input');
+    input.className = className;
+    if (type !== 'textarea') input.type = type;
+    label.append(caption, input);
+    return {label, input};
+  }
+
+  function parsePageNumbers(raw) {
+    const values = String(raw || '').split(/[,，\s]+/).filter(Boolean)
+      .map(value => Number(value));
+    return values.length && values.every(value => Number.isInteger(value))
+      ? values : null;
+  }
+
+  function parseRanges(raw) {
+    const ranges = String(raw || '').split(/[,，]+/).map(value => value.trim())
+      .filter(Boolean).map(value => value.split(/[-~—]/).map(item => Number(item.trim())));
+    return ranges.length && ranges.every(item => item.length === 2
+      && item.every(value => Number.isInteger(value))) ? ranges : null;
+  }
+
+  function toolOperations(tab) {
+    if (tab.kind === 'word') return [
+      ['docx_markdown', '转为 Markdown'], ['docx_pdf', '转为 PDF'],
+    ];
+    return [
+      ['pdf_extract', '提取页面'], ['pdf_reorder', '页面排序'],
+      ['pdf_split', '拆分 PDF'], ['pdf_merge', '合并 PDF'],
+      ['pdf_rotate', '旋转页面'],
+    ];
+  }
+
+  function openLibraryToolDialog(tab, initialOperation = '') {
+    if (!tab || !['pdf', 'word'].includes(tab.kind)) return;
+    document.querySelector('.library-tool-dialog')?.remove();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'library-tool-dialog';
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    const head = document.createElement('div');
+    head.className = 'library-tool-dialog-head';
+    const title = document.createElement('h2');
+    title.textContent = tab.kind === 'pdf' ? 'PDF 工具' : 'Word 转换';
+    const close = document.createElement('button');
+    close.type = 'button'; close.className = 'icon-btn'; close.textContent = '×';
+    close.title = '关闭'; close.addEventListener('click', () => closeLibraryDialog(dialog));
+    head.append(title, close);
+    const body = document.createElement('div');
+    body.className = 'library-tool-dialog-body';
+    const opField = toolDialogField('操作', 'library-tool-operation');
+    const select = document.createElement('select');
+    select.className = 'library-tool-operation';
+    toolOperations(tab).forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value; option.textContent = label; select.append(option);
+    });
+    opField.label.replaceChild(select, opField.input);
+    body.append(opField.label);
+
+    const sourceField = toolDialogField(
+      tab.kind === 'pdf' ? 'PDF 文件（合并时每行一份）' : 'DOCX 文件',
+      'library-tool-source', 'textarea');
+    sourceField.input.value = tab.path;
+    sourceField.input.rows = tab.kind === 'pdf' ? 3 : 1;
+    sourceField.input.readOnly = tab.kind !== 'pdf';
+    body.append(sourceField.label);
+    const pagesField = toolDialogField('页码', 'library-tool-pages');
+    pagesField.input.placeholder = '例如 1,3,5';
+    body.append(pagesField.label);
+    const rangesField = toolDialogField('拆分区间', 'library-tool-ranges');
+    rangesField.input.placeholder = '例如 1-3,4-8';
+    body.append(rangesField.label);
+    const rotationField = toolDialogField('旋转角度', 'library-tool-rotation');
+    const rotation = document.createElement('select');
+    rotation.className = 'library-tool-rotation';
+    [90, 180, 270].forEach(value => {
+      const option = document.createElement('option');
+      option.value = String(value); option.textContent = `${value}°`;
+      rotation.append(option);
+    });
+    rotationField.label.replaceChild(rotation, rotationField.input);
+    body.append(rotationField.label);
+    const outputField = toolDialogField('输出文件（相对资料库）', 'library-tool-output');
+    outputField.input.placeholder = '留空使用默认名称';
+    body.append(outputField.label);
+    const outputDirField = toolDialogField('输出文件夹（相对资料库）', 'library-tool-output-dir');
+    outputDirField.input.placeholder = '留空使用源文件夹';
+    body.append(outputDirField.label);
+    const footer = document.createElement('div');
+    footer.className = 'library-tool-dialog-actions';
+    const status = document.createElement('span');
+    status.className = 'library-tool-dialog-status';
+    const submit = document.createElement('button');
+    submit.type = 'submit'; submit.className = 'btn primary'; submit.textContent = '加入转换任务';
+    footer.append(status, submit);
+    form.append(head, body, footer);
+    dialog.append(form);
+    document.body.append(dialog);
+
+    function refreshFields() {
+      const operation = select.value;
+      const pdf = tab.kind === 'pdf';
+      sourceField.label.hidden = false;
+      sourceField.input.readOnly = operation !== 'pdf_merge';
+      pagesField.label.hidden = !['pdf_extract', 'pdf_reorder', 'pdf_rotate'].includes(operation);
+      rangesField.label.hidden = operation !== 'pdf_split';
+      rotationField.label.hidden = operation !== 'pdf_rotate';
+      outputDirField.label.hidden = operation !== 'pdf_split';
+      outputField.label.hidden = operation === 'pdf_split';
+      if (operation === 'pdf_merge' && sourceField.input.value === tab.path) {
+        sourceField.input.value = `${tab.path}\n`;
+      }
+    }
+    select.addEventListener('change', refreshFields);
+    if (initialOperation && [...select.options].some(option => option.value === initialOperation)) {
+      select.value = initialOperation;
+    }
+    refreshFields();
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const operation = select.value;
+      const payload = {operation};
+      if (operation === 'pdf_merge') {
+        payload.sources = sourceField.input.value.split(/[\r\n]+/).map(value => value.trim()).filter(Boolean);
+      } else {
+        payload.source = tab.path;
+      }
+      if (['pdf_extract', 'pdf_rotate'].includes(operation)) {
+        payload.pages = parsePageNumbers(pagesField.input.value);
+        if (!payload.pages) { status.textContent = '页码格式无效'; return; }
+      }
+      if (operation === 'pdf_reorder') {
+        payload.order = parsePageNumbers(pagesField.input.value);
+        if (!payload.order) { status.textContent = '排序页码格式无效'; return; }
+      }
+      if (operation === 'pdf_split') {
+        payload.ranges = parseRanges(rangesField.input.value);
+        if (!payload.ranges) { status.textContent = '拆分区间格式无效'; return; }
+        payload.output_dir = outputDirField.input.value.trim();
+      } else {
+        payload.output_path = outputField.input.value.trim();
+      }
+      if (operation === 'pdf_rotate') payload.rotation = Number(rotation.value);
+      submit.disabled = true; status.textContent = '正在登记…';
+      try {
+        await fetchJson('/api/library/task', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+        closeLibraryDialog(dialog);
+        showLibraryToast('已加入转换任务');
+        openLibraryTasksDialog();
+      } catch (error) {
+        status.textContent = error.message || '任务登记失败';
+        submit.disabled = false;
+      }
+    });
+    dialog.addEventListener('cancel', event => { event.preventDefault(); closeLibraryDialog(dialog); });
+    dialog.showModal();
+    select.focus();
+  }
+
+  let taskDialogTimer = null;
+  async function openLibraryTasksDialog() {
+    document.querySelector('.library-task-dialog')?.remove();
+    const dialog = document.createElement('dialog');
+    dialog.className = 'library-task-dialog';
+    const head = document.createElement('div');
+    head.className = 'library-tool-dialog-head';
+    const title = document.createElement('h2'); title.textContent = '资料库任务';
+    const close = document.createElement('button'); close.type = 'button'; close.className = 'icon-btn';
+    close.textContent = '×'; close.title = '关闭';
+    close.addEventListener('click', () => { clearInterval(taskDialogTimer); taskDialogTimer = null; closeLibraryDialog(dialog); });
+    head.append(title, close);
+    const list = document.createElement('div'); list.className = 'library-task-list';
+    dialog.append(head, list); document.body.append(dialog); dialog.showModal();
+    let previousActive = new Set();
+    async function refresh() {
+      try {
+        const data = await fetchJson('/api/library/tasks');
+        list.replaceChildren();
+        if (!data.tasks.length) {
+          const empty = document.createElement('div'); empty.className = 'library-task-empty';
+          empty.textContent = '暂无任务'; list.append(empty); return;
+        }
+        data.tasks.forEach(task => {
+          const row = document.createElement('div'); row.className = 'library-task-row';
+          const name = document.createElement('div'); name.className = 'library-task-name';
+          name.textContent = task.operation || '资料库任务';
+          const state = document.createElement('span'); state.className = `library-task-state is-${task.status}`;
+          state.textContent = ({queued: '排队中', running: '处理中', done: '完成', error: '失败', interrupted: '已中断'}[task.status] || task.status);
+          const detail = document.createElement('div'); detail.className = 'library-task-detail';
+          detail.textContent = task.status === 'done' ? (task.outputs || []).join('、') : (task.error || '');
+          const actions = document.createElement('div'); actions.className = 'library-task-actions';
+          if (['error', 'interrupted'].includes(task.status)) {
+            const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'btn btn-sm'; retry.textContent = '重试';
+            retry.addEventListener('click', async () => {
+              retry.disabled = true;
+              try { await fetchJson(`/api/library/task/${encodeURIComponent(task.task_id)}/retry`, {method: 'POST'}); refresh(); }
+              catch (error) { showLibraryToast(error.message, true); retry.disabled = false; }
+            });
+            actions.append(retry);
+          }
+          row.append(name, state, detail, actions); list.append(row);
+        });
+        const active = new Set(data.tasks.filter(task => ['queued', 'running'].includes(task.status))
+          .map(task => task.task_id));
+        const finished = data.tasks.some(task => previousActive.has(task.task_id)
+          && !active.has(task.task_id) && ['done', 'error', 'interrupted'].includes(task.status));
+        previousActive = active;
+        if (finished) await loadChildren(tree, '', 0);
+      } catch (error) { list.textContent = error.message || '任务读取失败'; }
+    }
+    await refresh();
+    taskDialogTimer = window.setInterval(refresh, 2500);
   }
 
   function iconLetter(kind) {
@@ -312,6 +541,15 @@
       tab.saveButton = save;
       tab.saveStatus = status;
     }
+    if (tab.kind === 'pdf' || tab.kind === 'word') {
+      const tools = document.createElement('button');
+      tools.type = 'button';
+      tools.className = 'library-tool-open';
+      tools.dataset.libraryToolTab = tab.key;
+      tools.textContent = '工具';
+      tools.title = tab.kind === 'pdf' ? 'PDF 页面工具' : 'DOCX 转换工具';
+      toolbar.append(tools);
+    }
     return toolbar;
   }
 
@@ -467,12 +705,12 @@
       message.textContent = '请选择 Markdown 或 PDF 作为查看格式。';
       const actions = document.createElement('div');
       actions.className = 'library-word-actions';
-      ['转为 Markdown', '转为 PDF'].forEach(label => {
+      [['转为 Markdown', 'docx_markdown'], ['转为 PDF', 'docx_pdf']].forEach(([label, operation]) => {
         const button = document.createElement('button');
         button.type = 'button';
-        button.disabled = true;
         button.textContent = label;
-        button.title = '转换入口将在资料处理工具中启用';
+        button.dataset.libraryWordTool = operation;
+        button.title = label;
         actions.append(button);
       });
       state.append(mark, title, message, actions);
@@ -1311,6 +1549,18 @@
   panesHost.addEventListener('click', event => {
     const paneRoot = event.target.closest('[data-library-pane]');
     if (paneRoot) setFocusedPane(paneRoot.dataset.paneId);
+    const toolButton = event.target.closest('.library-tool-open');
+    if (toolButton) {
+      openLibraryToolDialog(tabs.get(toolButton.dataset.libraryToolTab));
+      return;
+    }
+    const wordTool = event.target.closest('[data-library-word-tool]');
+    if (wordTool) {
+      const panel = wordTool.closest('.library-document-panel');
+      const tab = [...tabs.values()].find(item => item.panel === panel);
+      openLibraryToolDialog(tab, wordTool.dataset.libraryWordTool);
+      return;
+    }
     const add = event.target.closest('.library-tab-add');
     if (add) {
       const pane = panes.get(add.dataset.libraryTabAdd) || focusedPane();
@@ -1356,6 +1606,7 @@
   document.querySelectorAll('[data-library-layout]').forEach(button => {
     button.addEventListener('click', () => setLayout(button.dataset.libraryLayout));
   });
+  tasksButton?.addEventListener('click', () => openLibraryTasksDialog());
 
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && contextMenu) {

@@ -40,6 +40,8 @@ import cleanup_output
 import handouts
 import pdf_collection
 import update_client
+import library_pdf_tools
+import document_converter
 
 import os
 import hmac
@@ -986,6 +988,281 @@ def library_raw():
         # SVG 可携带脚本；作为图片显示仍额外加 sandbox，禁止它获得同源脚本能力。
         response.headers["Content-Security-Policy"] = "sandbox"
     return response
+
+
+def _library_task_file(raw: object, *, suffixes: set[str] | None = None) -> tuple[Path, str]:
+    """把资料库相对文件路径解析为真实文件；任务参数永远不接受绝对路径。"""
+    target, rel = _library_path(str(raw or ""))
+    if not target.is_file():
+        raise library_ops.LibraryOperationError(
+            "资料库文件不存在", code="not_found", status=404)
+    suffix = target.suffix.casefold()
+    if suffixes is not None and suffix not in suffixes:
+        raise library_ops.LibraryOperationError(
+            "文件格式不符合当前工具要求", code="unsupported_file")
+    return target, rel
+
+
+def _library_task_output(raw: object, suffix: str) -> tuple[Path, str] | None:
+    """校验可选输出文件名；输出可在资料库内改目录，但不允许越界。"""
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    target, rel = _library_path(value, root_allowed=True)
+    if target.suffix.casefold() != suffix.casefold():
+        raise library_ops.LibraryOperationError(
+            f"输出文件必须使用 {suffix} 扩展名", code="invalid_output")
+    if not target.parent.is_dir():
+        raise library_ops.LibraryOperationError(
+            "输出目录不存在", code="output_dir_missing", status=404)
+    return target, rel
+
+
+def _library_task_directory(raw: object) -> tuple[Path, str] | None:
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    target, rel = _library_path(value, root_allowed=True)
+    if not target.is_dir():
+        raise library_ops.LibraryOperationError(
+            "输出文件夹不存在", code="output_dir_missing", status=404)
+    return target, rel
+
+
+def _library_int_list(value: object, label: str) -> list[int]:
+    if not isinstance(value, list) or not value:
+        raise library_ops.LibraryOperationError(f"{label}不能为空", code="invalid_pages")
+    result = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise library_ops.LibraryOperationError(
+                f"{label}必须是整数列表", code="invalid_pages")
+        result.append(item)
+    return result
+
+
+def _library_task_ranges(value: object) -> list[tuple[int, int]]:
+    if not isinstance(value, list) or not value:
+        raise library_ops.LibraryOperationError("拆分页段不能为空", code="invalid_range")
+    result = []
+    for item in value:
+        if (not isinstance(item, (list, tuple)) or len(item) != 2
+                or any(isinstance(part, bool) or not isinstance(part, int)
+                       for part in item)):
+            raise library_ops.LibraryOperationError(
+                "拆分页段必须是起止页码", code="invalid_range")
+        result.append((item[0], item[1]))
+    return result
+
+
+def _prepare_library_task(payload: dict) -> tuple[str, dict]:
+    operation = str(payload.get("operation") or "").strip().lower()
+    params: dict = {}
+    if operation == "pdf_merge":
+        raw_sources = payload.get("sources")
+        if not isinstance(raw_sources, list) or len(raw_sources) < 2:
+            raise library_ops.LibraryOperationError(
+                "合并至少需要两份 PDF", code="too_few_inputs")
+        sources = []
+        for raw in raw_sources:
+            _target, rel = _library_task_file(raw, suffixes={".pdf"})
+            sources.append(rel)
+        params["sources"] = sources
+        output = _library_task_output(payload.get("output_path"), ".pdf")
+        params["output_path"] = output[1] if output else None
+    elif operation in {"pdf_extract", "pdf_reorder", "pdf_rotate", "pdf_split"}:
+        _target, source = _library_task_file(payload.get("source"), suffixes={".pdf"})
+        params["source"] = source
+        if operation == "pdf_extract":
+            params["pages"] = _library_int_list(payload.get("pages"), "提取页码")
+            suffix = ".pdf"
+            output = _library_task_output(payload.get("output_path"), suffix)
+            params["output_path"] = output[1] if output else None
+        elif operation == "pdf_reorder":
+            params["order"] = _library_int_list(payload.get("order"), "排序页码")
+            output = _library_task_output(payload.get("output_path"), ".pdf")
+            params["output_path"] = output[1] if output else None
+        elif operation == "pdf_rotate":
+            params["pages"] = _library_int_list(payload.get("pages"), "旋转页码")
+            rotation = payload.get("rotation")
+            if isinstance(rotation, bool) or not isinstance(rotation, int):
+                raise library_ops.LibraryOperationError(
+                    "旋转角度无效", code="invalid_rotation")
+            params["rotation"] = rotation
+            output = _library_task_output(payload.get("output_path"), ".pdf")
+            params["output_path"] = output[1] if output else None
+        else:
+            params["ranges"] = _library_task_ranges(payload.get("ranges"))
+            output_dir = _library_task_directory(payload.get("output_dir"))
+            params["output_dir"] = output_dir[1] if output_dir else None
+    elif operation in {"docx_markdown", "docx_pdf"}:
+        _target, source = _library_task_file(payload.get("source"), suffixes={".docx"})
+        params["source"] = source
+        suffix = ".md" if operation == "docx_markdown" else ".pdf"
+        output = _library_task_output(payload.get("output_path"), suffix)
+        params["output_path"] = output[1] if output else None
+    else:
+        raise library_ops.LibraryOperationError(
+            "不支持的资料库工具操作", code="invalid_operation")
+    return operation, params
+
+
+def _library_task_relative(path: Path) -> str:
+    try:
+        return path.resolve().relative_to(config.BANK_DIR.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.name
+
+
+def _library_task_resolve_file(rel: str, suffixes: set[str] | None = None) -> Path:
+    target, _ = _library_task_file(rel, suffixes=suffixes)
+    return target
+
+
+def _library_task_resolve_output(rel: str | None, suffix: str) -> Path | None:
+    if not rel:
+        return None
+    result = _library_task_output(rel, suffix)
+    return result[0] if result else None
+
+
+def _execute_library_task(operation: str, params: dict) -> list[Path]:
+    if operation == "pdf_merge":
+        sources = [_library_task_resolve_file(path, {".pdf"})
+                   for path in params["sources"]]
+        output = _library_task_resolve_output(params.get("output_path"), ".pdf")
+        return [library_pdf_tools.merge_pdfs(sources, output_path=output)]
+    source = _library_task_resolve_file(params["source"], {".pdf"}
+                                        if operation.startswith("pdf_") else {".docx"})
+    output = _library_task_resolve_output(
+        params.get("output_path"), ".pdf" if operation != "docx_markdown" else ".md")
+    if operation == "pdf_extract":
+        return [library_pdf_tools.extract_pages(source, params["pages"], output_path=output)]
+    if operation == "pdf_reorder":
+        return [library_pdf_tools.reorder_pages(source, params["order"], output_path=output)]
+    if operation == "pdf_rotate":
+        return [library_pdf_tools.rotate_pages(
+            source, params["pages"], params["rotation"], output_path=output)]
+    if operation == "pdf_split":
+        directory = _library_task_directory(params.get("output_dir"))
+        return library_pdf_tools.split_pdf(
+            source, params["ranges"], output_dir=directory[0] if directory else None)
+    if operation == "docx_markdown":
+        return [document_converter.convert_docx_to_markdown(source, output)]
+    if operation == "docx_pdf":
+        return [document_converter.convert_docx_to_pdf(source, output)]
+    raise library_ops.LibraryOperationError("不支持的资料库工具操作")
+
+
+def _persist_library_task(task_id: str, task: dict) -> None:
+    task_store.save("library", task_id, task)
+
+
+def _library_task_update(task_id: str, **changes) -> dict | None:
+    with _library_tasks_lock:
+        task = _library_tasks.get(task_id)
+        if task is None:
+            return None
+        task.update(changes)
+        task["updated_at"] = time.time()
+        snapshot = dict(task)
+    _persist_library_task(task_id, snapshot)
+    return snapshot
+
+
+def _library_task_worker(task_id: str) -> None:
+    task = _library_task_update(task_id, status="running", started_at=time.time())
+    if task is None:
+        return
+    try:
+        outputs = _execute_library_task(task["operation"], task["params"])
+        result = [_library_task_relative(path) for path in outputs]
+        _library_task_update(task_id, status="done", finished_at=time.time(),
+                            outputs=result, output=result[0] if result else None)
+    except (library_pdf_tools.PdfToolError,
+            document_converter.DocumentConversionError,
+            library_ops.LibraryOperationError, OSError, ValueError) as exc:
+        code = getattr(exc, "code", "tool_failed")
+        _library_task_update(task_id, status="error", finished_at=time.time(),
+                            error=str(exc), error_code=code)
+    except Exception as exc:  # pragma: no cover - 最后一道后台线程保险
+        logger.exception("资料库工具任务失败：%s", task_id)
+        _library_task_update(task_id, status="error", finished_at=time.time(),
+                            error=f"资料库工具任务失败：{exc}", error_code="tool_failed")
+
+
+def _queue_library_task(operation: str, params: dict) -> dict:
+    task_id = uuid.uuid4().hex
+    now = time.time()
+    task = {
+        "task_id": task_id, "operation": operation, "params": params,
+        "status": "queued", "created_at": now, "updated_at": now,
+    }
+    with _library_tasks_lock:
+        _library_tasks[task_id] = task
+    _persist_library_task(task_id, task)
+    threading.Thread(target=_library_task_worker, args=(task_id,),
+                     name=f"library-tool-{task_id[:8]}", daemon=True).start()
+    return dict(task)
+
+
+@app.route("/api/library/pdf/info")
+def library_pdf_info():
+    try:
+        target, _ = _library_task_file(request.args.get("path"), suffixes={".pdf"})
+        return jsonify(ok=True, info=library_pdf_tools.inspect_pdf(target))
+    except (library_ops.LibraryOperationError,
+            library_pdf_tools.PdfToolError, OSError) as exc:
+        if isinstance(exc, library_ops.LibraryOperationError):
+            return _library_operation_error_response(exc)
+        return jsonify(ok=False, error=str(exc),
+                       code=getattr(exc, "code", "tool_failed")), 400
+
+
+@app.route("/api/library/task", methods=["POST"])
+def library_task_create():
+    try:
+        operation, params = _prepare_library_task(_library_operation_payload())
+        task = _queue_library_task(operation, params)
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, task=task), 202
+
+
+@app.route("/api/library/tasks")
+def library_tasks():
+    with _library_tasks_lock:
+        rows = [dict(task) for task in _library_tasks.values()]
+    rows.sort(key=lambda item: (float(item.get("created_at") or 0),
+                                item.get("task_id", "")), reverse=True)
+    return jsonify(ok=True, tasks=rows)
+
+
+@app.route("/api/library/task/<task_id>")
+def library_task_detail(task_id):
+    with _library_tasks_lock:
+        task = _library_tasks.get(task_id)
+        result = dict(task) if task else None
+    if result is None:
+        return jsonify(ok=False, error="任务不存在"), 404
+    return jsonify(ok=True, task=result)
+
+
+@app.route("/api/library/task/<task_id>/retry", methods=["POST"])
+def library_task_retry(task_id):
+    with _library_tasks_lock:
+        old = dict(_library_tasks.get(task_id) or {})
+    if not old:
+        return jsonify(ok=False, error="任务不存在"), 404
+    if old.get("status") in _LIBRARY_ACTIVE_STATUSES:
+        return jsonify(ok=False, error="任务仍在执行"), 409
+    try:
+        operation, params = _prepare_library_task({
+            "operation": old.get("operation"), **(old.get("params") or {})})
+        task = _queue_library_task(operation, params)
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, task=task), 202
 
 
 @app.route("/api/write-token")
