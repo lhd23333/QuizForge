@@ -2070,6 +2070,21 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 .library-tree-entry:hover { color: var(--text); background: color-mix(in srgb, var(--text) 5%, transparent); }
 .library-tree-entry.is-active { color: var(--primary); background: var(--primary-soft); }
 .library-tree-entry.is-revealed { outline: 2px solid var(--primary); outline-offset: -2px; }
+.library-tree-entry[draggable="true"] { cursor: grab; }
+.library-tree-entry[draggable="true"]:active { cursor: grabbing; }
+.library-tree-entry.is-dragging { opacity: .48; }
+.library-tree-entry.is-drop-target,
+.library-sidebar-head.is-drop-target,
+.library-tree.is-drop-target {
+  color: var(--primary); background: var(--primary-soft);
+  outline: 2px solid color-mix(in srgb, var(--primary) 72%, transparent); outline-offset: -2px;
+}
+.library-tree-entry.is-drop-target.is-copy-target,
+.library-sidebar-head.is-drop-target.is-copy-target,
+.library-tree.is-drop-target.is-copy-target { outline-style: dashed; }
+.library-tree-entry.is-drop-invalid,
+.library-sidebar-head.is-drop-invalid,
+.library-tree.is-drop-invalid { color: var(--danger); background: var(--danger-soft); }
 .library-tree-twist { width: 11px; color: var(--muted); font-size: 17px; line-height: 1; transition: transform .12s; }
 .library-tree-entry.is-open .library-tree-twist { transform: rotate(90deg); }
 .library-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

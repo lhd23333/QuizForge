@@ -1,8 +1,8 @@
 """资料库文件管理的安全文件系统操作。
 
 本模块只处理题库根目录内的真实文件，不认识 Flask 请求、历史记录虚拟目录或界面
-状态。调用方负责把成功结果同步给已打开的标签页；题卡复制则应继续走
-``filestore.copy_to_collection``，以便为副本生成新的题目 id。
+状态。调用方负责把成功结果同步给已打开的标签页；本模块在复制会进入题库索引的
+``.md`` 时沿用题卡复制语义，为副本生成新的题目 id。
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import re
 import shutil
 import threading
 import uuid
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -20,6 +21,7 @@ import filestore
 
 
 MARKDOWN_EXTENSIONS = frozenset({".md", ".markdown"})
+QUESTION_MARKDOWN_EXTENSION = ".md"
 PDF_EXTENSIONS = frozenset({".pdf"})
 WORD_EXTENSIONS = frozenset({".doc", ".docx"})
 IMAGE_EXTENSIONS = frozenset({
@@ -105,6 +107,20 @@ def _root_path(root: str | Path) -> Path:
     return path
 
 
+def is_link_or_junction(path: Path) -> bool:
+    """符号链接和 Windows junction 都不能参与通用资料库写操作。"""
+    try:
+        if path.is_symlink():
+            return True
+        path_check = getattr(path, "is_junction", None)
+        if path_check and path_check():
+            return True
+        os_check = getattr(os.path, "isjunction", None)
+        return bool(os_check and os_check(path))
+    except OSError:
+        return True
+
+
 def _resolve(root: Path, raw: str, *, allow_root: bool) -> tuple[Path, str]:
     parts = _relative_parts(raw, allow_root=allow_root)
     candidate = root.joinpath(*parts)
@@ -113,8 +129,11 @@ def _resolve(root: Path, raw: str, *, allow_root: bool) -> tuple[Path, str]:
     current = root
     for part in parts:
         current = current / part
-        if current.is_symlink():
-            raise LibraryOperationError("不支持操作符号链接", code="symlink_rejected")
+        if is_link_or_junction(current):
+            raise LibraryOperationError(
+                "不支持操作符号链接或目录联接",
+                code="symlink_rejected",
+            )
 
     resolved = candidate.resolve(strict=False)
     if resolved != root and root not in resolved.parents:
@@ -179,6 +198,86 @@ def _copy_file_atomic(source: Path, target: Path) -> None:
         staged.unlink(missing_ok=True)
 
 
+def _read_question_markdown(source: Path) -> tuple[MutableMapping, str] | None:
+    """读取会进入题库索引的 Markdown；非映射 frontmatter 视为普通文档。"""
+    try:
+        meta, body = filestore._read_raw(source)
+    except OSError:
+        raise
+    except Exception:
+        # 无法按题卡解析的 .md 仍是资料库可见的普通文件；原样转移不会制造活跃
+        # 题卡 id，且与资料树的“可见即可拖动”语义保持一致。
+        return None
+    if not isinstance(meta, MutableMapping):
+        return None
+    return meta, body
+
+
+def _render_markdown_copy(source: Path, *, order: float | None = None) -> str | None:
+    """生成题卡副本文本，保留正文、图片引用及未知 frontmatter。"""
+    try:
+        parsed = _read_question_markdown(source)
+        if parsed is None:
+            return None
+        meta, body = parsed
+        new_id = filestore._new_id()
+        now = filestore._now_iso()
+        meta["id"] = new_id
+        meta["created"] = now
+        meta["updated"] = now
+        if order is not None:
+            meta["order"] = float(order)
+        for key in (
+                "_quizforge_import_scope", "_quizforge_import_index",
+                "_trash_original_path", "_trash_deleted_at"):
+            meta.pop(key, None)
+        return filestore._render_raw(meta, body)
+    except OSError:
+        raise
+    except Exception as exc:
+        raise LibraryOperationError(
+            f"无法安全复制 Markdown：{source.name}",
+            code="invalid_markdown",
+        ) from exc
+
+
+def _write_staged_text(path: Path, text: str) -> None:
+    with path.open("x", encoding="utf-8", newline="\n") as handle:
+        handle.write(filestore.normalize_newlines(text))
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _next_markdown_order(directory: Path) -> float:
+    """直接读取目标目录题卡顺序，避免依赖全局 BANK_DIR 或扫描整座题库。"""
+    maximum: float | None = None
+    for path in directory.iterdir():
+        if (not path.is_file() or is_link_or_junction(path)
+                or path.suffix.lower() != QUESTION_MARKDOWN_EXTENSION):
+            continue
+        try:
+            meta, _body = filestore._read_raw(path)
+            value = float(meta.get("order", 0.0) or 0.0)
+        except Exception:
+            # 与题库扫描一致：损坏到无法解析的 Markdown 不参与题卡排序。
+            continue
+        maximum = value if maximum is None else max(maximum, value)
+    return (maximum + 1.0) if maximum is not None else 1.0
+
+
+def _copy_markdown_atomic(source: Path, target: Path, *, order: float) -> None:
+    text = _render_markdown_copy(source, order=order)
+    if text is None:
+        _copy_file_atomic(source, target)
+        return
+    staged = _temporary_path(target.parent, target.suffix)
+    try:
+        _write_staged_text(staged, text)
+        _publish_file(staged, target)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 def _write_new_markdown(target: Path, text: str) -> None:
     staged = _temporary_path(target.parent, target.suffix)
     try:
@@ -191,22 +290,64 @@ def _write_new_markdown(target: Path, text: str) -> None:
         staged.unlink(missing_ok=True)
 
 
-def _ensure_copyable_tree(source: Path) -> None:
-    for current, directories, files in os.walk(source, followlinks=False):
-        base = Path(current)
-        for name in (*directories, *files):
-            if (base / name).is_symlink():
-                raise LibraryOperationError(
-                    "文件夹中包含符号链接，不能递归复制",
-                    code="symlink_rejected",
-                )
+def _copyable_tree_files(source: Path) -> list[Path]:
+    """返回普通文件清单；递归前先拒绝链接，避免 copytree 跟进 junction。"""
+    files: list[Path] = []
+
+    def scan(directory: Path) -> None:
+        if is_link_or_junction(directory):
+            raise LibraryOperationError(
+                "文件夹中包含符号链接或目录联接，不能递归复制",
+                code="symlink_rejected",
+            )
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink() or is_link_or_junction(path):
+                    raise LibraryOperationError(
+                        "文件夹中包含符号链接或目录联接，不能递归复制",
+                        code="symlink_rejected",
+                    )
+                if entry.is_dir(follow_symlinks=False):
+                    scan(path)
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(path)
+                else:
+                    raise LibraryOperationError(
+                        "文件夹中包含不支持的特殊文件",
+                        code="unsupported_file",
+                    )
+
+    scan(source)
+    return files
+
+
+def _rewrite_folder_markdown_copies(staged: Path) -> None:
+    for path in _copyable_tree_files(staged):
+        if path.suffix.lower() != QUESTION_MARKDOWN_EXTENSION:
+            continue
+        relative = path.relative_to(staged)
+        if any(part.startswith(".") or part in _RESERVED_ROOT_NAMES
+               for part in relative.parts[:-1]):
+            continue
+        text = _render_markdown_copy(path)
+        if text is None:
+            continue
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
 
 
 def _copy_folder_atomic(source: Path, target: Path) -> None:
-    _ensure_copyable_tree(source)
+    _copyable_tree_files(source)
     staged = _temporary_path(target.parent)
     try:
-        shutil.copytree(source, staged, copy_function=shutil.copy2)
+        # 链接按链接复制，随后再检查暂存树；即使源目录在检查后发生竞态，也不会
+        # 被 copytree 当作普通目录跟随到资料库之外。
+        shutil.copytree(
+            source, staged, copy_function=shutil.copy2, symlinks=True)
+        _rewrite_folder_markdown_copies(staged)
         if target.exists():
             raise LibraryOperationError("目标位置已存在同名项目",
                                         code="conflict", status=409)
@@ -370,6 +511,10 @@ def transfer_entry(root: str | Path, source_path: str, target_folder_path: str,
         if copy:
             if kind == "folder":
                 _copy_folder_atomic(source, target)
+            elif (kind == "markdown"
+                  and source.suffix.lower() == QUESTION_MARKDOWN_EXTENSION):
+                _copy_markdown_atomic(
+                    source, target, order=_next_markdown_order(target_folder))
             else:
                 _copy_file_atomic(source, target)
         else:

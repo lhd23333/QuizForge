@@ -464,7 +464,12 @@ def _library_path(raw: str, *, root_allowed: bool = False) -> tuple[Path, str]:
     if rel.is_absolute() or any(part == ".." or part.startswith(".") for part in parts):
         abort(404)
     root = config.BANK_DIR.resolve()
-    target = root.joinpath(*parts).resolve()
+    current = root
+    for part in parts:
+        current = current / part
+        if library_ops.is_link_or_junction(current):
+            abort(404)
+    target = current.resolve()
     if target != root and root not in target.parents:
         abort(404)
     if target == root and not root_allowed:
@@ -627,7 +632,7 @@ def library_children():
     except OSError as exc:
         return jsonify(ok=False, error=f"无法读取文件夹：{exc}"), 400
     for child in children:
-        if child.name.startswith(".") or child.is_symlink():
+        if child.name.startswith(".") or library_ops.is_link_or_junction(child):
             continue
         child_rel = (PurePosixPath(rel) / child.name).as_posix() if rel else child.name
         if child.is_dir():
@@ -673,6 +678,27 @@ def library_rename():
         _library_reject_history_operation(path)
         result = library_ops.rename_entry(
             config.BANK_DIR, path, payload.get("name", ""))
+    except (library_ops.LibraryOperationError, OSError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, entry=result.as_dict())
+
+
+@app.route("/api/library/transfer", methods=["POST"])
+def library_transfer():
+    try:
+        payload = _library_operation_payload()
+        path = payload.get("path", "")
+        target = payload.get("target", "")
+        mode = str(payload.get("mode") or "").strip().lower()
+        if mode not in {"move", "copy"}:
+            raise library_ops.LibraryOperationError(
+                "转移方式必须是 move 或 copy",
+                code="invalid_mode",
+            )
+        _library_reject_history_operation(path)
+        _library_reject_history_operation(target)
+        result = library_ops.transfer_entry(
+            config.BANK_DIR, path, target, copy=mode == "copy")
     except (library_ops.LibraryOperationError, OSError) as exc:
         return _library_operation_error_response(exc)
     return jsonify(ok=True, entry=result.as_dict())

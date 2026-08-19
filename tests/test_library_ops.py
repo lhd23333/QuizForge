@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
+import filestore
 import library_ops
 
 
@@ -12,6 +14,19 @@ class LibraryOperationTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    @staticmethod
+    def _write_question(path: Path, *, qid: str, order: float,
+                        body: str = "题目", **extra) -> None:
+        meta = {
+            "id": qid,
+            "created": "2026-01-01T00:00:00",
+            "updated": "2026-01-01T00:00:00",
+            "order": order,
+            **extra,
+        }
+        path.write_text(
+            filestore._render_raw(meta, body), encoding="utf-8", newline="\n")
 
     def test_create_folder_and_markdown_normalizes_newlines(self):
         folder = library_ops.create_folder(self.root, "", "资料")
@@ -109,20 +124,138 @@ class LibraryOperationTests(unittest.TestCase):
         self.assertFalse((self.root / "来源" / "配图.png").exists())
         self.assertEqual((self.root / "目标" / "配图.png").read_bytes(), b"png")
 
+    def test_markdown_move_preserves_original_bytes_and_identity(self):
+        source = self.root / "移动来源"
+        target = self.root / "移动目标"
+        source.mkdir()
+        target.mkdir()
+        self._write_question(
+            source / "待移动.md", qid="source-id", order=2,
+            custom_field="保留字段")
+        self._write_question(target / "既有.md", qid="target-id", order=7)
+        original_bytes = (source / "待移动.md").read_bytes()
+        original_mtime = (source / "待移动.md").stat().st_mtime_ns
+
+        result = library_ops.move_entry(self.root, "移动来源/待移动.md", "移动目标")
+
+        self.assertEqual(result.path, "移动目标/待移动.md")
+        self.assertFalse((source / "待移动.md").exists())
+        meta, body = filestore._read_raw(target / "待移动.md")
+        self.assertEqual(meta["id"], "source-id")
+        self.assertEqual(meta["order"], 2)
+        self.assertEqual(meta["custom_field"], "保留字段")
+        self.assertEqual(body.lstrip("\n"), "题目")
+        self.assertEqual((target / "待移动.md").read_bytes(), original_bytes)
+        self.assertEqual((target / "待移动.md").stat().st_mtime_ns, original_mtime)
+
+    def test_markdown_copy_refreshes_identity_and_internal_fields(self):
+        source = self.root / "复制来源"
+        target = self.root / "复制目标"
+        source.mkdir()
+        target.mkdir()
+        original = source / "题卡.md"
+        self._write_question(
+            original, qid="old-id", order=2,
+            body="题干 ![[共享图片.png]]",
+            custom_field={"keep": True},
+            _quizforge_import_scope="batch:old",
+            _quizforge_import_index=3,
+            _trash_original_path="旧位置/题卡.md",
+            _trash_deleted_at="2026-01-02T00:00:00",
+        )
+        original_bytes = original.read_bytes()
+        self._write_question(target / "既有.md", qid="target-id", order=4)
+
+        result = library_ops.copy_entry(self.root, "复制来源/题卡.md", "复制目标")
+
+        copied_meta, copied_body = filestore._read_raw(target / "题卡.md")
+        self.assertTrue(result.copied)
+        self.assertNotEqual(copied_meta["id"], "old-id")
+        self.assertEqual(copied_meta["order"], 5.0)
+        self.assertNotEqual(copied_meta["created"], "2026-01-01T00:00:00")
+        self.assertEqual(copied_meta["created"], copied_meta["updated"])
+        self.assertEqual(copied_meta["custom_field"], {"keep": True})
+        for key in (
+                "_quizforge_import_scope", "_quizforge_import_index",
+                "_trash_original_path", "_trash_deleted_at"):
+            self.assertNotIn(key, copied_meta)
+        self.assertEqual(copied_body.lstrip("\n"), "题干 ![[共享图片.png]]")
+        self.assertEqual(original.read_bytes(), original_bytes)
+
+    def test_markdown_extension_and_non_mapping_frontmatter_stay_raw(self):
+        source = self.root / "普通文档来源"
+        target = self.root / "普通文档目标"
+        source.mkdir()
+        target.mkdir()
+        markdown_text = "# 普通资料\n\n不进入题卡索引。\n".encode("utf-8")
+        unusual_md = "---\n- list-frontmatter\n---\n\n正文\n".encode("utf-8")
+        invalid_md = b"\xff\xfe\x00not-utf8"
+        (source / "资料.markdown").write_bytes(markdown_text)
+        (source / "列表头.md").write_bytes(unusual_md)
+        (source / "损坏编码.md").write_bytes(invalid_md)
+
+        library_ops.copy_entry(self.root, "普通文档来源/资料.markdown", "普通文档目标")
+        library_ops.copy_entry(self.root, "普通文档来源/列表头.md", "普通文档目标")
+        library_ops.copy_entry(self.root, "普通文档来源/损坏编码.md", "普通文档目标")
+
+        self.assertEqual((target / "资料.markdown").read_bytes(), markdown_text)
+        self.assertEqual((target / "列表头.md").read_bytes(), unusual_md)
+        self.assertEqual((target / "损坏编码.md").read_bytes(), invalid_md)
+
     def test_folder_copy_and_descendant_target(self):
         (self.root / "章节" / "子目录").mkdir(parents=True)
-        (self.root / "章节" / "题目.md").write_text("题目", encoding="utf-8")
+        self._write_question(
+            self.root / "章节" / "题目.md", qid="folder-old-id", order=1,
+            body="题目 ![[章节图.png]]", custom_field="保留")
+        (self.root / "章节" / "子目录" / "普通.md").write_text(
+            "没有 frontmatter", encoding="utf-8")
         (self.root / "归档").mkdir()
 
         copied = library_ops.copy_entry(self.root, "章节", "归档")
         self.assertEqual(copied.path, "归档/章节")
         self.assertTrue((self.root / "章节" / "题目.md").exists())
         self.assertTrue((self.root / "归档" / "章节" / "题目.md").exists())
+        copied_meta, copied_body = filestore._read_raw(
+            self.root / "归档" / "章节" / "题目.md")
+        plain_meta, plain_body = filestore._read_raw(
+            self.root / "归档" / "章节" / "子目录" / "普通.md")
+        self.assertNotEqual(copied_meta["id"], "folder-old-id")
+        self.assertNotEqual(plain_meta["id"], "普通")
+        self.assertNotEqual(copied_meta["id"], plain_meta["id"])
+        self.assertEqual(copied_meta["custom_field"], "保留")
+        self.assertEqual(copied_body.lstrip("\n"), "题目 ![[章节图.png]]")
+        self.assertEqual(plain_body.lstrip("\n"), "没有 frontmatter")
+        self.assertEqual(
+            (self.root / "章节" / "子目录" / "普通.md").read_text(
+                encoding="utf-8"),
+            "没有 frontmatter",
+        )
 
         with self.assertRaises(library_ops.LibraryOperationError) as caught:
             library_ops.move_entry(self.root, "章节", "章节/子目录")
         self.assertEqual(caught.exception.code, "descendant_target")
         self.assertTrue((self.root / "章节").is_dir())
+
+    def test_folder_copy_rejects_junction_before_copytree(self):
+        source = self.root / "含联接"
+        target = self.root / "联接目标"
+        source.mkdir()
+        target.mkdir()
+        junction = source / "联接"
+        junction.mkdir()
+
+        original_check = library_ops.is_link_or_junction
+
+        def fake_check(path: Path) -> bool:
+            return path == junction or original_check(path)
+
+        with mock.patch.object(
+                library_ops, "is_link_or_junction", side_effect=fake_check):
+            with self.assertRaises(library_ops.LibraryOperationError) as caught:
+                library_ops.copy_entry(self.root, "含联接", "联接目标")
+
+        self.assertEqual(caught.exception.code, "symlink_rejected")
+        self.assertFalse((target / "含联接").exists())
 
 
 if __name__ == "__main__":

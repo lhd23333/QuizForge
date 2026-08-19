@@ -10,6 +10,7 @@
   const paneTemplate = document.getElementById('library-pane-template');
   const newFolderButton = document.getElementById('library-new-folder');
   if (!tree || !panesHost || !paneTemplate) return;
+  const sidebar = tree.closest('.library-sidebar');
 
   const READ_ONLY_ROOTS = new Set(['_assets', '_handouts', '_backups']);
   const pathCollator = new Intl.Collator('zh-CN', {numeric: true, sensitivity: 'base'});
@@ -21,6 +22,8 @@
   let tabSerial = 0;
   let splitter = null;
   let initialTreePromise = Promise.resolve();
+  let dragSerial = 0;
+  let dragSession = null;
 
   function kindFromPath(path) {
     if (String(path || '').replace(/\\/g, '/').startsWith('_handouts/')) return 'handout';
@@ -353,17 +356,23 @@
   }
 
   async function loadMarkdown(tab) {
+    const path = tab.path;
+    const generation = Number(tab.loadGeneration || 0) + 1;
+    tab.loadGeneration = generation;
     try {
-      const data = await fetchJson(`/api/library/read?path=${encodeURIComponent(tab.path)}`);
+      const data = await fetchJson(`/api/library/read?path=${encodeURIComponent(path)}`);
+      if (tab.loadGeneration !== generation || tab.path !== path) return;
       tab.text = data.text;
       tab.savedText = data.text;
       tab.mtime = data.mtime;
       tab.dirty = false;
       tab.loadError = '';
     } catch (error) {
+      if (tab.loadGeneration !== generation || tab.path !== path) return;
       tab.text = '';
       tab.loadError = error.message;
     }
+    if (tab.loadGeneration !== generation || tab.path !== path) return;
     renderMarkdownContent(tab);
   }
 
@@ -483,7 +492,7 @@
     const tab = {
       key, path: '', kind: 'blank', name: '空白页', mode: 'read',
       paneId: pane.id, panel: null, dirty: false, saving: false,
-      discardArmedUntil: 0, serial,
+      discardArmedUntil: 0, loadGeneration: 0, serial,
     };
     tabs.set(key, tab);
     pane.order.push(key);
@@ -510,6 +519,7 @@
       panel: null,
       dirty: false,
       saving: false,
+      loadGeneration: Number(tab.loadGeneration || 0) + 1,
       discardArmedUntil: 0,
     });
     return true;
@@ -664,6 +674,7 @@
     button.className = `library-tree-entry is-${entry.kind}`;
     button.dataset.path = entry.path;
     button.dataset.kind = entry.kind;
+    if (!isReadOnlyTreePath(entry.path)) button.draggable = true;
     button.setAttribute('role', 'treeitem');
     button.title = entry.path;
     const twist = document.createElement('span');
@@ -723,6 +734,9 @@
       const nextPath = remapPath(tab.path, oldPath, newPath);
       if (nextPath === tab.path) return;
       const renamedFile = tab.path === oldPath;
+      const reloadMarkdown = tab.kind === 'markdown'
+        && (tab.text === undefined || Boolean(tab.loadError));
+      tab.loadGeneration = Number(tab.loadGeneration || 0) + 1;
       tab.path = nextPath;
       if (renamedFile) tab.name = pathName(nextPath);
       if (!tab.panel) return;
@@ -735,7 +749,10 @@
       if (tab.editor) tab.editor.setAttribute('aria-label', `编辑 ${tab.name}`);
       // 已载入的 PDF／图片继续保留当前文档实例；重新赋 src 会清空原生 PDF
       // 阅读器的页码、缩放和滚动。关闭后再次打开时自然使用新路径。
-      if (tab.kind === 'markdown') renderMarkdownContent(tab);
+      if (tab.kind === 'markdown') {
+        if (reloadMarkdown) loadMarkdown(tab);
+        else renderMarkdownContent(tab);
+      }
     });
     renderAll();
   }
@@ -760,6 +777,185 @@
     if (label) label.textContent = pathName(newPath);
     sortTreeHost(node.parentElement);
     return {node, hadPendingLoad};
+  }
+
+  function affectedMarkdownTabs(source) {
+    return [...tabs.values()].filter(tab => tab.kind === 'markdown'
+      && (tab.path === source || tab.path.startsWith(`${source}/`)));
+  }
+
+  function clearDropFeedback() {
+    sidebar?.querySelectorAll('.is-drop-target, .is-drop-invalid, .is-copy-target')
+      .forEach(item => item.classList.remove(
+        'is-drop-target', 'is-drop-invalid', 'is-copy-target'));
+  }
+
+  function dropTargetFromEvent(event) {
+    const entry = event.target.closest?.('.library-tree-entry');
+    if (entry) {
+      if (entry.dataset.kind !== 'folder') return null;
+      const children = entry.closest('.library-tree-node')
+        ?.querySelector(':scope > .library-tree-children');
+      return {path: entry.dataset.path, element: entry, host: children};
+    }
+    const rootZone = event.target.closest?.('[data-library-root-drop]');
+    return rootZone ? {path: '', element: rootZone, host: tree} : null;
+  }
+
+  function canDropAt(source, target) {
+    if (!source || isReadOnlyTreePath(source) || isReadOnlyTreePath(target)) return false;
+    if (parentPath(source) === target) return false;
+    return target !== source && !target.startsWith(`${source}/`);
+  }
+
+  function showDropFeedback(target, valid, copy) {
+    clearDropFeedback();
+    if (!target?.element) return;
+    target.element.classList.add(valid ? 'is-drop-target' : 'is-drop-invalid');
+    if (valid && copy) target.element.classList.add('is-copy-target');
+  }
+
+  function captureTreeHost(host, path) {
+    if (!host) return null;
+    const hadPendingLoad = Boolean(host.dataset.loading);
+    const hadPagination = host.dataset.hasMore === '1';
+    const wasLoaded = host === tree || host.dataset.loaded === '1';
+    const loadVersion = String(Number(host.dataset.loadVersion || 0) + 1);
+    host.dataset.loadVersion = loadVersion;
+    delete host.dataset.loading;
+    return {
+      host,
+      path,
+      loadVersion,
+      reload: hadPendingLoad || hadPagination,
+      patchable: wasLoaded && !hadPendingLoad && !hadPagination,
+      refreshAfterUnknownFailure: wasLoaded || hadPendingLoad || hadPagination,
+    };
+  }
+
+  async function refreshTreeHost(state) {
+    if (!state?.reload || !state.host.isConnected
+        || state.host.dataset.loadVersion !== state.loadVersion) return;
+    await loadChildren(state.host, state.path, 0);
+  }
+
+  function reconcileTreeHostGeneration(state) {
+    if (!state?.host.isConnected || state.host.dataset.loadVersion === state.loadVersion) return;
+    // 转移等待期间若该目录又发起了分页或重读，旧结果可能不含本次变更；
+    // 放弃局部 DOM 补丁，紧接着以最新代次重读这个目录。
+    state.loadVersion = state.host.dataset.loadVersion || '0';
+    state.reload = true;
+    state.patchable = false;
+  }
+
+  function patchTransferredTree(operation, data) {
+    const sourceEntry = operation.sourceEntry;
+    const sourceNode = sourceEntry?.closest('.library-tree-node');
+    const targetState = operation.targetState;
+    const canPatchTarget = targetState?.patchable && targetState.host.isConnected;
+    if (operation.mode === 'move' && canPatchTarget && sourceNode) {
+      const remapped = remapTreeEntry(sourceEntry, operation.source, data.path);
+      targetState.host.append(remapped.node);
+      sortTreeHost(targetState.host);
+      const children = remapped.node
+        ?.querySelector(':scope > .library-tree-children');
+      if (children && remapped.hadPendingLoad) loadChildren(children, data.path, 0);
+    } else {
+      if (operation.mode === 'move') sourceNode?.remove();
+      if (canPatchTarget) {
+        appendTreeEntry(targetState.host, {
+          path: data.path,
+          kind: data.kind || operation.kind,
+          name: pathName(data.path),
+        });
+      }
+    }
+    markActiveTree();
+  }
+
+  async function transferLibraryEntry(target, copy) {
+    const session = dragSession;
+    if (!session || session.handled) return;
+    const source = validPath(session.source);
+    const targetPath = validPath(target.path) || '';
+    const mode = copy ? 'copy' : 'move';
+    const sourceEntry = session.entry;
+    const kind = session.kind;
+    const affectedTabs = affectedMarkdownTabs(source);
+    session.handled = true;
+    sourceEntry.classList.remove('is-dragging');
+    sourceEntry.removeAttribute('aria-grabbed');
+    clearDropFeedback();
+
+    if (!canDropAt(source, targetPath)) {
+      showLibraryToast('不能转移到当前位置', true);
+      if (dragSession === session) dragSession = null;
+      return;
+    }
+    if (affectedTabs.some(tab => tab.saving)) {
+      showLibraryToast('Markdown 正在保存，请稍后重试', true);
+      if (dragSession === session) dragSession = null;
+      return;
+    }
+    if (mode === 'copy' && affectedTabs.some(tab => tab.dirty)) {
+      showLibraryToast('请先保存源文件中的 Markdown 修改，再复制', true);
+      if (dragSession === session) dragSession = null;
+      return;
+    }
+
+    const sourceHost = sourceEntry.closest('.library-tree-node')?.parentElement || null;
+    const sourceState = captureTreeHost(
+      sourceHost, sourceHost === tree ? '' : (sourceHost?.dataset.path || parentPath(source)));
+    const targetState = sourceHost === target.host
+      ? sourceState
+      : captureTreeHost(target.host, targetPath);
+    const operation = {
+      session, source, target: targetPath, mode, kind, sourceEntry,
+      sourceState, targetState,
+    };
+
+    try {
+      const data = await fetchJson('/api/library/transfer', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({path: source, target: targetPath, mode}),
+      });
+      const result = data.entry || data;
+      if (!result.path) throw new Error('转移结果缺少目标路径');
+      if (mode === 'move') remapOpenTabs(result.old_path || source, result.path);
+      reconcileTreeHostGeneration(sourceState);
+      if (targetState !== sourceState) reconcileTreeHostGeneration(targetState);
+      const lostTreeHost = !sourceState?.host.isConnected || !targetState?.host.isConnected;
+      if (!lostTreeHost) patchTransferredTree(operation, result);
+      await Promise.all([
+        refreshTreeHost(sourceState),
+        targetState === sourceState ? null : refreshTreeHost(targetState),
+      ]);
+      // 父目录若在请求期间被整段替换，旧 host 已无法安全打补丁；此时只做一次
+      // 根级权威重读，避免把源节点移入脱离页面的旧 DOM。
+      if (lostTreeHost) await loadChildren(tree, '', 0);
+      showLibraryToast(data.message || result.message
+        || (mode === 'copy' ? '已复制' : '已移动'));
+    } catch (error) {
+      reconcileTreeHostGeneration(sourceState);
+      if (targetState !== sourceState) reconcileTreeHostGeneration(targetState);
+      // 响应断开时无法断言后端是否已经落盘，源目录必须权威重读；目标目录
+      // 已经展示过内容时也重读，未展开且从未加载的目标仍保持按需加载。
+      if (sourceState) sourceState.reload = true;
+      if (targetState && targetState !== sourceState) {
+        targetState.reload = targetState.reload
+          || targetState.refreshAfterUnknownFailure;
+      }
+      const lostTreeHost = !sourceState?.host.isConnected || !targetState?.host.isConnected;
+      await Promise.all([
+        refreshTreeHost(sourceState),
+        targetState === sourceState ? null : refreshTreeHost(targetState),
+      ]);
+      if (lostTreeHost) await loadChildren(tree, '', 0);
+      showLibraryToast(error.message || (mode === 'copy' ? '复制失败' : '移动失败'), true);
+    } finally {
+      if (dragSession === session) dragSession = null;
+    }
   }
 
   async function createLibraryFolder(parent = '') {
@@ -996,6 +1192,67 @@
     if (!entry || isReadOnlyTreePath(entry.dataset.path)) return;
     event.preventDefault();
     openTreeMenu(entry, event.clientX, event.clientY);
+  });
+
+  sidebar?.addEventListener('dragstart', event => {
+    const entry = event.target.closest('.library-tree-entry[draggable="true"]');
+    if (!entry || isReadOnlyTreePath(entry.dataset.path)) {
+      event.preventDefault();
+      return;
+    }
+    closeTreeMenu();
+    const session = {
+      id: ++dragSerial,
+      source: entry.dataset.path,
+      kind: entry.dataset.kind,
+      entry,
+      handled: false,
+    };
+    dragSession = session;
+    entry.classList.add('is-dragging');
+    entry.setAttribute('aria-grabbed', 'true');
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'copyMove';
+      event.dataTransfer.setData('application/x-quizforge-library-path', session.source);
+      event.dataTransfer.setData('text/plain', session.source);
+    }
+  });
+
+  sidebar?.addEventListener('dragover', event => {
+    const session = dragSession;
+    const target = session ? dropTargetFromEvent(event) : null;
+    if (!session || session.handled || !target) {
+      clearDropFeedback();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'none';
+      return;
+    }
+    const valid = canDropAt(session.source, target.path);
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = valid
+      ? (event.shiftKey ? 'copy' : 'move') : 'none';
+    showDropFeedback(target, valid, event.shiftKey);
+  });
+
+  sidebar?.addEventListener('dragleave', event => {
+    if (!event.relatedTarget || sidebar.contains(event.relatedTarget)) return;
+    clearDropFeedback();
+  });
+
+  sidebar?.addEventListener('drop', event => {
+    const session = dragSession;
+    const target = session ? dropTargetFromEvent(event) : null;
+    if (!session || session.handled || !target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    transferLibraryEntry(target, event.shiftKey);
+  });
+
+  sidebar?.addEventListener('dragend', () => {
+    const session = dragSession;
+    session?.entry.classList.remove('is-dragging');
+    session?.entry.removeAttribute('aria-grabbed');
+    clearDropFeedback();
+    if (session && !session.handled) dragSession = null;
   });
 
   newFolderButton?.addEventListener('click', () => createLibraryFolder(''));

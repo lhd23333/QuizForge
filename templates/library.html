@@ -5,7 +5,7 @@
 {% block content %}
 <section class="library-shell" aria-label="资料库">
   <aside class="library-sidebar">
-    <div class="library-sidebar-head">
+    <div class="library-sidebar-head" data-library-root-drop>
       <h1>资料库</h1>
       <div class="library-sidebar-actions">
         <span class="library-local-badge">本机</span>
@@ -13,7 +13,8 @@
                 title="新建顶层文件夹" aria-label="新建顶层文件夹">＋</button>
       </div>
     </div>
-    <div id="library-tree" class="library-tree" role="tree" aria-label="文件列表">
+    <div id="library-tree" class="library-tree" role="tree" aria-label="文件列表"
+         data-library-root-drop>
       <div class="library-loading">正在读取文件…</div>
     </div>
   </aside>

@@ -72,6 +72,29 @@ class LibraryRouteTests(unittest.TestCase):
                    for item in response.get_json()["entries"]}
         self.assertEqual(entries, {"旧讲义.doc": "word", "新讲义.DOCX": "word"})
 
+    def test_junction_is_hidden_and_direct_path_is_rejected(self):
+        junction = config.BANK_DIR / "模拟联接"
+        junction.mkdir()
+        (junction / "外部.pdf").write_bytes(b"pdf")
+        original_check = app_module.library_ops.is_link_or_junction
+
+        def fake_check(path: Path) -> bool:
+            return path == junction or original_check(path)
+
+        with mock.patch.object(
+                app_module.library_ops, "is_link_or_junction",
+                side_effect=fake_check):
+            root_response = self.client.get("/api/library/children")
+            direct_response = self.client.get(
+                "/api/library/children", query_string={"path": "模拟联接"})
+
+        self.assertEqual(root_response.status_code, 200)
+        self.assertNotIn(
+            "模拟联接",
+            {item["name"] for item in root_response.get_json()["entries"]},
+        )
+        self.assertEqual(direct_response.status_code, 404)
+
     def test_create_folder_and_rename_file(self):
         created = self.client.post(
             "/api/library/folder",
@@ -99,6 +122,38 @@ class LibraryRouteTests(unittest.TestCase):
             b"docx",
         )
 
+    def test_transfer_moves_and_copies_entries(self):
+        source = config.BANK_DIR / "转移来源"
+        target = config.BANK_DIR / "转移目标"
+        source.mkdir()
+        target.mkdir()
+        (source / "讲义.pdf").write_bytes(b"pdf")
+        (source / "配图.png").write_bytes(b"png")
+
+        copied = self.client.post(
+            "/api/library/transfer",
+            json={"path": "转移来源/讲义.pdf", "target": "转移目标",
+                  "mode": "copy"},
+            headers=self.headers,
+        )
+        moved = self.client.post(
+            "/api/library/transfer",
+            json={"path": "转移来源/配图.png", "target": "转移目标",
+                  "mode": "move"},
+            headers=self.headers,
+        )
+
+        self.assertEqual(copied.status_code, 200)
+        self.assertEqual(copied.get_json()["entry"], {
+            "path": "转移目标/讲义.pdf",
+            "old_path": "转移来源/讲义.pdf",
+            "kind": "pdf",
+            "copied": True,
+        })
+        self.assertEqual(moved.status_code, 200)
+        self.assertFalse((source / "配图.png").exists())
+        self.assertEqual((target / "配图.png").read_bytes(), b"png")
+
     def test_errors_are_structured_and_history_never_reaches_disk_ops(self):
         self.client.post(
             "/api/library/folder",
@@ -117,6 +172,36 @@ class LibraryRouteTests(unittest.TestCase):
             rejected = self.client.post(
                 "/api/library/folder",
                 json={"parent": ".quizforge-history", "name": "不得创建"},
+                headers=self.headers,
+            )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.get_json()["code"], "read_only")
+        operation.assert_not_called()
+
+        invalid_mode = self.client.post(
+            "/api/library/transfer",
+            json={"path": "已有", "target": "", "mode": "link"},
+            headers=self.headers,
+        )
+        self.assertEqual(invalid_mode.status_code, 400)
+        self.assertEqual(invalid_mode.get_json()["code"], "invalid_mode")
+
+        with mock.patch.object(app_module.library_ops, "transfer_entry") as operation:
+            rejected = self.client.post(
+                "/api/library/transfer",
+                json={"path": ".quizforge-history/record/result.md",
+                      "target": "", "mode": "copy"},
+                headers=self.headers,
+            )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.get_json()["code"], "read_only")
+        operation.assert_not_called()
+
+        with mock.patch.object(app_module.library_ops, "transfer_entry") as operation:
+            rejected = self.client.post(
+                "/api/library/transfer",
+                json={"path": "已有", "target": ".quizforge-history",
+                      "mode": "move"},
                 headers=self.headers,
             )
         self.assertEqual(rejected.status_code, 400)
