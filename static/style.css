@@ -2316,7 +2316,25 @@ html.desktop-host .library-shell { height: calc(100vh - 130px); }
 .library-anchor-link { color: var(--primary); }
 .library-image-stage { flex: 1; min-height: 0; display: grid; place-items: center; overflow: auto; padding: 24px; background: var(--surface-2); }
 .library-image-stage img { max-width: 100%; max-height: calc(100vh - 220px); object-fit: contain; box-shadow: var(--shadow-md); }
-.library-pdf-frame { display: block; width: 100%; flex: 1; min-height: 0; border: 0; background: #525659; }
+.library-pdf-stage { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: hidden; background: #525659; }
+.library-pdf-frame { display: block; width: 100%; height: 100%; border: 0; background: #525659; }
+.library-pdf-capture-layer {
+  position: absolute; inset: 0; z-index: 8; overflow: hidden; cursor: crosshair;
+  background: rgb(15 23 42 / 16%); touch-action: none; user-select: none;
+}
+.library-pdf-capture-layer:focus { outline: none; }
+.library-pdf-capture-prompt {
+  position: absolute; top: 14px; left: 50%; z-index: 2; translate: -50% 0;
+  padding: 7px 11px; border: 1px solid rgb(255 255 255 / 32%); border-radius: 6px;
+  background: rgb(15 23 42 / 88%); color: #fff; font-size: 12px; white-space: nowrap;
+  box-shadow: 0 5px 16px rgb(15 23 42 / 24%); pointer-events: none;
+}
+.library-pdf-capture-box {
+  position: absolute; z-index: 1; border: 2px solid var(--primary);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  box-shadow: 0 0 0 9999px rgb(15 23 42 / 32%); pointer-events: none;
+}
+.library-pdf-capture-box[hidden] { display: none; }
 .library-viewer-error { margin: 22px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border)); border-radius: 8px; background: var(--danger-soft); color: var(--danger); }
 
 /* 批量导入的目标目录按层加载，避免首屏递归完整题库。 */

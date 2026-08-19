@@ -346,6 +346,60 @@ class LibraryRouteTests(unittest.TestCase):
         for spec in (params["stem_source"], params["solution_source"]):
             (config.BATCH_UPLOAD_DIR / spec["name"]).unlink(missing_ok=True)
 
+    def test_card_capture_accepts_desktop_pdf_region_tokens(self):
+        config.BATCH_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        stem_name = f"library-card-{'1' * 32}.png"
+        solution_name = f"library-card-{'2' * 32}.png"
+        for name in (stem_name, solution_name):
+            (config.BATCH_UPLOAD_DIR / name).write_bytes(b"png")
+        try:
+            with mock.patch.object(
+                    app_module, "_queue_library_task",
+                    return_value={"task_id": "capture-task"}) as queue:
+                response = self.client.post(
+                    "/api/library/card-capture",
+                    data={
+                        "split_mode": "single",
+                        "boundary_mode": "whitelist",
+                        "include_solution": "true",
+                        "stem_capture_name": stem_name,
+                        "solution_capture_name": solution_name,
+                    },
+                    headers={"X-CSRF-Token": app_module._WRITE_TOKEN},
+                )
+
+            self.assertEqual(response.status_code, 202)
+            operation, params = queue.call_args.args
+            self.assertEqual(operation, "card_capture")
+            self.assertEqual(params["stem_source"]["name"], stem_name)
+            self.assertEqual(params["solution_source"]["name"], solution_name)
+        finally:
+            for name in (stem_name, solution_name):
+                (config.BATCH_UPLOAD_DIR / name).unlink(missing_ok=True)
+
+    def test_invalid_capture_pair_does_not_delete_existing_stem_token(self):
+        config.BATCH_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        stem_name = f"library-card-{'3' * 32}.png"
+        missing_solution = f"library-card-{'4' * 32}.png"
+        stem = config.BATCH_UPLOAD_DIR / stem_name
+        stem.write_bytes(b"png")
+        try:
+            response = self.client.post(
+                "/api/library/card-capture",
+                data={
+                    "split_mode": "single",
+                    "boundary_mode": "auto",
+                    "stem_capture_name": stem_name,
+                    "solution_capture_name": missing_solution,
+                },
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN},
+            )
+
+            self.assertEqual(response.status_code, 404)
+            self.assertTrue(stem.is_file())
+        finally:
+            stem.unlink(missing_ok=True)
+
     def test_cleanup_protects_nested_card_capture_uploads(self):
         import cleanup_output
         name = "library-card-active.png"

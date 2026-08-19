@@ -90,6 +90,8 @@
 
   function closeLibraryDialog(dialog) {
     if (!dialog) return;
+    dialog._cancelPdfCapture?.();
+    dialog._discardPdfCaptures?.();
     dialog.close?.();
     dialog.remove();
   }
@@ -165,9 +167,214 @@
     return {label, area, get file() { return selected; }, className};
   }
 
+  function pdfRegionCaptureField(labelText) {
+    const label = document.createElement('div');
+    label.className = 'library-tool-field library-capture-field';
+    const caption = document.createElement('span');
+    caption.textContent = labelText;
+    const area = document.createElement('div');
+    area.className = 'library-capture-area';
+    const choose = document.createElement('button');
+    choose.type = 'button';
+    choose.className = 'btn btn-sm';
+    choose.textContent = '开始框选';
+    const hint = document.createElement('span');
+    hint.className = 'library-capture-hint';
+    hint.textContent = '尚未框选';
+    area.append(choose, hint);
+    label.append(caption, area);
+    let captureName = '';
+    return {
+      label, area, choose,
+      get captureName() { return captureName; },
+      setCapture(result) {
+        captureName = String(result?.name || '');
+        const width = Number(result?.width) || 0;
+        const height = Number(result?.height) || 0;
+        hint.textContent = captureName ? `已框选 ${width}×${height}` : '尚未框选';
+        choose.textContent = captureName ? '重新框选' : '开始框选';
+        area.classList.toggle('is-filled', Boolean(captureName));
+      },
+      clearCapture() {
+        const previous = captureName;
+        this.setCapture(null);
+        return previous;
+      },
+      relinquish() { captureName = ''; },
+    };
+  }
+
+  function discardPdfCaptureName(name) {
+    if (!name) return;
+    const api = window.QuizForgeDesktop?.api?.();
+    api?.discard_client_capture?.(name).catch?.(() => {});
+  }
+
+  function topViewportCaptureRect(rect) {
+    let current = window;
+    let x = rect.left;
+    let y = rect.top;
+    let width = rect.width;
+    let height = rect.height;
+    while (current.parent && current.parent !== current) {
+      const frame = current.frameElement;
+      if (!frame) throw new Error('无法定位资料库窗口');
+      const frameRect = frame.getBoundingClientRect();
+      const scaleX = frameRect.width / Math.max(1, current.innerWidth);
+      const scaleY = frameRect.height / Math.max(1, current.innerHeight);
+      x = frameRect.left + x * scaleX;
+      y = frameRect.top + y * scaleY;
+      width *= scaleX;
+      height *= scaleY;
+      current = current.parent;
+    }
+    return {
+      x, y, width, height,
+      viewport_width: current.innerWidth,
+      viewport_height: current.innerHeight,
+    };
+  }
+
+  function waitForCapturePaint() {
+    return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  }
+
+  function selectPdfRegion(tab, dialog, labelText) {
+    const api = window.QuizForgeDesktop?.api?.();
+    if (!api?.capture_client_rect) {
+      return Promise.reject(new Error('框选当前 PDF 仅支持 Windows 桌面版'));
+    }
+    const stage = tab?.pdfStage;
+    if (!stage || tab.panel?.hidden) {
+      return Promise.reject(new Error('请先切回需要制卡的 PDF'));
+    }
+    dialog._cancelPdfCapture?.();
+    return new Promise((resolve, reject) => {
+      const layer = document.createElement('div');
+      layer.className = 'library-pdf-capture-layer';
+      layer.tabIndex = 0;
+      const prompt = document.createElement('span');
+      prompt.className = 'library-pdf-capture-prompt';
+      prompt.textContent = `拖动框选${labelText}，Esc 取消`;
+      const box = document.createElement('div');
+      box.className = 'library-pdf-capture-box';
+      box.hidden = true;
+      layer.append(prompt, box);
+      stage.append(layer);
+      stage.classList.add('is-capturing');
+
+      let origin = null;
+      let currentRect = null;
+      let capturing = false;
+      let finished = false;
+      const clampPoint = event => {
+        const bounds = stage.getBoundingClientRect();
+        return {
+          x: Math.max(0, Math.min(bounds.width, event.clientX - bounds.left)),
+          y: Math.max(0, Math.min(bounds.height, event.clientY - bounds.top)),
+        };
+      };
+      const draw = point => {
+        const left = Math.min(origin.x, point.x);
+        const top = Math.min(origin.y, point.y);
+        currentRect = {
+          left, top,
+          width: Math.abs(point.x - origin.x),
+          height: Math.abs(point.y - origin.y),
+        };
+        Object.assign(box.style, {
+          left: `${currentRect.left}px`, top: `${currentRect.top}px`,
+          width: `${currentRect.width}px`, height: `${currentRect.height}px`,
+        });
+      };
+      const cleanup = () => {
+        stage.classList.remove('is-capturing');
+        layer.remove();
+        if (dialog._cancelPdfCapture === cancel) delete dialog._cancelPdfCapture;
+      };
+      const finish = (value, error) => {
+        if (finished) return;
+        finished = true;
+        dialog.style.visibility = '';
+        cleanup();
+        if (error) reject(error);
+        else resolve(value);
+      };
+      const cancel = () => finish(null);
+      dialog._cancelPdfCapture = cancel;
+
+      layer.addEventListener('pointerdown', event => {
+        if (capturing || event.button !== 0) return;
+        event.preventDefault();
+        origin = clampPoint(event);
+        currentRect = null;
+        box.hidden = false;
+        prompt.hidden = true;
+        layer.setPointerCapture(event.pointerId);
+        draw(origin);
+      });
+      layer.addEventListener('pointermove', event => {
+        if (!origin || capturing) return;
+        draw(clampPoint(event));
+      });
+      layer.addEventListener('pointerup', async event => {
+        if (!origin || capturing) return;
+        draw(clampPoint(event));
+        origin = null;
+        if (currentRect.width < 10 || currentRect.height < 10) {
+          box.hidden = true;
+          prompt.hidden = false;
+          prompt.textContent = '选区太小，请重新拖动框选；Esc 取消';
+          return;
+        }
+        capturing = true;
+        const bounds = stage.getBoundingClientRect();
+        let requestRect;
+        try {
+          requestRect = topViewportCaptureRect({
+            left: bounds.left + currentRect.left,
+            top: bounds.top + currentRect.top,
+            width: currentRect.width,
+            height: currentRect.height,
+          });
+        } catch (error) {
+          finish(null, error);
+          return;
+        }
+        layer.style.visibility = 'hidden';
+        dialog.style.visibility = 'hidden';
+        await waitForCapturePaint();
+        try {
+          const result = await api.capture_client_rect(requestRect);
+          if (finished) return;
+          if (!result?.ok) throw new Error(result?.error || '截图失败，请重试');
+          finish(result);
+        } catch (error) {
+          finish(null, error);
+        }
+      });
+      layer.addEventListener('pointercancel', () => {
+        if (!capturing) cancel();
+      });
+      layer.addEventListener('keydown', event => {
+        if (capturing) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+        cancel();
+      });
+      layer.focus();
+    });
+  }
+
   function openLibraryCardDialog(tab, initialText = '') {
     if (!tab || !['markdown', 'pdf', 'image'].includes(tab.kind)) return;
-    document.querySelector('.library-card-dialog')?.remove();
+    const existing = document.querySelector('.library-card-dialog');
+    if (existing) closeLibraryDialog(existing);
     const dialog = document.createElement('dialog');
     dialog.className = 'library-card-dialog';
     const form = document.createElement('form');
@@ -225,11 +432,12 @@
     if (tab.kind === 'pdf') {
       inputModeField = toolDialogField('制卡来源', 'library-card-input-mode');
       inputMode = document.createElement('select');
-      [['pages', '提取 PDF 页面'], ['capture', '截图配对（粘贴题干/解析）']]
+      [['pages', '按页识别'], ['capture', '框选当前 PDF']]
         .forEach(([value, label]) => {
           const option = document.createElement('option');
           option.value = value; option.textContent = label; inputMode.append(option);
         });
+      inputMode.title = '按页识别整份或指定页面；框选模式直接截取当前阅读画面';
       inputModeField.label.replaceChild(inputMode, inputModeField.input);
       body.append(inputModeField.label);
       pagesField = toolDialogField('PDF 页码', 'library-card-pages');
@@ -248,8 +456,12 @@
       body.append(inputModeField.label);
     }
     if (inputMode) {
-      stemCapture = imageCaptureField('题干截图', 'library-card-stem-capture');
-      solutionCapture = imageCaptureField('解析截图', 'library-card-solution-capture');
+      stemCapture = tab.kind === 'pdf'
+        ? pdfRegionCaptureField('题干区域')
+        : imageCaptureField('题干截图', 'library-card-stem-capture');
+      solutionCapture = tab.kind === 'pdf'
+        ? pdfRegionCaptureField('解析区域（可选）')
+        : imageCaptureField('解析截图', 'library-card-solution-capture');
       body.append(stemCapture.label, solutionCapture.label);
     }
 
@@ -267,9 +479,16 @@
       if (pagesField) pagesField.label.hidden = capture;
       if (stemCapture) stemCapture.label.hidden = !capture || tab.kind !== 'pdf';
       if (solutionCapture) solutionCapture.label.hidden = !capture;
-      solutionField.hidden = capture && Boolean(solutionCapture?.file);
+      solutionField.hidden = tab.kind === 'pdf' && capture
+        ? true : capture && Boolean(solutionCapture?.file);
     };
-    inputMode?.addEventListener('change', refreshCaptureFields);
+    inputMode?.addEventListener('change', () => {
+      dialog._cancelPdfCapture?.();
+      if (tab.kind === 'pdf' && inputMode.value !== 'capture') {
+        dialog._discardPdfCaptures?.();
+      }
+      refreshCaptureFields();
+    });
     refreshCaptureFields();
 
     const footer = document.createElement('div');
@@ -284,6 +503,38 @@
     dialog.append(form);
     document.body.append(dialog);
 
+    if (tab.kind === 'pdf') {
+      dialog._discardPdfCaptures = () => {
+        [stemCapture, solutionCapture].forEach(field =>
+          discardPdfCaptureName(field.clearCapture()));
+      };
+    }
+
+    const captureFromPdf = async (field, labelText) => {
+      field.choose.disabled = true;
+      status.textContent = `请在当前 PDF 中拖动框选${labelText}`;
+      try {
+        const result = await selectPdfRegion(tab, dialog, labelText);
+        if (result) {
+          discardPdfCaptureName(field.clearCapture());
+          field.setCapture(result);
+          status.textContent = `${labelText}已框选`;
+        } else {
+          status.textContent = '已取消框选';
+        }
+      } catch (error) {
+        status.textContent = error.message || '框选失败';
+      } finally {
+        field.choose.disabled = false;
+      }
+    };
+    if (tab.kind === 'pdf') {
+      stemCapture.choose.addEventListener('click', () =>
+        captureFromPdf(stemCapture, '题干'));
+      solutionCapture.choose.addEventListener('click', () =>
+        captureFromPdf(solutionCapture, '解析'));
+    }
+
     form.addEventListener('submit', async event => {
       event.preventDefault();
       const capture = inputMode?.value === 'capture';
@@ -291,7 +542,8 @@
       const common = {
         split_mode: mode.value,
         boundary_mode: boundary.value,
-        include_solution: solution.checked,
+        include_solution: tab.kind === 'pdf' && capture
+          ? Boolean(solutionCapture?.captureName) : solution.checked,
       };
       if (target && target !== '临时卡片') common.target_collection = target;
       if (tab.kind === 'markdown') {
@@ -321,17 +573,24 @@
         return;
       } else {
         if (capture) {
-          if (tab.kind === 'pdf' && !stemCapture?.file) {
-            status.textContent = '请先粘贴或选择题干截图';
-            stemCapture?.area.focus();
+          if (tab.kind === 'pdf' && !stemCapture?.captureName) {
+            status.textContent = '请先在当前 PDF 中框选题干';
+            stemCapture?.choose.focus();
             return;
           }
           const formData = new FormData();
           formData.append('context_path', tab.path);
           Object.entries(common).forEach(([key, value]) =>
             formData.append(key, String(value)));
-          if (stemCapture?.file) formData.append('stem_image', stemCapture.file);
-          if (solutionCapture?.file) {
+          if (stemCapture?.captureName) {
+            formData.append('stem_capture_name', stemCapture.captureName);
+          } else if (stemCapture?.file) {
+            formData.append('stem_image', stemCapture.file);
+          }
+          if (solutionCapture?.captureName) {
+            formData.append('solution_capture_name', solutionCapture.captureName);
+            formData.set('include_solution', 'true');
+          } else if (solutionCapture?.file) {
             formData.append('solution_image', solutionCapture.file);
             formData.set('include_solution', 'true');
           }
@@ -341,6 +600,8 @@
             await fetchJson('/api/library/card-capture', {
               method: 'POST', body: formData,
             });
+            stemCapture?.relinquish?.();
+            solutionCapture?.relinquish?.();
             closeLibraryDialog(dialog);
             showLibraryToast('已加入制卡任务');
             openLibraryTasksDialog();
@@ -856,7 +1117,8 @@
       card.className = 'library-card-open';
       card.dataset.libraryCardTab = tab.key;
       card.textContent = '制卡';
-      card.title = tab.kind === 'pdf' ? '按页码或全文识别并制卡' : '识别图片并制卡';
+      card.title = tab.kind === 'pdf'
+        ? '按页识别或直接框选当前 PDF 制卡' : '识别图片并制卡';
       toolbar.append(card);
     }
     return toolbar;
@@ -987,11 +1249,16 @@
       loadMarkdown(tab);
     } else if (tab.kind === 'pdf') {
       panel.append(pathToolbar(tab, false));
+      const stage = document.createElement('div');
+      stage.className = 'library-pdf-stage';
       const frame = document.createElement('iframe');
       frame.className = 'library-pdf-frame';
       frame.src = rawUrl;
       frame.title = tab.name;
-      panel.append(frame);
+      stage.append(frame);
+      panel.append(stage);
+      tab.pdfStage = stage;
+      tab.pdfFrame = frame;
     } else if (tab.kind === 'image') {
       panel.append(pathToolbar(tab, false));
       const stage = document.createElement('div');
@@ -1064,8 +1331,8 @@
       return false;
     }
     tab.panel?.remove();
-    ['content', 'editor', 'saveButton', 'saveStatus', 'text', 'savedText',
-      'mtime', 'loadError'].forEach(name => delete tab[name]);
+    ['content', 'editor', 'saveButton', 'saveStatus', 'pdfStage', 'pdfFrame',
+      'text', 'savedText', 'mtime', 'loadError'].forEach(name => delete tab[name]);
     Object.assign(tab, {
       path,
       kind,

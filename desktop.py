@@ -328,6 +328,175 @@ def _bank_state_dir(app_data_dir: Path, bank_dir: Path) -> Path:
     return app_data_dir / "banks" / digest
 
 
+def _client_css_capture_box(
+        client_rect: tuple[int, int, int, int], request_rect: dict
+) -> tuple[int, int, int, int]:
+    """把顶层网页 CSS 坐标换算成屏幕物理像素选区。"""
+    import math
+
+    try:
+        values = {
+            key: float(request_rect[key])
+            for key in ("x", "y", "width", "height",
+                        "viewport_width", "viewport_height")
+        }
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("截图选区参数无效") from None
+    if not all(math.isfinite(value) for value in values.values()):
+        raise ValueError("截图选区参数无效")
+    viewport_width = values["viewport_width"]
+    viewport_height = values["viewport_height"]
+    if viewport_width <= 0 or viewport_height <= 0:
+        raise ValueError("截图视口尺寸无效")
+
+    client_left, client_top, client_width, client_height = client_rect
+    if client_width <= 0 or client_height <= 0:
+        raise ValueError("桌面窗口客户区不可用")
+    left = max(0.0, min(viewport_width, values["x"]))
+    top = max(0.0, min(viewport_height, values["y"]))
+    right = max(0.0, min(viewport_width, values["x"] + values["width"]))
+    bottom = max(0.0, min(viewport_height, values["y"] + values["height"]))
+    if right <= left or bottom <= top:
+        raise ValueError("截图选区为空")
+
+    pixel_left = math.floor(left * client_width / viewport_width)
+    pixel_top = math.floor(top * client_height / viewport_height)
+    pixel_right = math.ceil(right * client_width / viewport_width)
+    pixel_bottom = math.ceil(bottom * client_height / viewport_height)
+    width = pixel_right - pixel_left
+    height = pixel_bottom - pixel_top
+    if width < 12 or height < 12:
+        raise ValueError("截图选区太小")
+    if width > 4096 or height > 4096 or width * height > 8_000_000:
+        raise ValueError("截图选区过大，请缩小范围后重试")
+    return client_left + pixel_left, client_top + pixel_top, width, height
+
+
+def _window_client_screen_rect(handle: int) -> tuple[int, int, int, int]:
+    """仅用缓存 HWND 读取客户区，避免桥接线程触碰 WinForms 对象。"""
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.IsWindow.argtypes = (wintypes.HWND,)
+    user32.IsWindow.restype = wintypes.BOOL
+    user32.IsIconic.argtypes = (wintypes.HWND,)
+    user32.IsIconic.restype = wintypes.BOOL
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    user32.GetClientRect.restype = wintypes.BOOL
+    user32.ClientToScreen.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.POINT))
+    user32.ClientToScreen.restype = wintypes.BOOL
+
+    if not user32.IsWindow(handle):
+        raise OSError("桌面窗口尚未就绪")
+    if user32.IsIconic(handle):
+        raise OSError("窗口最小化时不能截图")
+    if int(user32.GetForegroundWindow() or 0) != int(handle):
+        raise OSError("请先激活 QuizForge 窗口后再框选")
+    rect = wintypes.RECT()
+    origin = wintypes.POINT(0, 0)
+    if not user32.GetClientRect(handle, ctypes.byref(rect)):
+        raise OSError("无法读取桌面窗口尺寸")
+    if not user32.ClientToScreen(handle, ctypes.byref(origin)):
+        raise OSError("无法定位桌面窗口")
+    return origin.x, origin.y, rect.right - rect.left, rect.bottom - rect.top
+
+
+def _capture_screen_region_png(
+        screen_box: tuple[int, int, int, int], target: Path
+) -> None:
+    """用 GDI 只复制选区像素，避免 ImageGrab 扫描整块虚拟桌面。"""
+    from ctypes import wintypes
+    from PIL import Image
+
+    left, top, width, height = screen_box
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    user32.GetDC.argtypes = (wintypes.HWND,)
+    user32.GetDC.restype = wintypes.HDC
+    user32.ReleaseDC.argtypes = (wintypes.HWND, wintypes.HDC)
+    user32.ReleaseDC.restype = ctypes.c_int
+    gdi32.CreateCompatibleDC.argtypes = (wintypes.HDC,)
+    gdi32.CreateCompatibleDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleBitmap.argtypes = (wintypes.HDC, ctypes.c_int, ctypes.c_int)
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.SelectObject.argtypes = (wintypes.HDC, wintypes.HGDIOBJ)
+    gdi32.SelectObject.restype = wintypes.HGDIOBJ
+    gdi32.BitBlt.argtypes = (
+        wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        wintypes.HDC, ctypes.c_int, ctypes.c_int, wintypes.DWORD,
+    )
+    gdi32.BitBlt.restype = wintypes.BOOL
+    gdi32.DeleteObject.argtypes = (wintypes.HGDIOBJ,)
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    gdi32.DeleteDC.argtypes = (wintypes.HDC,)
+    gdi32.DeleteDC.restype = wintypes.BOOL
+
+    class BITMAPINFOHEADER(ctypes.Structure):
+        _fields_ = [
+            ("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
+            ("biHeight", wintypes.LONG), ("biPlanes", wintypes.WORD),
+            ("biBitCount", wintypes.WORD), ("biCompression", wintypes.DWORD),
+            ("biSizeImage", wintypes.DWORD), ("biXPelsPerMeter", wintypes.LONG),
+            ("biYPelsPerMeter", wintypes.LONG), ("biClrUsed", wintypes.DWORD),
+            ("biClrImportant", wintypes.DWORD),
+        ]
+
+    class BITMAPINFO(ctypes.Structure):
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER),
+                    ("bmiColors", wintypes.DWORD * 3)]
+
+    gdi32.GetDIBits.argtypes = (
+        wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintypes.UINT,
+        wintypes.LPVOID, ctypes.POINTER(BITMAPINFO), wintypes.UINT,
+    )
+    gdi32.GetDIBits.restype = ctypes.c_int
+
+    screen_dc = user32.GetDC(None)
+    memory_dc = None
+    bitmap = None
+    previous = None
+    try:
+        if not screen_dc:
+            raise OSError("无法读取当前屏幕画面")
+        memory_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        if not memory_dc or not bitmap:
+            raise OSError("无法创建截图缓冲区")
+        previous = gdi32.SelectObject(memory_dc, bitmap)
+        if not previous:
+            raise OSError("无法初始化截图缓冲区")
+        if not gdi32.BitBlt(
+                memory_dc, 0, 0, width, height, screen_dc, left, top,
+                0x00CC0020 | 0x40000000):
+            raise OSError("无法截取当前 PDF 画面")
+
+        info = BITMAPINFO()
+        info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+        info.bmiHeader.biWidth = width
+        info.bmiHeader.biHeight = -height
+        info.bmiHeader.biPlanes = 1
+        info.bmiHeader.biBitCount = 32
+        info.bmiHeader.biCompression = 0
+        pixels = ctypes.create_string_buffer(width * height * 4)
+        rows = gdi32.GetDIBits(
+            memory_dc, bitmap, 0, height, pixels, ctypes.byref(info), 0)
+        if rows != height:
+            raise OSError("无法读取截图像素")
+        image = Image.frombuffer(
+            "RGB", (width, height), pixels, "raw", "BGRX", 0, 1)
+        image.save(target, format="PNG")
+    finally:
+        if previous and memory_dc:
+            gdi32.SelectObject(memory_dc, previous)
+        if bitmap:
+            gdi32.DeleteObject(bitmap)
+        if memory_dc:
+            gdi32.DeleteDC(memory_dc)
+        if screen_dc:
+            user32.ReleaseDC(None, screen_dc)
+
+
 _OCR_DIRECTORY_LIST_FIELDS = frozenset({
     "collection_cache_dirs", "cleanup_dirs",
 })
@@ -757,6 +926,7 @@ class DesktopApi:
         self._taskbar_button_rect = None
         self._taskbar_rect_lock = threading.Lock()
         self._native_handle: int | None = None
+        self._capture_lock = threading.Lock()
         self.restart_requested = False
         self.restart_bank_dir: Path | None = None
         self.restart_subject: str | None = None
@@ -1108,6 +1278,77 @@ class DesktopApi:
             return {"ok": False, "error": "窗口缩放参数无效"}
         self._window.resize(target_width, target_height, fix_point)
         return {"ok": True, "width": target_width, "height": target_height}
+
+    def capture_client_rect(self, request_rect: dict) -> dict:
+        """截取当前桌面窗口客户区内的矩形，供 PDF 原位框选制卡。"""
+        if os.name != "nt":
+            return {"ok": False, "error": "当前系统不支持 PDF 画面框选"}
+        handle = self._native_handle
+        if handle is None:
+            return {"ok": False, "error": "桌面窗口尚未就绪，请稍后重试"}
+        if not isinstance(request_rect, dict):
+            return {"ok": False, "error": "截图选区参数无效"}
+        if not self._capture_lock.acquire(blocking=False):
+            return {"ok": False, "error": "正在处理上一处截图，请稍后重试"}
+
+        temporary: Path | None = None
+        try:
+            client_rect = _window_client_screen_rect(handle)
+            screen_box = _client_css_capture_box(client_rect, request_rect)
+            upload_dir = (
+                _bank_state_dir(self.app_data_dir, self.bank_dir)
+                / "uploads" / "batch"
+            )
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            name = f"library-card-{uuid.uuid4().hex}.png"
+            target = upload_dir / name
+            temporary = upload_dir / f".{name}.tmp"
+            _capture_screen_region_png(screen_box, temporary)
+            temporary.replace(target)
+            temporary = None
+            return {
+                "ok": True,
+                "name": name,
+                "width": screen_box[2],
+                "height": screen_box[3],
+            }
+        except (OSError, ValueError) as exc:
+            logging.getLogger(__name__).warning("PDF 框选截图失败：%s", exc)
+            return {"ok": False, "error": str(exc)}
+        except Exception:
+            logging.getLogger(__name__).exception("PDF 框选截图发生未预期错误")
+            return {"ok": False, "error": "截图失败，请重试"}
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+            self._capture_lock.release()
+
+    def discard_client_capture(self, raw_name: str) -> dict:
+        """回收尚未提交的桌面框选；只允许当前题库的随机 PNG 短名。"""
+        import re
+
+        name = str(raw_name or "").strip()
+        if not re.fullmatch(r"library-card-[0-9a-f]{32}\.png", name):
+            return {"ok": False, "error": "截图凭据无效"}
+        root = (
+            _bank_state_dir(self.app_data_dir, self.bank_dir)
+            / "uploads" / "batch"
+        ).resolve()
+        raw_target = root / name
+        if raw_target.is_symlink():
+            return {"ok": False, "error": "截图凭据无效"}
+        try:
+            target = raw_target.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return {"ok": True, "missing": True}
+        if target.parent != root or not target.is_file():
+            return {"ok": False, "error": "截图凭据无效"}
+        try:
+            target.unlink()
+        except OSError as exc:
+            logging.getLogger(__name__).warning("未提交框选截图回收失败：%s", exc)
+            return {"ok": False, "error": "截图回收失败"}
+        return {"ok": True}
 
     def choose_bank_directory(self) -> dict:
         """兼容旧页面：选择目录后直接保存；新页面使用浏览、保存两步接口。"""

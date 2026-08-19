@@ -552,6 +552,47 @@ class DesktopSettingsTests(unittest.TestCase):
             1024, 680, FixPoint.NORTH | FixPoint.WEST)
         self.assertFalse(api.window_resize(1200, 800, "bad-corner")["ok"])
 
+    def test_pdf_capture_maps_css_viewport_to_client_pixels(self):
+        box = desktop._client_css_capture_box(
+            (-1920, 40, 1500, 900),
+            {"x": 100, "y": 50, "width": 200, "height": 100,
+             "viewport_width": 1000, "viewport_height": 600},
+        )
+
+        self.assertEqual(box, (-1770, 115, 300, 150))
+
+    def test_pdf_capture_writes_short_token_to_current_bank_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bank = root / "bank"
+            data = root / "data"
+            bank.mkdir()
+            api = desktop.DesktopApi(bank, data, data / "desktop.json")
+            api._native_handle = 123
+            request_rect = {
+                "x": 10, "y": 20, "width": 120, "height": 80,
+                "viewport_width": 1000, "viewport_height": 600,
+            }
+
+            def fake_capture(_box, target):
+                target.write_bytes(b"png")
+
+            with (mock.patch.object(
+                    desktop, "_window_client_screen_rect",
+                    return_value=(0, 0, 1000, 600)),
+                  mock.patch.object(
+                    desktop, "_capture_screen_region_png",
+                    side_effect=fake_capture)):
+                result = api.capture_client_rect(request_rect)
+
+            self.assertTrue(result["ok"])
+            self.assertRegex(result["name"], r"^library-card-[0-9a-f]{32}\.png$")
+            capture = (desktop._bank_state_dir(data, bank)
+                       / "uploads" / "batch" / result["name"])
+            self.assertEqual(capture.read_bytes(), b"png")
+            self.assertTrue(api.discard_client_capture(result["name"])["ok"])
+            self.assertFalse(capture.exists())
+
     def test_desktop_shell_has_all_frameless_resize_handles(self):
         from app import app
 

@@ -1459,6 +1459,16 @@ def _save_library_card_upload(storage) -> str:
     return name
 
 
+def _existing_library_card_capture(raw_name) -> str:
+    """只接收桌面截图桥刚写入当前题库暂存区的短文件名。"""
+    name = str(raw_name or "").strip()
+    if not re.fullmatch(r"library-card-[0-9a-f]{32}\.png", name):
+        raise library_ops.LibraryOperationError(
+            "框选截图凭据无效，请重新框选", code="capture_invalid")
+    _library_card_upload_path(name)
+    return name
+
+
 @app.route("/api/library/pdf/info")
 def library_pdf_info():
     try:
@@ -1494,8 +1504,8 @@ def library_card_task_create():
 
 @app.route("/api/library/card-capture", methods=["POST"])
 def library_card_capture_create():
-    """把剪贴板/文件截图登记为制卡任务；暂存名只在内部任务快照中流转。"""
-    stored: list[str] = []
+    """把图片或桌面 PDF 框选登记为制卡任务；暂存名只在内部流转。"""
+    created_uploads: list[str] = []
     try:
         payload = request.form.to_dict()
         params = _prepare_library_card_common(payload)
@@ -1513,7 +1523,11 @@ def library_card_capture_create():
         solution_upload = request.files.get("solution_image")
         if stem_upload and stem_upload.filename:
             stem_name = _save_library_card_upload(stem_upload)
-            stored.append(stem_name)
+            created_uploads.append(stem_name)
+            params["stem_source"] = {"kind": "upload", "name": stem_name}
+        elif payload.get("stem_capture_name"):
+            stem_name = _existing_library_card_capture(
+                payload.get("stem_capture_name"))
             params["stem_source"] = {"kind": "upload", "name": stem_name}
         elif (context_target is not None
               and context_target.suffix.casefold() in config.EXAM_IMAGE_EXTS):
@@ -1524,14 +1538,21 @@ def library_card_capture_create():
 
         if solution_upload and solution_upload.filename:
             solution_name = _save_library_card_upload(solution_upload)
-            stored.append(solution_name)
+            created_uploads.append(solution_name)
+            params["solution_source"] = {
+                "kind": "upload", "name": solution_name,
+            }
+            params["include_solution"] = True
+        elif payload.get("solution_capture_name"):
+            solution_name = _existing_library_card_capture(
+                payload.get("solution_capture_name"))
             params["solution_source"] = {
                 "kind": "upload", "name": solution_name,
             }
             params["include_solution"] = True
         task = _queue_library_task("card_capture", params)
     except (_UploadRejected, library_ops.LibraryOperationError, OSError) as exc:
-        for name in stored:
+        for name in created_uploads:
             try:
                 (config.BATCH_UPLOAD_DIR / name).unlink(missing_ok=True)
             except OSError:
