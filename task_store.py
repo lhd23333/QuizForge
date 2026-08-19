@@ -2,7 +2,8 @@
 
 插件退出时会主动终止 Python 后端，所以任务状态不能只放在 ``app.py`` 的内存
 字典里。这里仅保存可恢复的业务状态，不负责执行线程；重启后由 ``app.py`` 把
-尚在 pending/converting 的任务标成中断，绝不自动重放付费 API 调用。
+尚在 pending/converting 的 OCR 任务，以及资料库工具的在途任务标成中断，绝不
+自动重放外部调用。
 
 文件采用“临时文件 + os.replace”原子覆盖，避免 Obsidian/系统退出时只写下一半
 JSON。所有入口共用一把进程锁，后台并发转换不会互相覆盖。
@@ -23,7 +24,10 @@ import config
 logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
-_KINDS = ("job", "batch")
+# 任务类型只决定快照顶层的命名空间，不改变 payload 的业务结构。资料库转换
+# 任务沿用同一份原子账本，避免再引入第二个 conversion_tasks.json。
+KINDS = ("job", "batch", "library")
+_KINDS = KINDS
 
 
 def _empty() -> dict:
@@ -119,6 +123,81 @@ def load(kind: str) -> list[tuple[str, dict]]:
         if isinstance(payload, dict):
             out.append((str(task_id), payload))
     return out
+
+
+def mark_interrupted(
+        kind: str,
+        statuses,
+        error: str,
+        *,
+        interrupted_status: str = "interrupted") -> list[tuple[str, dict]]:
+    """把指定类型中仍在执行的任务标为中断并返回全部任务。
+
+    资料库的 PDF/DOCX 操作可能在任意阶段被桌面进程终止；进程重启后不能猜测
+    外部工具是否已经写出结果，更不能自动再次调用。该函数在同一把锁内完成
+    “读取、修改、原子发布”，因此调用方拿到的列表对应同一份快照。除状态外，
+    已存在的 ``running``/``in_flight`` 控制位也会复位，方便后续 UI 明确提供
+    手动重试。``groups``/``tasks``/``items``/``operations`` 中的活动子任务
+    同样会被标记，兼容资料库批量工具而不要求 task_store 了解其业务字段。
+    """
+    if kind not in _KINDS:
+        raise ValueError(f"未知任务类型：{kind}")
+    active = {
+        str(value).strip().lower()
+        for value in (statuses or ())
+        if str(value).strip()
+    }
+    if not isinstance(error, str) or not error.strip():
+        raise ValueError("中断原因不能为空")
+    terminal_status = str(interrupted_status or "interrupted").strip()
+    if not terminal_status:
+        raise ValueError("中断状态不能为空")
+
+    def interrupt_node(node: dict, now: float) -> bool:
+        changed = False
+        # 资料库批量操作的容器名称在不同阶段可能不同；只遍历明确的列表
+        # 字段，避免误把 metadata 中的 status 当成执行状态。
+        for child_key in ("groups", "tasks", "items", "operations"):
+            children = node.get(child_key)
+            if not isinstance(children, list):
+                continue
+            for child in children:
+                if isinstance(child, dict) and interrupt_node(child, now):
+                    changed = True
+
+        status = str(node.get("status") or "").strip().lower()
+        active_node = status in active or bool(node.get("running")) \
+            or bool(node.get("in_flight"))
+        if not active_node and not changed:
+            return False
+        node["status"] = terminal_status
+        node["error"] = error
+        node["interrupted_at"] = now
+        if "running" in node:
+            node["running"] = 0
+        if "in_flight" in node:
+            node["in_flight"] = False
+        return True
+
+    with _lock:
+        data = _load_unlocked()
+        now = time.time()
+        changed = False
+        for item in data[kind].values():
+            payload = item.get("payload") if isinstance(item, dict) else None
+            if isinstance(payload, dict) and interrupt_node(payload, now):
+                changed = True
+        if changed:
+            _write_unlocked(data)
+
+        out = []
+        for task_id, item in data[kind].items():
+            payload = item.get("payload") if isinstance(item, dict) else None
+            if isinstance(payload, dict):
+                # JSON 快照只包含基础类型；浅拷贝足以隔离顶层，嵌套结构仍由
+                # 调用方按业务读取，避免在锁外意外修改 store 内的临时对象。
+                out.append((str(task_id), dict(payload)))
+        return out
 
 
 def purge_expired(days: int = 7) -> list[dict]:

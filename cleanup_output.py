@@ -61,7 +61,7 @@ def _payload_cleanup_dirs(value) -> set[Path]:
 
 def _active_uploads() -> set[Path]:
     active: set[Path] = set()
-    for kind in ("job", "batch"):
+    for kind in task_store.KINDS:
         for _, payload in task_store.load(kind):
             active.update(p.resolve() for p in _payload_paths(payload)
                           if _inside(p, config.UPLOAD_DIR))
@@ -71,7 +71,7 @@ def _active_uploads() -> set[Path]:
 def _active_cleanup_dirs() -> set[Path]:
     """返回仍被未过期任务引用的合集工作区绝对路径。"""
     active: set[Path] = set()
-    for kind in ("job", "batch"):
+    for kind in task_store.KINDS:
         for _, payload in task_store.load(kind):
             for path in _payload_cleanup_dirs(payload):
                 try:
