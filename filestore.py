@@ -26,6 +26,8 @@ import hashlib
 import threading
 import time
 import uuid
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
@@ -50,6 +52,18 @@ _SECTION_RE = re.compile(r"(?m)^##[ \t]+(.*?)[ \t]*$")
 # 内存索引：文件路径(str) -> 已解析记录（含 _path/_mtime）。按 mtime 判断是否需要重解析，
 # 使直接在 Obsidian 里改文件也能被下次请求感知到。
 _cache: dict[str, dict] = {}
+
+# 轻量题卡身份缓存：绝对路径 -> (mtime_ns, size, id, 是否题卡)。无限滚动首屏只需
+# 知道哪些 Markdown 是题卡，不该每次都重新打开三万份文件。mtime_ns + size 让
+# Obsidian 外部修改自动失效；独立锁允许路径快照用线程池并发读取未命中的文件头。
+_identity_cache: dict[str, tuple[int, int, str | None, bool]] = {}
+_identity_cache_lock = threading.RLock()
+_IDENTITY_SCAN_WORKERS = 32
+_QUESTION_PATHS_CACHE_SECONDS = 5.0
+_question_paths_snapshot: dict[
+    tuple[str, str], tuple[float, tuple[str, ...]]
+] = {}
+_question_paths_generation = 0
 
 # 一次页面请求会连续读取题目、标签和文件夹，用户随后点进试卷时也会立刻再读一遍。
 # Windows 上对上万份 Markdown 逐个 rglob/stat 需要数秒，因此短时间复用整次扫描；
@@ -86,6 +100,7 @@ def invalidate_scan_cache(*, folder_structure: bool = False) -> None:
     global _scan_snapshot, _scan_snapshot_root, _scan_snapshot_at
     global _tree_snapshot, _tree_snapshot_root, _tree_snapshot_at
     global _tags_snapshot, _tags_snapshot_root, _tags_snapshot_at
+    global _question_paths_generation
     with _scan_lock:
         _scan_snapshot = None
         _scan_snapshot_root = None
@@ -97,6 +112,11 @@ def invalidate_scan_cache(*, folder_structure: bool = False) -> None:
         _tags_snapshot = None
         _tags_snapshot_root = None
         _tags_snapshot_at = 0.0
+        # 题卡新增、移动、改类型都会改变无限滚动路径快照。身份缓存仍按文件指纹
+        # 复用，只清结果快照；generation 防止并发中的旧扫描在这里清空后重新写回。
+        with _identity_cache_lock:
+            _question_paths_snapshot.clear()
+            _question_paths_generation += 1
 
 
 def _save_selected_unlocked() -> None:
@@ -238,9 +258,55 @@ def _replace_note_section(extra: list[tuple[str, str]], note: str) -> list[tuple
 
 _FM_RE = re.compile(r"(?s)\A---\r?\n(.*?)\r?\n---\r?\n?(.*)\Z")
 
+_QUESTION_MARKDOWN_KIND = "question"
+
+
+def _is_question_meta(meta) -> bool:
+    """判断 Markdown 元数据是否属于题卡。
+
+    旧题卡没有身份字段，必须继续兼容；一旦显式写入 ``quizforge_kind``，则只有
+    ``question`` 能进入题库。资料文档、讲义及未来新增类型因此不会被误当成题目。
+    """
+    if not isinstance(meta, Mapping):
+        return False
+    if "quizforge_kind" not in meta:
+        return True
+    return (str(meta.get("quizforge_kind") or "").strip().casefold()
+            == _QUESTION_MARKDOWN_KIND)
+
+
+def _cached_question_identity(
+        path: Path, stat: os.stat_result) -> tuple[str | None, bool] | None:
+    """返回与当前文件指纹一致的身份缓存；旧指纹立即淘汰。"""
+    key = str(path)
+    signature = (stat.st_mtime_ns, stat.st_size)
+    with _identity_cache_lock:
+        cached = _identity_cache.get(key)
+        if cached is None:
+            return None
+        if cached[:2] != signature:
+            _identity_cache.pop(key, None)
+            return None
+        return cached[2], cached[3]
+
+
+def _has_question_identity_cache(path: Path) -> bool:
+    """只判断路径是否曾缓存；命中者才值得单独 stat 校验指纹。"""
+    with _identity_cache_lock:
+        return str(path) in _identity_cache
+
+
+def _remember_question_identity(path: Path, stat: os.stat_result,
+                                qid: str | None, is_question: bool) -> None:
+    """记录一次确定的身份判断；调用方必须传读取前取得的同一份 stat。"""
+    with _identity_cache_lock:
+        _identity_cache[str(path)] = (
+            stat.st_mtime_ns, stat.st_size, qid, bool(is_question))
+
 # frontmatter 里除了下列已知字段，其余字段（用户手写的自定义字段）原样保留，
 # 靠 ruamel 的 round-trip 能力自动做到，无需在代码里枚举。
 _KNOWN_DEFAULTS = {
+    "quizforge_kind": _QUESTION_MARKDOWN_KIND,
     "type": "",
     "difficulty": "",
     "source": "",
@@ -454,8 +520,55 @@ def _skip_rel(rel: Path) -> bool:
     return False
 
 
+def _question_record_from_path(
+        path: Path, stat: os.stat_result | None = None) -> dict | None:
+    """按路径读取一份题卡记录，并统一处理缓存与文档身份过滤。
+
+    所有会把 Markdown 暴露给题库的入口都必须经过这里。否则全量扫描排除了普通
+    文档，局部扫描或无限滚动却仍可能把同一文件当成题卡。
+    """
+    key = str(path)
+    if stat is None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+    cached = _cache.get(key)
+    if (cached is not None
+            and cached.get("_mtime_ns") == stat.st_mtime_ns
+            and cached.get("_size") == stat.st_size):
+        qid = str(cached.get("id") or path.stem)
+        if _is_question_meta(cached.get("_meta", {})):
+            _remember_question_identity(path, stat, qid, True)
+            return cached
+        _cache.pop(key, None)
+        _remember_question_identity(path, stat, None, False)
+        return None
+    try:
+        meta, body = _read_raw(path)
+    except Exception:
+        _cache.pop(key, None)
+        _remember_question_identity(path, stat, None, False)
+        return None
+    is_question = _is_question_meta(meta)
+    qid = (str(meta.get("id") or path.stem)
+           if isinstance(meta, Mapping) else None)
+    _remember_question_identity(path, stat, qid if is_question else None,
+                                is_question)
+    if not is_question:
+        _cache.pop(key, None)
+        return None
+    rec = _to_record(path, meta, body)
+    rec["_mtime"] = stat.st_mtime
+    rec["_mtime_ns"] = stat.st_mtime_ns
+    rec["_size"] = stat.st_size
+    rec["_meta"] = meta
+    _cache[key] = rec
+    return rec
+
+
 def _scan() -> dict[str, dict]:
-    """扫描 BANK_DIR 下全部 .md（跳过点目录/_assets），mtime 未变则用缓存。"""
+    """扫描 BANK_DIR 下题卡 Markdown，跳过保留目录与显式文档类型。"""
     global _scan_snapshot, _scan_snapshot_root, _scan_snapshot_at
     root = config.BANK_DIR.resolve()
     now = time.monotonic()
@@ -473,19 +586,13 @@ def _scan() -> dict[str, dict]:
                 if _skip_rel(rel):
                     continue
                 key = str(path)
-                mtime = path.stat().st_mtime
-                cached = _cache.get(key)
-                if cached is not None and cached["_mtime"] == mtime:
-                    found[key] = cached
-                    continue
                 try:
-                    meta, body = _read_raw(path)
-                except Exception:
+                    stat = path.stat()
+                except OSError:
                     continue
-                rec = _to_record(path, meta, body)
-                rec["_mtime"] = mtime
-                rec["_meta"] = meta
-                _cache[key] = rec
+                rec = _question_record_from_path(path, stat)
+                if rec is None:
+                    continue
                 found[key] = rec
             # 清掉已不存在的文件的缓存
             stale = set(_cache) - set(found)
@@ -544,22 +651,13 @@ def collection_records_snapshot(folder_id: str, *, recursive: bool = True) -> li
                 continue
             if _skip_rel(rel):
                 continue
-            key = str(path)
             try:
-                mtime = path.stat().st_mtime
+                stat = path.stat()
             except OSError:
                 continue
-            cached = _cache.get(key)
-            if cached is None or cached["_mtime"] != mtime:
-                try:
-                    meta, body = _read_raw(path)
-                except Exception:
-                    continue
-                cached = _to_record(path, meta, body)
-                cached["_mtime"] = mtime
-                cached["_meta"] = meta
-                _cache[key] = cached
-            records.append(cached)
+            record = _question_record_from_path(path, stat)
+            if record is not None:
+                records.append(record)
     with _selected_lock:
         selected = set(_selected)
     for rec in records:
@@ -579,16 +677,17 @@ def _natural_text_key(text: str) -> tuple:
 
 def _natural_rel_key(rel_path: str) -> tuple:
     """文件夹与题号按人眼顺序排列，避免第10题排在第2题前面。"""
-    return tuple(_natural_text_key(part) for part in PurePosixPath(rel_path).parts)
+    # 调用方传入的始终是 as_posix() 结果；这里直接拆字符串，避免三万条路径为了
+    # 排序再各自构造一个 PurePosixPath 及其内部对象。
+    return tuple(_natural_text_key(part) for part in rel_path.split("/"))
 
 
 def list_question_paths(folder_id: str = "") -> list[str]:
-    """只列题目路径、不读取 Markdown，供大题库无限滚动建立轻量快照。
+    """只读 Markdown 头部列出题卡路径，供大题库无限滚动建立轻量快照。
 
-    冷启动解析 1.3 万个 Markdown 约需二十多秒，而只列路径不到一秒。全部题目与
-    年份汇总的默认 custom 视图优先用这条路径，真正的题目内容等滚到对应批次时
-    再读取。排序采用“文件夹/文件名自然序”；单卷普通视图仍走 frontmatter 的
-    ``order``，不会改变用户手工调整过的卷内顺序。
+    这里只快读 frontmatter 的 ``id`` 与 ``quizforge_kind``，复杂 YAML 才回退完整
+    解析；题目正文仍等滚到对应批次时再读取。排序采用“文件夹/文件名自然序”；
+    单卷普通视图仍走 frontmatter 的 ``order``，不会改变用户手工调整过的卷内顺序。
     """
     root = config.BANK_DIR.resolve()
     target = _folder_abspath(folder_id).resolve()
@@ -596,16 +695,62 @@ def list_question_paths(folder_id: str = "") -> list[str]:
         raise ValueError("文件夹路径越界")
     if not target.is_dir():
         return []
-    paths = []
+    snapshot_key = (str(root), str(target))
+    now = time.monotonic()
+    with _identity_cache_lock:
+        snapshot = _question_paths_snapshot.get(snapshot_key)
+        if (snapshot is not None
+                and now - snapshot[0] < _QUESTION_PATHS_CACHE_SECONDS):
+            return list(snapshot[1])
+        generation = _question_paths_generation
+
+    jobs = []
+    # target 已经通过祖先关系校验，rglob 只会返回 bank_root 下的路径。字符串切片
+    # 可避免为三万份文件重复构造 PurePosixPath/relative_to 对象；records_from_paths
+    # 等外部传入路径的入口仍保留严格的 Path 校验。
+    bank_root_text = root.as_posix().rstrip("/")
+    bank_prefix_len = len(bank_root_text) + 1
+    reserved = _RESERVED_BANK_DIRS
     for path in target.rglob("*.md"):
-        try:
-            rel = path.relative_to(config.BANK_DIR)
-        except ValueError:
+        path_text = path.as_posix()
+        if not path_text.startswith(bank_root_text + "/"):
             continue
-        if _skip_rel(rel):
+        rel_text = path_text[bank_prefix_len:]
+        parts = rel_text.split("/")
+        if any(part.startswith(".") or part in reserved
+               for part in parts[:-1]):
             continue
-        paths.append(rel.as_posix())
-    return sorted(paths, key=_natural_rel_key)
+        jobs.append((path, rel_text))
+
+    paths = []
+    if jobs:
+        workers = min(_IDENTITY_SCAN_WORKERS, len(jobs))
+        uncertain = []
+        # stat 与头部快读都在工作线程执行。并发阶段不调用共享 ruamel 解析器；复杂
+        # YAML 收集后串行回退完整解析。按线程数分批只创建约 32 个 Future，避免为
+        # 三万份文件逐一提交任务的纯调度成本；轮转切片让各批磁盘位置分布更均匀。
+        batches = [jobs[index::workers] for index in range(workers)]
+        with ThreadPoolExecutor(max_workers=workers,
+                                thread_name_prefix="question-kind") as executor:
+            for batch_result in executor.map(
+                    _question_path_identity_batch, batches):
+                for rel_text, is_question, pending in batch_result:
+                    if pending is not None:
+                        uncertain.append((rel_text, pending))
+                    elif is_question:
+                        paths.append(rel_text)
+        for rel_text, pending in uncertain:
+            path, stat, peeked, raw_text = pending
+            _qid, is_question = _resolve_question_identity(
+                path, stat, peeked=peeked, raw_text=raw_text)
+            if is_question:
+                paths.append(rel_text)
+    result = tuple(sorted(paths, key=_natural_rel_key))
+    with _identity_cache_lock:
+        if generation == _question_paths_generation:
+            _question_paths_snapshot[snapshot_key] = (
+                time.monotonic(), result)
+    return list(result)
 
 
 def records_from_paths(paths: list[str]) -> list[dict]:
@@ -625,22 +770,13 @@ def records_from_paths(paths: list[str]) -> list[dict]:
                 continue
             if _skip_rel(disk_rel):
                 continue
-            key = str(path)
             try:
-                mtime = path.stat().st_mtime
+                stat = path.stat()
             except OSError:
                 continue
-            cached = _cache.get(key)
-            if cached is None or cached["_mtime"] != mtime:
-                try:
-                    meta, body = _read_raw(path)
-                except Exception:
-                    continue
-                cached = _to_record(path, meta, body)
-                cached["_mtime"] = mtime
-                cached["_meta"] = meta
-                _cache[key] = cached
-            records.append(cached)
+            record = _question_record_from_path(path, stat)
+            if record is not None:
+                records.append(record)
     refresh_selected(records)
     return records
 
@@ -648,55 +784,179 @@ def records_from_paths(paths: list[str]) -> list[dict]:
 _FRONTMATTER_PEEK_CHARS = 128 * 1024
 
 
-def _peek_question_id(path: Path) -> tuple[str | None, bool]:
-    """只读 frontmatter 头部取得题目 id，不解析正文和完整 YAML。
+_YAML_NULL_SCALARS = frozenset({"null", "Null", "NULL", "~", "''", '""'})
+_YAML_COMPLEX_SCALAR_PREFIXES = frozenset("!&*|>@`[]{}%?,")
 
-    返回 ``(id, True)`` 表示结果确定；遇到超长或带复杂 YAML 标记的 id 时返回
-    ``(None, False)``，让调用方回退现有完整扫描。QuizForge 自己写出的 id 都是简单
-    标量，这条快路径主要用于冷启动时从上万份文件里定位少量已选题。
+
+def _peek_simple_yaml_scalar(line: str, key: str) -> tuple[bool, str | None, bool]:
+    """从一行顶层 YAML 读取简单标量，返回（是否该字段、值、是否确定）。"""
+    prefix = f"{key}:"
+    if not line.startswith(prefix):
+        return False, None, True
+    raw = line[len(prefix):].strip()
+    if not raw or raw in _YAML_NULL_SCALARS:
+        return True, None, True
+    if raw[0] in {"'", '"'}:
+        quote = raw[0]
+        if len(raw) < 2 or raw[-1] != quote:
+            return True, None, False
+        value = raw[1:-1]
+        # 转义引号需要真正的 YAML 解析器才能还原。
+        if (quote == '"' and "\\" in value) or (quote == "'" and "''" in value):
+            return True, None, False
+        return True, value, True
+    comment = re.search(r"\s+#", raw)
+    value = raw[:comment.start()].rstrip() if comment else raw
+    if not value or value[0] in _YAML_COMPLEX_SCALAR_PREFIXES:
+        return True, None, False
+    if any(char.isspace() for char in value):
+        return True, None, False
+    return True, value, True
+
+
+def _peek_question_identity(path: Path, handle=None) -> tuple[str | None, bool, bool]:
+    """只读 frontmatter 头部取得题目 id 与身份，不解析正文和完整 YAML。
+
+    返回 ``(id, is_question, certain)``。复杂 YAML 标量交由调用方回退完整解析；
+    没有身份字段的旧文件继续按题卡处理。
     """
+    if handle is None:
+        try:
+            with path.open("r", encoding="utf-8", newline="") as opened:
+                return _peek_question_identity(path, opened)
+        except (OSError, UnicodeError):
+            # 完整扫描同样会跳过读不出的文件，不应让一个坏文件拖慢整个选题篮。
+            return None, False, True
+    first = handle.readline()
+    if first.rstrip("\r\n") != "---":
+        return path.stem, True, True
+    consumed = len(first)
+    found_id = None
+    id_seen = False
+    kind_seen = False
+    kind_value = None
+    for line in handle:
+        consumed += len(line)
+        if consumed > _FRONTMATTER_PEEK_CHARS:
+            return None, False, False
+        stripped = line.rstrip("\r\n")
+        if stripped == "---":
+            is_question = (not kind_seen or _is_question_meta(
+                {"quizforge_kind": kind_value}))
+            return (found_id or path.stem), is_question, True
+        matched, value, certain = _peek_simple_yaml_scalar(stripped, "id")
+        if matched:
+            if id_seen or not certain:
+                return None, False, False
+            id_seen = True
+            found_id = value or path.stem
+            continue
+        matched, value, certain = _peek_simple_yaml_scalar(
+            stripped, "quizforge_kind")
+        if matched:
+            if kind_seen or not certain:
+                return None, False, False
+            kind_seen = True
+            kind_value = value
+    # 缺少结束分隔线时 _parse_raw_text 也会按无 frontmatter 处理。
+    return path.stem, True, True
+
+
+def _read_question_identity_once(
+        path: Path,
+) -> tuple[os.stat_result, tuple[str | None, bool, bool], str | None]:
+    """单次打开文件，以 fstat 建指纹并快读；复杂 YAML 顺便带回全文。"""
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        stat = os.fstat(handle.fileno())
+        peeked = _peek_question_identity(path, handle)
+        raw_text = None
+        if not peeked[2]:
+            handle.seek(0)
+            raw_text = handle.read()
+    return stat, peeked, raw_text
+
+
+def _question_path_identity_job(
+        job: tuple[Path, str],
+) -> tuple[str, bool, tuple | None]:
+    """并发完成 stat/缓存判定；未知文件只 open 一次并用 fstat 建指纹。"""
+    path, rel_text = job
+    if _has_question_identity_cache(path):
+        try:
+            stat = path.stat()
+        except OSError:
+            return rel_text, False, None
+        cached = _cached_question_identity(path, stat)
+        if cached is not None:
+            return rel_text, cached[1], None
     try:
-        with path.open("r", encoding="utf-8", newline="") as handle:
-            first = handle.readline()
-            if first.rstrip("\r\n") != "---":
-                return path.stem, True
-            consumed = len(first)
-            found = None
-            for line in handle:
-                consumed += len(line)
-                if consumed > _FRONTMATTER_PEEK_CHARS:
-                    return None, False
-                stripped = line.rstrip("\r\n")
-                if stripped == "---":
-                    return (found or path.stem), True
-                if not stripped.startswith("id:"):
-                    continue
-                raw = stripped[3:].strip()
-                if not raw or raw in {"null", "Null", "NULL", "~", "''", '""'}:
-                    found = path.stem
-                elif raw[0] in {"'", '"'}:
-                    if len(raw) < 2 or raw[-1] != raw[0]:
-                        return None, False
-                    found = raw[1:-1]
-                else:
-                    comment = re.search(r"\s+#", raw)
-                    value = raw[:comment.start()].rstrip() if comment else raw
-                    if not value or any(char.isspace() for char in value):
-                        return None, False
-                    found = value
-            # 缺少结束分隔线时 _parse_raw_text 也会按无 frontmatter 处理。
-            return path.stem, True
-    except (OSError, UnicodeError):
-        # 完整扫描同样会跳过读不出的文件，不应让一个坏文件拖慢整个选题篮。
-        return None, True
+        stat, peeked, raw_text = _read_question_identity_once(path)
+    except Exception:
+        return rel_text, False, None
+    qid, is_question, certain = peeked
+    if certain:
+        _remember_question_identity(
+            path, stat, qid if is_question else None, is_question)
+        return rel_text, is_question, None
+    return rel_text, False, (path, stat, peeked, raw_text)
+
+
+def _question_path_identity_batch(jobs: list[tuple[Path, str]]) -> list[tuple]:
+    """在线程内顺序处理一批路径，减少大题库的 Future 数量。"""
+    return [_question_path_identity_job(job) for job in jobs]
+
+
+def _resolve_question_identity(
+        path: Path, stat: os.stat_result | None = None, *,
+        peeked: tuple[str | None, bool, bool] | None = None,
+        raw_text: str | None = None,
+) -> tuple[str | None, bool]:
+    """返回最终题卡身份；缓存命中不打开文件，复杂 YAML 才完整解析。"""
+    if stat is None:
+        if _has_question_identity_cache(path):
+            try:
+                stat = path.stat()
+            except OSError:
+                return None, False
+            cached = _cached_question_identity(path, stat)
+            if cached is not None:
+                return cached
+        try:
+            stat, peeked, raw_text = _read_question_identity_once(path)
+        except Exception:
+            return None, False
+    else:
+        cached = _cached_question_identity(path, stat)
+        if cached is not None:
+            return cached
+    qid, is_question, certain = peeked or (None, False, False)
+    if not certain:
+        try:
+            meta, _body = (_parse_raw_text(raw_text) if raw_text is not None
+                           else _read_raw(path))
+        except Exception:
+            qid, is_question = None, False
+        else:
+            is_question = _is_question_meta(meta)
+            qid = (str(meta.get("id") or path.stem)
+                   if is_question and isinstance(meta, Mapping) else None)
+    _remember_question_identity(
+        path, stat, qid if is_question else None, is_question)
+    return qid, is_question
+
+
+def _is_question_path(path: Path) -> bool:
+    """按文件指纹复用身份；未命中时快读头部，复杂 YAML 再完整解析。"""
+    _qid, is_question = _resolve_question_identity(path)
+    return is_question
 
 
 def records_from_ids(ids: list[str]) -> list[dict]:
     """按少量题目 id 读取记录，冷启动不解析整座题库。
 
     已展示题目优先命中 ``_cache``；其余只扫描 Markdown 的 frontmatter 头部来找
-    路径，再复用 ``records_from_paths`` 完整解析命中的文件。只有遇到无法安全判断
-    的复杂旧 frontmatter 时才回退 ``_all_records``，保持旧数据兼容。
+    路径，再复用 ``records_from_paths`` 完整解析命中的文件。复杂旧 frontmatter
+    只回退解析当前文件，不为少量 id 扫描并解析整座题库。
     """
     ordered = list(dict.fromkeys(str(qid) for qid in ids if qid))
     if not ordered:
@@ -705,6 +965,8 @@ def records_from_ids(ids: list[str]) -> list[dict]:
     cached_paths = {}
     with _scan_lock:
         for key, record in _cache.items():
+            if not _is_question_meta(record.get("_meta", {})):
+                continue
             qid = str(record.get("id") or "")
             if qid in wanted and Path(key).is_file():
                 cached_paths[qid] = Path(key)
@@ -726,7 +988,6 @@ def records_from_ids(ids: list[str]) -> list[dict]:
             records_by_id[qid] = record
 
     unresolved = wanted - set(records_by_id)
-    uncertain = False
     found_paths = {}
     if unresolved:
         for path in config.BANK_DIR.rglob("*.md"):
@@ -736,9 +997,8 @@ def records_from_ids(ids: list[str]) -> list[dict]:
                 continue
             if _skip_rel(rel):
                 continue
-            qid, certain = _peek_question_id(path)
-            uncertain = uncertain or not certain
-            if qid in unresolved:
+            qid, is_question = _resolve_question_identity(path)
+            if is_question and qid in unresolved:
                 found_paths[qid] = rel.as_posix()
                 unresolved.remove(qid)
                 if not unresolved:
@@ -747,13 +1007,6 @@ def records_from_ids(ids: list[str]) -> list[dict]:
                 found_paths[qid] for qid in ordered if qid in found_paths]):
             qid = str(record.get("id") or "")
             if qid in wanted:
-                records_by_id[qid] = record
-
-    unresolved = wanted - set(records_by_id)
-    if unresolved and uncertain:
-        for record in _all_records():
-            qid = str(record.get("id") or "")
-            if qid in unresolved:
                 records_by_id[qid] = record
     return [records_by_id[qid] for qid in ordered if qid in records_by_id]
 
@@ -1282,6 +1535,8 @@ def _next_temporary_question_index(target_dir: Path) -> int:
     maximum = 0
     if target_dir.is_dir():
         for path in target_dir.glob("*.md"):
+            if not _is_question_path(path):
+                continue
             match = _TEMPORARY_TITLE_RE.fullmatch(path.stem)
             if match:
                 maximum = max(maximum, int(match.group(1)))
@@ -1721,6 +1976,8 @@ def list_deleted_questions() -> list[dict]:
             meta, body = _read_raw(path)
         except Exception:
             continue
+        if not _is_question_meta(meta):
+            continue
         rec = _to_record(path, meta, body)
         rec["original_path"] = meta.get("_trash_original_path", "")
         rec["deleted_at"] = meta.get("_trash_deleted_at", "")
@@ -1731,7 +1988,12 @@ def list_deleted_questions() -> list[dict]:
 
 def restore_question(qid: str):
     for path in config.TRASH_DIR.glob("*.md"):
-        meta, body = _read_raw(path)
+        try:
+            meta, body = _read_raw(path)
+        except Exception:
+            continue
+        if not _is_question_meta(meta):
+            continue
         if str(meta.get("id")) != str(qid):
             continue
         original = meta.get("_trash_original_path") or f"{qid}.md"
@@ -1751,7 +2013,12 @@ def restore_question(qid: str):
 
 def purge_question(qid: str):
     for path in config.TRASH_DIR.glob("*.md"):
-        meta, body = _read_raw(path)
+        try:
+            meta, body = _read_raw(path)
+        except Exception:
+            continue
+        if not _is_question_meta(meta):
+            continue
         if str(meta.get("id")) == str(qid):
             refs = _refs_in(meta, body)
             path.unlink()
@@ -2352,9 +2619,10 @@ def remove_from_collection(qid: str, folder_id: str = ""):
 # 目录时它自然在内。那张表和那套清理逻辑在这个模型下没有对应物。
 # ---------------------------------------------------------------------------
 
-# 原卷不是 .md，不会被 _scan 当成题目；也不放 _assets（那儿是正文引用的图片，
-# 且被 _skip_rel 排除）。就摊在题所在的那个目录里，跟题目并列。
+# 原卷不是 Markdown，不会被 _scan 当成题目；也不放 _assets（那儿是正文引用的
+# 图片，且被 _skip_rel 排除）。就摊在题所在的那个目录里，跟题目并列。
 _PAPER_MAX_STEM = 60
+_MARKDOWN_SUFFIXES = frozenset({".md", ".markdown"})
 
 
 def paper_filename(display_name: str, kind: str = "exam") -> str:
@@ -2431,16 +2699,17 @@ def list_papers(folder_id: str) -> list[dict]:
     父文件夹上看到的题来自子文件夹时，对应的原卷也该在同一个面板里看得见，否则
     用户得逐级点进去找。返回项里的 `folder` 标出它实际在哪一级。
 
-    原卷 = 目录里的**非 .md 普通文件**。判据是排除法而不是白名单扩展名：用户可能
+    原卷 = 目录里的**非 Markdown 普通文件**。判据是排除法而不是白名单扩展名：用户可能
     往里放 .zip 讲义、.png 扫描页，列不出来只会让人以为文件丢了。跳过点开头的
-    文件/目录与 `_assets`（口径同 `_skip_rel`），跳过 `.md`（那是题目）。
+    文件/目录与 `_assets`（口径同 `_skip_rel`），跳过 `.md` / `.markdown`
+    （题卡或资料文档）。
     """
     root = _folder_abspath(folder_id)
     if not root.is_dir():
         return []
     out: list[dict] = []
     for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() == ".md":
+        if not path.is_file() or path.suffix.lower() in _MARKDOWN_SUFFIXES:
             continue
         try:
             rel = path.relative_to(config.BANK_DIR)
@@ -2467,7 +2736,7 @@ def list_papers(folder_id: str) -> list[dict]:
 
 
 def paper_abspath(paper_id: str) -> Path | None:
-    """原卷 id（相对路径）→ 绝对路径。越界/不存在/是 .md 一律返回 None。
+    """原卷 id（相对路径）→ 绝对路径。越界/不存在/Markdown 一律返回 None。
 
     **这是原卷的唯一取路入口，不许别处自己拼**：id 来自请求参数，`../` 拼进去就是
     一个任意文件读取/删除接口，而软件版无鉴权，这条尤其不能松（与 `/outfile/<token>`
@@ -2483,7 +2752,7 @@ def paper_abspath(paper_id: str) -> Path | None:
         return None
     if root != target and root not in target.parents:
         return None
-    if not target.is_file() or target.suffix.lower() == ".md":
+    if not target.is_file() or target.suffix.lower() in _MARKDOWN_SUFFIXES:
         return None
     rel = target.relative_to(root)
     if _skip_rel(rel) or target.name.startswith("."):

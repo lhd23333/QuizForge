@@ -1,6 +1,7 @@
 """文件题库批量建题的顺序与扫描次数回归。"""
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -609,6 +610,207 @@ class FilestoreBatchCreateTests(unittest.TestCase):
 
         self.assertEqual([row["body"] for row in rows], ["第2题", "第10题"])
         self.assertEqual(read_raw.call_count, 2)
+
+    def test_question_path_snapshot_reuses_identity_without_reopening_files(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            root = Path(td)
+            (root / "题卡.md").write_text(filestore._render_raw({
+                "id": "question-id", "quizforge_kind": "question",
+            }, "题目"), encoding="utf-8", newline="\n")
+            (root / "资料.md").write_text(filestore._render_raw({
+                "id": "document-id", "quizforge_kind": "document",
+            }, "资料"), encoding="utf-8", newline="\n")
+            filestore._identity_cache.clear()
+
+            with mock.patch.object(
+                    filestore, "_peek_question_identity",
+                    wraps=filestore._peek_question_identity) as peek:
+                first = filestore.list_question_paths()
+            self.assertEqual(first, ["题卡.md"])
+            self.assertEqual(peek.call_count, 2)
+            first_generation = filestore._question_paths_generation
+
+            with mock.patch.object(
+                    filestore, "_peek_question_identity",
+                    side_effect=AssertionError("缓存命中后不应再次快读")), \
+                    mock.patch.object(
+                        Path, "open",
+                        side_effect=AssertionError("缓存命中后不应再次打开文件")), \
+                    mock.patch.object(
+                        Path, "rglob",
+                        side_effect=AssertionError("TTL 内应直接复用完整快照")):
+                second = filestore.list_question_paths()
+
+            future = (time.monotonic()
+                      + filestore._QUESTION_PATHS_CACHE_SECONDS + 1)
+            with mock.patch.object(filestore.time, "monotonic", return_value=future), \
+                    mock.patch.object(
+                        filestore, "_peek_question_identity",
+                        side_effect=AssertionError("指纹命中后不应再次快读")), \
+                    mock.patch.object(
+                        Path, "open",
+                        side_effect=AssertionError("指纹命中后不应再次打开文件")):
+                after_ttl = filestore.list_question_paths()
+
+        self.assertEqual(second, first)
+        self.assertEqual(after_ttl, first)
+        self.assertEqual(filestore._question_paths_generation, first_generation)
+
+    def test_question_identity_cache_invalidates_after_external_edit(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            path = Path(td) / "资料.md"
+            path.write_text(filestore._render_raw({
+                "id": "same-id", "quizforge_kind": "document",
+            }, "短文"), encoding="utf-8", newline="\n")
+            filestore._identity_cache.clear()
+            self.assertEqual(filestore.list_question_paths(), [])
+            before = path.stat()
+
+            # 模拟 Obsidian 直接修改，不调用 QuizForge 的缓存失效入口；正文长度变化
+            # 保证即使极端文件系统没有推进 mtime，size 也会让身份缓存失效。
+            path.write_text(filestore._render_raw({
+                "id": "same-id", "quizforge_kind": "question",
+            }, "修改后的题目正文，长度明显不同"), encoding="utf-8", newline="\n")
+            after = path.stat()
+            self.assertNotEqual(
+                (before.st_mtime_ns, before.st_size),
+                (after.st_mtime_ns, after.st_size))
+            future = (time.monotonic()
+                      + filestore._QUESTION_PATHS_CACHE_SECONDS + 1)
+            with mock.patch.object(filestore.time, "monotonic", return_value=future), \
+                    mock.patch.object(
+                        filestore, "_peek_question_identity",
+                        wraps=filestore._peek_question_identity) as peek:
+                refreshed = filestore.list_question_paths()
+
+        self.assertEqual(refreshed, ["资料.md"])
+        self.assertEqual(peek.call_count, 1)
+
+    def test_parsed_question_record_backfills_identity_cache(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            path = Path(td) / "题卡.md"
+            path.write_text(filestore._render_raw({
+                "id": "question-id", "quizforge_kind": "question",
+            }, "题目"), encoding="utf-8", newline="\n")
+            filestore._cache.clear()
+            filestore._identity_cache.clear()
+
+            rows = filestore.records_from_paths(["题卡.md"])
+            with mock.patch.object(
+                    filestore, "_peek_question_identity",
+                    side_effect=AssertionError("完整解析已回填身份缓存")):
+                paths = filestore.list_question_paths()
+
+        self.assertEqual([row["id"] for row in rows], ["question-id"])
+        self.assertEqual(paths, ["题卡.md"])
+
+    def test_document_identity_is_excluded_from_every_question_read_path(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            root = Path(td)
+            folder = root / "资料"
+            folder.mkdir()
+            (folder / "旧题.md").write_text("旧题正文", encoding="utf-8")
+            (folder / "新题.md").write_text(filestore._render_raw({
+                "id": "question-id", "quizforge_kind": "question",
+            }, "新题正文"), encoding="utf-8", newline="\n")
+            for name, kind in (("文档", "document"), ("讲义", "handout"),
+                               ("未来类型", "worksheet")):
+                (folder / f"{name}.md").write_text(filestore._render_raw({
+                    "id": f"{kind}-id", "quizforge_kind": kind,
+                }, f"{name}正文 ![[{name}.png]]"), encoding="utf-8", newline="\n")
+            # 复杂标量强制 records_from_ids 走完整扫描回退，结果仍须遵守同一身份规则。
+            (folder / "复杂题.md").write_text(
+                "---\nid: complex-question\nquizforge_kind: >-\n  question\n---\n\n复杂题",
+                encoding="utf-8", newline="\n")
+            (folder / "复杂文档.md").write_text(
+                "---\nid: complex-document\nquizforge_kind: >-\n  document\n---\n\n复杂文档",
+                encoding="utf-8", newline="\n")
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            expected = {"旧题", "question-id", "complex-question"}
+
+            self.assertEqual(
+                {row["id"] for row in filestore.all_records_snapshot()}, expected)
+            self.assertEqual(
+                {row["id"] for row in filestore.collection_records_snapshot("资料")},
+                expected)
+            paths = filestore.list_question_paths("资料")
+            self.assertEqual({Path(path).stem for path in paths},
+                             {"旧题", "新题", "复杂题"})
+            self.assertEqual(
+                {row["id"] for row in filestore.records_from_paths([
+                    path.relative_to(root).as_posix() for path in folder.glob("*.md")
+                ])}, expected)
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+            rows = filestore.records_from_ids([
+                "旧题", "question-id", "document-id", "handout-id",
+                "worksheet-id", "complex-question", "complex-document",
+            ])
+
+            self.assertEqual({row["id"] for row in rows}, expected)
+            with mock.patch.object(
+                    filestore, "_registered_bank_roots",
+                    return_value=[root.resolve()]):
+                live, _stats = filestore._registered_live_refs()
+            self.assertIn("文档.png", live)
+
+    def test_new_questions_write_kind_and_temp_index_ignores_documents(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            folder = Path(td) / "临时卡片"
+            folder.mkdir()
+            (folder / "临时卡2.md").write_text("旧题", encoding="utf-8")
+            (folder / "临时卡99.md").write_text(filestore._render_raw({
+                "id": "document-id", "quizforge_kind": "document",
+            }, "普通文档"), encoding="utf-8", newline="\n")
+            filestore._cache.clear()
+            filestore.invalidate_scan_cache()
+
+            self.assertEqual(filestore.next_temporary_question_title(), "临时卡3")
+            qid = filestore.create_question(
+                "新题", folder="临时卡片", temporary=True)
+            row = filestore.get_question(qid)
+            meta, _body = filestore._read_raw(Path(td) / row["path"])
+
+        self.assertEqual(row["title"], "临时卡3")
+        self.assertEqual(meta["quizforge_kind"], "question")
+
+    def test_document_markdown_stays_out_of_recycle_and_paper_panels(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)), \
+                mock.patch.object(config, "TRASH_DIR", Path(td) / ".trash"):
+            root = Path(td)
+            config.TRASH_DIR.mkdir()
+            document = config.TRASH_DIR / "资料.md"
+            document.write_text(filestore._render_raw({
+                "id": "document-id", "quizforge_kind": "document",
+                "_trash_deleted_at": "2026-01-01T00:00:00",
+            }, "资料"), encoding="utf-8", newline="\n")
+            (config.TRASH_DIR / "题目.md").write_text(filestore._render_raw({
+                "id": "question-id", "quizforge_kind": "question",
+                "_trash_deleted_at": "2026-01-02T00:00:00",
+            }, "题目"), encoding="utf-8", newline="\n")
+            (root / "资料.md").write_text("资料", encoding="utf-8")
+            (root / "旧资料.markdown").write_text("旧资料", encoding="utf-8")
+            (root / "原卷.pdf").write_bytes(b"pdf")
+
+            self.assertEqual(
+                [row["id"] for row in filestore.list_deleted_questions()],
+                ["question-id"])
+            with self.assertRaises(KeyError):
+                filestore.restore_question("document-id")
+            filestore.purge_question("document-id")
+            self.assertTrue(document.exists())
+            self.assertEqual(
+                [row["filename"] for row in filestore.list_papers("")],
+                ["原卷.pdf"])
+            self.assertIsNone(filestore.paper_abspath("资料.md"))
+            self.assertIsNone(filestore.paper_abspath("旧资料.markdown"))
 
     def test_navigation_tree_only_expands_active_path(self):
         with tempfile.TemporaryDirectory() as td, \
