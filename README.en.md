@@ -94,9 +94,9 @@ The sections below retain the complete technical and compatibility notes. Regula
 
 ## Desktop prototype
 
-The source and daily installed build are finalized as `1.0.0` (file version `1.0.0.0`). Unsigned Setup candidates built locally and by GitHub Actions are restricted to packaging verification and SignPath onboarding; they are not public releases and will not be uploaded to Releases. The public installer will follow after trusted Windows code signing and in-place upgrade verification.
+The source and daily installed build are being prepared as `1.1.0` (file version `1.1.0.0`). Unsigned Setup candidates built locally and by GitHub Actions are restricted to packaging verification and SignPath onboarding; they are not public releases and will not be uploaded to Releases. The public installer will follow after trusted Windows code signing and in-place upgrade verification.
 
-Historical `0.17.0-beta` test installers remain local to the maintainer and are not tracked in the repository. The pre-release direct-bundle update to `1.0.0` preserved bank registration, task state, OCR/LLM configuration, interface settings, and legacy compatibility files.
+Historical `0.17.0-beta` test installers remain local to the maintainer and are not tracked in the repository. Every formal build repeats the in-place directory update checks to preserve bank registration, task state, OCR/LLM configuration, interface settings, and legacy compatibility files.
 
 Updates do not require uninstalling first: run the newer setup and keep the existing installation directory. Program files live in that directory, while bank registration, conversion tasks, encrypted credentials, device identity, and compatibility files remain under `%LOCALAPPDATA%\QuizForge` or the user-selected bank directories. The server is optional and is only used for a user-initiated HTTPS update-manifest check; it does not receive bank content or credentials.
 

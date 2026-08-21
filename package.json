@@ -2,7 +2,7 @@
   "name": "quizforge-desktop-ui",
   "private": true,
   "type": "module",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "QuizForge 独立软件版前端构建工具",
   "scripts": {
     "build:handouts": "esbuild frontend/handout-editor.js --bundle --minify --outfile=static/js/handout-editor.bundle.js",

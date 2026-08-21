@@ -2,8 +2,8 @@ param(
     [ValidateSet("auto", "pyinstaller", "nuitka")]
     [string]$Engine = "auto",
     [string]$OutputDir = "build\desktop",
-    [string]$Version = "1.0.0",
-    [string]$FileVersion = "1.0.0.0"
+    [string]$Version = "1.1.0",
+    [string]$FileVersion = "1.1.0.0"
 )
 
 # Keep this PowerShell 5.1 script ASCII-only. Windows PowerShell reads a UTF-8

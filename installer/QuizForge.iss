@@ -1,8 +1,8 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.1.0"
 #endif
 #ifndef MyFileVersion
-  #define MyFileVersion "1.0.0.0"
+  #define MyFileVersion "1.1.0.0"
 #endif
 #ifndef MySourceDir
   #define MySourceDir "..\build\desktop\QuizForge"
