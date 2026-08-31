@@ -355,6 +355,16 @@ class PracticeExportTests(unittest.TestCase):
         self.assertEqual(exporter.choice_cols(full_width_short), 4)
         self.assertEqual(exporter._practice_choice_cols(full_width_short), 2)
 
+    def test_choice_columns_reserve_space_for_option_labels(self):
+        options = [
+            r"$\displaystyle A.$ $\displaystyle \{ x \mid -1 \leq x \leq 2\}$",
+            r"$\displaystyle B.$ $\displaystyle \{ x \mid -1 < x \leq 2\}$",
+            r"$\displaystyle C.$ $\displaystyle \{0,1,2\}$",
+            r"$\displaystyle D.$ $\displaystyle \{-1,0,1,2\}$",
+        ]
+
+        self.assertEqual(exporter.choice_cols(options), 2)
+
     def test_practice_image_split_wraps_text_below_figure(self):
         cases = [
             ("单选题", "题干\nQFIGSLOT0\nA. 1 B. 2 C. 3 D. 4", "full"),

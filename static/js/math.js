@@ -47,20 +47,63 @@
     ignoredTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code', 'option'],
   };
 
+  const preferredOptionColumns = new WeakMap();
+
+  function normalizeOptionColumns(value) {
+    const cols = Number(value);
+    return cols === 4 || cols === 2 ? cols : 1;
+  }
+
+  function optionIntrinsicWidth(option) {
+    const previous = {
+      whiteSpace: option.style.whiteSpace,
+      wordBreak: option.style.wordBreak,
+      overflowX: option.style.overflowX,
+    };
+    option.style.whiteSpace = 'nowrap';
+    option.style.wordBreak = 'normal';
+    option.style.overflowX = 'visible';
+    const width = option.scrollWidth;
+    Object.assign(option.style, previous);
+    return width;
+  }
+
+  function fitOptionGrid(grid) {
+    if (!preferredOptionColumns.has(grid)) {
+      preferredOptionColumns.set(grid, normalizeOptionColumns(grid.dataset.cols));
+    }
+    if (grid.clientWidth <= 0) return;
+
+    let cols = preferredOptionColumns.get(grid);
+    grid.dataset.cols = String(cols);
+    while (cols > 1) {
+      const overflow = [...grid.querySelectorAll('.q-opt')]
+        .some(option => optionIntrinsicWidth(option) > option.clientWidth + 1);
+      if (!overflow) break;
+      cols = cols === 4 ? 2 : 1;
+      grid.dataset.cols = String(cols);
+      // 下一轮读取尺寸会触发布局刷新，再检查降列后的真实结果。
+    }
+  }
+
+  const optionResizeObserver = typeof window.ResizeObserver === 'function'
+    ? new window.ResizeObserver(entries => entries.forEach(entry => fitOptionGrid(entry.target)))
+    : null;
+
+  function optionGridsIn(node) {
+    if (!node || node.nodeType !== 1) return [];
+    const grids = [...node.querySelectorAll('.q-opts')];
+    if (node.matches('.q-opts')) grids.unshift(node);
+    return grids;
+  }
+
   function fitOptionColumns(scope) {
-    // 服务端先按公式源码宽度和文字栏占比选列数；KaTeX 完成后再用真实 DOM 宽度
-    // 做一次只降不升的复核。字体、根号与嵌套分式的最终像素宽无法由 Python 精确
-    // 预知，但浏览器可以直接量到，发现溢出就 4→2→1，绝不让公式盖住右图。
-    (scope || document).querySelectorAll('.q-split-text .q-opts').forEach(grid => {
-      let cols = Number(grid.dataset.cols || 1);
-      while (cols > 1) {
-        const overflow = [...grid.querySelectorAll('.q-opt')]
-          .some(option => option.scrollWidth > option.clientWidth + 1);
-        if (!overflow) break;
-        cols = cols === 4 ? 2 : 1;
-        grid.dataset.cols = String(cols);
-        // 下一轮读取 scrollWidth/clientWidth 会触发布局刷新，再检查降列后的真实结果。
-      }
+    // 服务端先按公式源码宽度选首选列数；KaTeX 完成后按当前容器真实宽度复核。
+    // 临时禁用换行才能量到选项固有宽度，否则换行后的 scrollWidth 会掩盖拥挤。
+    const root = scope || document;
+    optionGridsIn(root).forEach(grid => {
+      fitOptionGrid(grid);
+      if (optionResizeObserver) optionResizeObserver.observe(grid);
     });
   }
 
@@ -81,5 +124,15 @@
   // 首屏：KaTeX 是同步的，直接排完整篇再摘 .math-pending（见 style.css）。
   // 本文件用 defer 引入，跑到这里 DOM 已完整，不必再等 DOMContentLoaded。
   typeset(document.body);
+  if (optionResizeObserver && typeof window.MutationObserver === 'function') {
+    new window.MutationObserver(records => records.forEach(record => {
+      record.removedNodes.forEach(node => {
+        optionGridsIn(node).forEach(grid => optionResizeObserver.unobserve(grid));
+      });
+      record.addedNodes.forEach(node => {
+        if (node.isConnected) fitOptionColumns(node);
+      });
+    })).observe(document.body, {childList: true, subtree: true});
+  }
   document.documentElement.classList.remove('math-pending');
 })();

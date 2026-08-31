@@ -282,9 +282,10 @@ def _visible_len(text: str) -> int:
 def choice_cols(parts: list[str], width_fraction: float = 1.0) -> int:
     """按最长选项的可见宽度和可用栏宽决定列数。
 
-    整页宽时仍是短(<=10)→4、中(<=28)→2、长→1；图文分栏时把两档阈值按
-    文字栏占整页的比例同步缩小。此前选项虽然按公式长度选了两列，却仍拿整页阈值
-    判断已经被右图压窄的左栏，长根式会从左栏溢出并盖到图片上。
+    整页宽时仍是短(<=8)→4、中(<=26)→2、长→1；阈值为每格的内容宽度预留了
+    A-D 标签与标签后间距。图文分栏时把两档阈值按文字栏占整页的比例同步缩小。
+    此前选项虽然按公式长度选了两列，却仍拿整页阈值判断已经被右图压窄的左栏，
+    长根式会从左栏溢出并盖到图片上。
 
     公开函数：页面渲染（qrender.render_body）与导出（_choice_tasks）共用，
     保证卡片上的选项列数与 PDF 里 tasks 环境的列数一致。
@@ -294,9 +295,9 @@ def choice_cols(parts: list[str], width_fraction: float = 1.0) -> int:
     except (TypeError, ValueError):
         fraction = 1.0
     longest = max((_visible_len(p) for p in parts), default=0)
-    if longest <= 10 * fraction:
+    if longest <= 8 * fraction:
         return 4
-    if longest <= 28 * fraction:
+    if longest <= 26 * fraction:
         return 2
     return 1
 
@@ -2736,6 +2737,10 @@ _MATH_UNICODE_REPLACEMENTS = {
     "右": r"\mathrm{R}",
 }
 _UNICODE_PRIME_RE = re.compile(r"′+")
+_MATH_TEXT_COMMAND_RE = re.compile(
+    r"\\(?:text|textbf|textit|textup|textsl|textsc|textmd|"
+    r"textrm|textnormal|textsf|texttt|emph|mbox|hbox)\s*\{"
+)
 # 换行、制表符以外的 ASCII 控制字符不承载题意，却会以 ^^A / ^^D 进入 TeX 字体并
 # 形成不可见缺字；U+F8F3 是 MinerU/MathType 遗留的分段大括号私用字形，库中四处
 # 都落在正常标点旁，单独没有语义且任何通用字体都没有，导出副本中安全剔除。
@@ -2796,15 +2801,40 @@ def _normalize_unicode_math_symbols(text: str) -> str:
     if not text:
         return text
     parts = _MATH_SPLIT_RE.split(text)
-    for i in range(1, len(parts), 2):
+
+    def _replace_math_code(math: str) -> str:
         math = _UNICODE_PRIME_RE.sub(
-            lambda m: "^{" + r"\prime" * len(m.group(0)) + "}",
-            parts[i],
-        )
+            lambda m: "^{" + r"\prime" * len(m.group(0)) + "}", math)
         for char, latex in _MATH_UNICODE_REPLACEMENTS.items():
             math = math.replace(char, latex)
-        # 若 OCR 只留下孤立的组合斜线，保留“不”修饰含义而不再请求不存在的字形。
-        parts[i] = math.replace("\u0338", r"\not ")
+        return math.replace("\u0338", r"\not ")
+
+    def _outside_text_commands(math: str) -> str:
+        """只转换数学代码，保留 ``\text{...}`` 等文本模式参数。"""
+        output: list[str] = []
+        cursor = 0
+        for match in _MATH_TEXT_COMMAND_RE.finditer(math):
+            if match.start() < cursor:
+                continue
+            output.append(_replace_math_code(math[cursor:match.start()]))
+            depth = 1
+            end = match.end()
+            while end < len(math) and depth:
+                if math[end] == "\\" and end + 1 < len(math):
+                    end += 2
+                    continue
+                if math[end] == "{":
+                    depth += 1
+                elif math[end] == "}":
+                    depth -= 1
+                end += 1
+            output.append(math[match.start():end])
+            cursor = end
+        output.append(_replace_math_code(math[cursor:]))
+        return "".join(output)
+
+    for i in range(1, len(parts), 2):
+        parts[i] = _outside_text_commands(parts[i])
     return "".join(parts)
 
 
@@ -2817,10 +2847,11 @@ def _normalize_unicode_text_symbols(text: str) -> str:
         "⋅": r" $\cdot$ ", "∩": r" $\cap$ ", "∪": r" $\cup$ ",
         "⊥": r" $\perp$ ", "∵": r" $\because$ ", "∴": r" $\therefore$ ",
         "λ": r" $\lambda$ ",
-        # 文本区直接使用文本命令，不再把 \textcircled 错误包进数学模式。
-        "①": r" \textcircled{1} ", "②": r" \textcircled{2} ",
-        "③": r" \textcircled{3} ", "④": r" \textcircled{4} ",
-        "⑤": r" \textcircled{5} ", "⑥": r" \textcircled{6} ",
+        # 用行内数学保护导出器生成的反斜杠，\text 再切回文本模式执行 \textcircled。
+        # 否则后续孤立反斜杠清理会把它当外来命令转义，PDF 显示字面量命令源码。
+        "①": r" $\text{\textcircled{1}}$ ", "②": r" $\text{\textcircled{2}}$ ",
+        "③": r" $\text{\textcircled{3}}$ ", "④": r" $\text{\textcircled{4}}$ ",
+        "⑤": r" $\text{\textcircled{5}}$ ", "⑥": r" $\text{\textcircled{6}}$ ",
     }
     parts = _MATH_SPLIT_RE.split(text)
     for i in range(0, len(parts), 2):

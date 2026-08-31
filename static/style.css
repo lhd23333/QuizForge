@@ -2332,8 +2332,8 @@ html.desktop-host .desktop-card-more { display: inline-flex; }
 
 /* ---------------------------------------------------------------------------
    结构化题目正文（qrender.render_body 的产物）：向导出 PDF 的版式靠拢。
-   选项列数由后端 exporter.choice_cols 算好挂在 data-cols 上——判定规则只有一份，
-   页面不重算。
+   选项首选列数由后端 exporter.choice_cols 算好挂在 data-cols 上；KaTeX 完成后
+   math.js 仅按当前容器的真实宽度向下降列，避免 Agent／选题栏缩窄时发生折行。
    .body-structured 关掉 pre-wrap：正文已被拆成 .q-stem / .q-opts / .q-fig 块，
    块间距由 CSS 控制；留着 pre-wrap 会把标签间的换行也算成空行。
    --------------------------------------------------------------------------- */

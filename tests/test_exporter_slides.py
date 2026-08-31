@@ -209,11 +209,16 @@ class SlidesExportTests(unittest.TestCase):
         repaired = exporter._normalize_unicode_text_symbols("① A∩B，∵a⊥b∴λ=1")
         self.assertIn(r"\textcircled{1}", repaired)
         self.assertNotIn(r"$\textcircled{1}$", repaired)
+        self.assertIn(r"$\text{\textcircled{1}}$", repaired)
         self.assertIn(r"$\cap$", repaired)
         self.assertIn(r"$\because$", repaired)
         self.assertIn(r"$\perp$", repaired)
         self.assertIn(r"$\therefore$", repaired)
         self.assertIn(r"$\lambda$", repaired)
+        self.assertNotIn(
+            r"\\textcircled",
+            exporter._escape_stray_backslash(repaired),
+        )
 
     def test_chinese_position_subscripts_become_lmr(self):
         repaired = exporter._normalize_unicode_math_symbols("$s_{左}^{2},s_{中}^{2},s_{右}^{2}$")
@@ -221,6 +226,36 @@ class SlidesExportTests(unittest.TestCase):
             repaired,
             r"$s_{\mathrm{L}}^{2},s_{\mathrm{M}}^{2},s_{\mathrm{R}}^{2}$",
         )
+
+    def test_unicode_math_normalization_preserves_text_command_content(self):
+        source = (
+            r"$i_1<i_2<\cdots<i_k\text{，其中 }s_{中}^{2}$ 与 "
+            r"$\text{左侧 α∈A，右端 }α∈A$"
+        )
+
+        repaired = exporter._normalize_unicode_math_symbols(source)
+
+        self.assertIn(r"\text{，其中 }s_{\mathrm{M}}^{2}", repaired)
+        self.assertIn(r"\text{左侧 α∈A，右端 }", repaired)
+        self.assertIn(r"\alpha \in A", repaired)
+        self.assertNotIn(r"\text{，其\mathrm{M}}", repaired)
+
+    def test_unicode_math_normalization_preserves_all_text_mode_commands(self):
+        commands = (
+            "text", "textbf", "textit", "textup", "textsl", "textsc",
+            "textmd", "textrm", "textnormal", "textsf", "texttt",
+            "emph", "mbox", "hbox",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                protected = f"\\{command}" + "{其中 α∈A 左侧与右端}"
+                source = f"${protected} + s_{{中}} + α∈A$"
+
+                repaired = exporter._normalize_unicode_math_symbols(source)
+
+                self.assertIn(protected, repaired)
+                self.assertIn(r"s_{\mathrm{M}}", repaired)
+                self.assertIn(r"\alpha \in A", repaired)
 
     def test_bold_greek_uses_math_bold_and_orphan_not_is_removed(self):
         source = (
