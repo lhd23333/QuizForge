@@ -7,13 +7,13 @@
 <p align="center"><strong>把散落的试卷，整理成真正属于你的本地题库。</strong></p>
 
 <p align="center">
-  <a href="https://github.com/lhd23333/QuizForge/releases">下载 Windows 版</a> ·
+  <a href="#普通-windows-用户">Windows 版状态</a> ·
   <a href="docs/PRODUCT.md">了解全部功能</a> ·
   <a href="CHANGELOG.md">查看更新记录</a> ·
   <a href="README.en.md">English</a>
 </p>
 
-QuizForge 是面向教师、学生和内容整理者的开源数学／物理题库工具。你可以把 PDF、Word 或图片试卷识别成题目，在文件夹中分类、搜索和修改，再拖进讲义或组卷篮，导出 PDF、Word、Markdown、TeX 或 Overleaf ZIP。
+QuizForge 是面向教师、学生和内容整理者的开源数学／物理题库工具。你可以把 PDF、Word 或图片试卷识别成题目，在文件夹中分类、搜索和修改，再拖进讲义或组卷篮，导出 PDF、Word、Markdown、TeX 或 Overleaf ZIP；也可以在题库旁打开可选的 Agent 工作区，用对话完成检索、整理、导入和导出。
 
 题目与图片保存在你的电脑上，不需要账号、邀请码或设备激活。自动识别属于可选能力：需要时填写自己的 MinerU、Doc2X 或大模型 API，不配置也可以手动建题、整理题库和导出。
 
@@ -57,7 +57,9 @@ QuizForge 是面向教师、学生和内容整理者的开源数学／物理题�
 
 ### 普通 Windows 用户
 
-首个公开安装包仍在准备中。正式发布后，从 [GitHub Releases](https://github.com/lhd23333/QuizForge/releases) 下载最新的 `QuizForge-<版本>-Setup.exe` 并安装；以后无需卸载旧版，可在软件“设置”或“关于”页点击“检查更新”，也可以继续从 Releases 手动下载新版覆盖安装。
+`v2.0.0` 源码已经定版，未签名 Windows 私测安装包也已构建。当前安装包尚未取得可信代码签名，仅由维护者点对点提供给少量受信任测试者，不在 GitHub 公开分发；Windows 会显示“未知发布者”，测试者应先核对维护者另行提供的 SHA-256。安装器保持固定身份，可直接覆盖旧版，无需先卸载。
+
+待可信签名完成并再次通过哈希与覆盖升级验收后，公开安装包才会发布到 [GitHub Releases](https://github.com/lhd23333/QuizForge/releases)。后续可在软件“设置”或“关于”页主动检查更新，也可从 Releases 手动下载新版覆盖安装。
 
 首次启动只需选择一个题库文件夹。空文件夹会得到 3 道原创示例题，已有 Markdown 的目录不会被注入或改写。需要自动识别时，再到“设置”中添加自己的 OCR 与模型 API。
 
@@ -79,7 +81,7 @@ python -m venv .venv
 
 ## 下载、更新与参与
 
-- [Releases](https://github.com/lhd23333/QuizForge/releases)：下载安装包或手动更新。
+- [Releases](https://github.com/lhd23333/QuizForge/releases)：可信签名完成后提供公开安装包和手动更新。
 - [CHANGELOG](CHANGELOG.md)：了解每个版本增加、修复和移除了什么。
 - [参与贡献](CONTRIBUTING.md)：搭建开发环境、提交 Issue 或 Pull Request。
 - [安全策略](SECURITY.md)：私密报告安全问题，避免公开真实密钥或题库。
@@ -115,7 +117,7 @@ SignPath Foundation 审核尚未完成。当前 GitHub Actions 只构建短期�
 
 ## Windows 桌面版
 
-源码与日常安装目录版当前按 `2.0.0`（文件版本 `2.0.0.0`）定版。本机和 GitHub Actions 生成的未签名 Setup 候选只用于构建验收与 SignPath 接入；它们不是公开发行包，也不会上传到 Releases。公开安装包将在可信 Windows 代码签名和覆盖升级验收完成后发布。
+源码与日常安装目录版当前按 `2.0.0`（文件版本 `2.0.0.0`）定版。本机生成的未签名 Setup 用于构建验收和小范围受信任测试；GitHub Actions 候选仅用于构建验证与 SignPath 接入。二者都不是公开发行包，也不会上传到 Releases。公开安装包将在可信 Windows 代码签名和覆盖升级验收完成后发布。
 
 历史 `0.17.0-beta` 测试包只保留在维护者本机，不进入仓库。目录版原位覆盖会在每次正式构建前验证，确保题库登记、任务状态、OCR／LLM 与 Agent 配置、提示词／Skill／模板、界面设置及历史兼容文件均保持不变。
 

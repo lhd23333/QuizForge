@@ -7,13 +7,13 @@
 <p align="center"><strong>Turn scattered exam papers into a question bank you actually own.</strong></p>
 
 <p align="center">
-  <a href="https://github.com/lhd23333/QuizForge/releases">Download for Windows</a> ·
+  <a href="#get-started">Windows build status</a> ·
   <a href="docs/PRODUCT.md">Product overview</a> ·
   <a href="CHANGELOG.md">Changelog</a> ·
   <a href="README.md">中文</a>
 </p>
 
-QuizForge is an open-source, local-first question bank for mathematics and physics. Import PDF, Word, image, or Markdown exams; review and organize the questions; then compose handouts, worksheets, papers, or classroom slides and export them as PDF, DOCX, Markdown, TeX, or an Overleaf-ready ZIP.
+QuizForge is an open-source, local-first question bank for mathematics and physics. Import PDF, Word, image, or Markdown exams; review and organize the questions; then compose handouts, worksheets, papers, or classroom slides and export them as PDF, DOCX, Markdown, TeX, or an Overleaf-ready ZIP. An optional Agent workspace can sit beside the bank for conversational search, organization, import, and export.
 
 Questions and images stay on your computer. There is no account, invite code, trial, or device activation. OCR and AI normalization are optional: configure your own MinerU, Doc2X, or OpenAI-compatible API only when you need them.
 
@@ -51,7 +51,9 @@ Take questions from the selection rail and drag them onto a paginated canvas, wi
 
 ## Get started
 
-The first public installer is still being prepared. Once released, download `QuizForge-<version>-Setup.exe` from [GitHub Releases](https://github.com/lhd23333/QuizForge/releases). Future versions can be installed in place from the Settings or About page, or downloaded manually from Releases; uninstalling the previous version is unnecessary.
+The `v2.0.0` source is finalized, and an unsigned Windows build has been prepared for private testing. It does not yet have trusted code signing and is distributed directly by the maintainer to a small group of trusted testers. It is not distributed publicly on GitHub. Windows will show "Unknown publisher"; testers should verify the SHA-256 supplied separately by the maintainer. The installer keeps the existing application identity and can upgrade an older installation in place without uninstalling it first.
+
+The public installer will be published on [GitHub Releases](https://github.com/lhd23333/QuizForge/releases) only after trusted signing and another round of digest verification and in-place upgrade testing. Future versions can then be checked from Settings or About, or downloaded manually from Releases.
 
 On first launch, select a bank folder. An empty folder receives three original demo questions; an existing Markdown folder is never seeded or rewritten. Add your own OCR and model APIs under Settings only if you want automatic recognition.
 
@@ -71,7 +73,7 @@ Open <http://127.0.0.1:5000>. This local service has no user authentication. **N
 
 ## Downloads and project links
 
-- [Releases](https://github.com/lhd23333/QuizForge/releases) for installers and manual updates.
+- [Releases](https://github.com/lhd23333/QuizForge/releases) for public installers and manual updates after trusted signing is available.
 - [CHANGELOG](CHANGELOG.md) for user-visible changes and known limitations.
 - [Current status](docs/STATUS.md) for the active implementation, verification, and delivery checklist.
 - [Contributing](CONTRIBUTING.md) for the development environment, issues, and pull requests.
@@ -99,7 +101,7 @@ The sections below retain the complete technical and compatibility notes. Regula
 
 ## Windows desktop edition
 
-The source and daily installed build are finalized as `2.0.0` (file version `2.0.0.0`). Unsigned Setup candidates built locally and by GitHub Actions are restricted to packaging verification and SignPath onboarding; they are not public releases and will not be uploaded to Releases. The public installer will follow after trusted Windows code signing and in-place upgrade verification.
+The source and daily installed build are finalized as `2.0.0` (file version `2.0.0.0`). Locally built unsigned Setup candidates are used for packaging verification and limited testing by trusted recipients; GitHub Actions candidates are restricted to build verification and SignPath onboarding. Neither is a public release or uploaded to Releases. The public installer will follow after trusted Windows code signing and in-place upgrade verification.
 
 Historical `0.17.0-beta` test installers remain local to the maintainer and are not tracked in the repository. Every formal build repeats the in-place directory update checks to preserve bank registration, task state, OCR/LLM and Agent configuration, prompts, skills, templates, interface settings, and legacy compatibility files.
 
