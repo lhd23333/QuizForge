@@ -15,6 +15,8 @@
 | `quizforge-by-wimath.svg` | QuizForge 与 WIMath 联合署名横版图形 | `6a916c0479b72bc479f2421c92503d3f5a7d58cf7ba9265f4a015af3dec7067b` |
 | `wimath-mark-small-16.svg` | 16 像素窗口/状态栏母品牌标志 | `d01c854904ff06115cb5e85e1b4b9e036450803983b6f214b3075a9976819105` |
 
+受控 SVG 的登记字节统一使用 `LF`；根目录 `.gitattributes` 固定源码与运行时镜像的检出换行，SHA-256 仍按原始字节计算。
+
 产品图标 ICO 应包含 16、24、32、48、64、128 和 256 像素版本。产品图标与 WIMath
 独立标志 SVG 为自包含路径；所有 SVG 均不引用远程资源或嵌入位图。`quizforge-by-wimath.svg`
 的产品名和中文副标题按上游联名规范保留为文本，印刷或不可编辑交付时应先转为轮廓。

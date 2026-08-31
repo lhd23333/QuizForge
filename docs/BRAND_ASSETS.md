@@ -25,6 +25,8 @@ QuizForge 是产品品牌，WIMath 是母品牌。两者的职责必须分开：
 | `assets/brand/quizforge-by-wimath.svg` | QuizForge/WIMath 联合署名横版图形；运行时镜像 | `6a916c0479b72bc479f2421c92503d3f5a7d58cf7ba9265f4a015af3dec7067b` |
 | `assets/brand/wimath-mark-small-16.svg` | 16 像素紧凑母品牌标志；仅用于状态栏等品牌位置 | `d01c854904ff06115cb5e85e1b4b9e036450803983b6f214b3075a9976819105` |
 
+受控 SVG 的登记字节统一使用 `LF`；根目录 `.gitattributes` 固定源码与运行时镜像的检出换行，SHA-256 仍按原始字节计算。
+
 另有 [`../assets/wimath-logo-latex-black.pdf`](../assets/wimath-logo-latex-black.pdf)，它是 PDF/TeX 导出的黑色 WIMath 标志，不是网页运行时图标；不要把 PDF 转成临时 SVG 后提交。
 
 ## 3. 使用矩阵

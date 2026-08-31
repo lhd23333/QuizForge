@@ -20,6 +20,11 @@ PRIVACY_SENTENCE = (
 
 
 class ReleasePolicyTests(unittest.TestCase):
+    def test_brand_svg_checkout_preserves_registered_bytes(self):
+        attributes = (ROOT / ".gitattributes").read_text(encoding="ascii")
+        self.assertIn("assets/brand/*.svg text eol=lf", attributes)
+        self.assertIn("static/brand/*.svg text eol=lf", attributes)
+
     def test_homepages_link_public_signing_and_privacy_policies(self):
         for name in ("README.md", "README.en.md"):
             text = (ROOT / name).read_text(encoding="utf-8")
