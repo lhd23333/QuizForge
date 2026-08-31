@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 1, 0, 0),
-    prodvers=(1, 1, 0, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -14,12 +14,12 @@ VSVersionInfo(
       StringTable('080404B0', [
         StringStruct('CompanyName', 'QuizForge'),
         StringStruct('FileDescription', 'QuizForge 本地数学题库与组卷工具'),
-        StringStruct('FileVersion', '1.1.0.0'),
+        StringStruct('FileVersion', '2.0.0.0'),
         StringStruct('InternalName', 'QuizForge'),
         StringStruct('LegalCopyright', 'Copyright (C) 2026 QuizForge'),
         StringStruct('OriginalFilename', 'QuizForge.exe'),
         StringStruct('ProductName', 'QuizForge'),
-        StringStruct('ProductVersion', '1.1.0')
+        StringStruct('ProductVersion', '2.0.0')
       ])
     ]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])

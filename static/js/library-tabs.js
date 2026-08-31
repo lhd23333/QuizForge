@@ -403,8 +403,10 @@
     const title = document.createElement('h2');
     title.textContent = tab.kind === 'markdown' ? 'Markdown 制卡' : '识别制卡';
     const close = document.createElement('button');
-    close.type = 'button'; close.className = 'icon-btn'; close.textContent = '×';
+    close.type = 'button'; close.className = 'icon-btn';
+    close.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
     close.title = '关闭';
+    close.setAttribute('aria-label', close.title);
     close.addEventListener('click', () => closeLibraryDialog(dialog));
     head.append(title, close);
 
@@ -742,8 +744,11 @@
     const title = document.createElement('h2');
     title.textContent = tab.kind === 'pdf' ? 'PDF 工具' : 'Word 转换';
     const close = document.createElement('button');
-    close.type = 'button'; close.className = 'icon-btn'; close.textContent = '×';
-    close.title = '关闭'; close.addEventListener('click', () => closeLibraryDialog(dialog));
+    close.type = 'button'; close.className = 'icon-btn';
+    close.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
+    close.title = '关闭';
+    close.setAttribute('aria-label', close.title);
+    close.addEventListener('click', () => closeLibraryDialog(dialog));
     head.append(title, close);
     const body = document.createElement('div');
     body.className = 'library-tool-dialog-body';
@@ -869,7 +874,8 @@
     head.className = 'library-tool-dialog-head';
     const title = document.createElement('h2'); title.textContent = '资料库任务';
     const close = document.createElement('button'); close.type = 'button'; close.className = 'icon-btn';
-    close.textContent = '×'; close.title = '关闭';
+    close.innerHTML = window.QFIcon ? window.QFIcon('x') : ''; close.title = '关闭';
+    close.setAttribute('aria-label', close.title);
     close.addEventListener('click', () => { clearInterval(taskDialogTimer); taskDialogTimer = null; closeLibraryDialog(dialog); });
     head.append(title, close);
     const list = document.createElement('div'); list.className = 'library-task-list';
@@ -1431,7 +1437,8 @@
         move.dataset.moveTab = tabKey;
         move.title = pane.id === 'primary' ? '移到另一栏' : '移到第一栏';
         move.setAttribute('aria-label', move.title);
-        move.textContent = layout === 'vertical' ? '⇄' : '⇅';
+        move.innerHTML = window.QFIcon
+          ? window.QFIcon(layout === 'vertical' ? 'arrow-left-right' : 'arrow-up-down') : '';
         item.append(move);
       }
       const close = document.createElement('button');
@@ -1440,7 +1447,7 @@
       close.dataset.closeTab = tabKey;
       close.title = `关闭 ${tab.name}`;
       close.setAttribute('aria-label', close.title);
-      close.textContent = '×';
+      close.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
       close.hidden = pane.order.length <= 1;
       item.append(close);
       pane.tabsBar.append(item);
@@ -1451,7 +1458,7 @@
     add.dataset.libraryTabAdd = pane.id;
     add.title = '新建空白页';
     add.setAttribute('aria-label', '新建空白页');
-    add.textContent = '＋';
+    add.innerHTML = window.QFIcon ? window.QFIcon('plus') : '';
     pane.tabsBar.append(add);
     pane.tabsBar.hidden = false;
   }
@@ -1553,7 +1560,8 @@
     button.title = entry.path;
     const twist = document.createElement('span');
     twist.className = 'library-tree-twist';
-    twist.textContent = entry.kind === 'folder' ? '›' : '';
+    twist.innerHTML = entry.kind === 'folder' && window.QFIcon
+      ? window.QFIcon('chevron-right') : '';
     const label = document.createElement('span');
     label.className = 'library-tree-label';
     label.textContent = entry.name;

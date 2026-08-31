@@ -181,7 +181,7 @@ const HandoutQuestion = Node.create({
       handle.draggable = true;
       handle.title = '拖动题目重新排序';
       handle.setAttribute('aria-label', handle.title);
-      handle.textContent = '⠿';
+      handle.innerHTML = window.QFIcon ? window.QFIcon('grip') : '';
       handle.addEventListener('mousedown', () => {
         const pos = getPos();
         if (typeof pos !== 'number') return;
@@ -730,7 +730,7 @@ async function loadDocumentList(openFirst = false) {
       remove.className = 'handout-document-delete';
       remove.title = `删除讲义“${documentInfo.title}”`;
       remove.setAttribute('aria-label', remove.title);
-      remove.textContent = '×';
+      remove.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
       remove.addEventListener('click', async () => {
         if (documentInfo.path === state.path && hasUnsavedWork(state.dirty, state.inspectorDirty)) {
           window.alert('当前讲义还有未保存修改，请先保存或放弃修改后再删除。');

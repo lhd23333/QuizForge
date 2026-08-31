@@ -120,6 +120,29 @@ class QrenderTableTests(unittest.TestCase):
         self.assertIn('class="q-split"', html)
         self.assertIn('class="q-opts" data-cols="1"', html)
 
+    def test_image_option_on_continuation_line_keeps_fourth_option_in_pair_grid(self):
+        source = (
+            "截面曲线分别为圆、椭圆、抛物线和双曲线（ ）\n\n"
+            "$\\displaystyle A.$\n\nQFIGSLOT0 圆\n\n"
+            "$\\displaystyle B.$\n\nQFIGSLOT1 椭圆\n\n"
+            "$\\displaystyle C.$\n\nQFIGSLOT2 抛物线\n\n"
+            "$\\displaystyle D.$\n\nQFIGSLOT3 双曲线"
+        )
+        plan = exporter.plan_figs(source, "多选题", None, "pair")
+        self.assertTrue(plan["pair"])
+        self.assertEqual(plan["pair_map"], [0, 1, 2, 3])
+
+    def test_choice_stem_drops_trailing_answer_parentheses(self):
+        parts = exporter.split_choice_options(
+            "已知条件，则结论为（ ）\n\n"
+            "$\\displaystyle A.$ 1\n"
+            "$\\displaystyle B.$ 2\n"
+            "$\\displaystyle C.$ 3\n"
+            "$\\displaystyle D.$ 4"
+        )
+        self.assertIsNotNone(parts)
+        self.assertNotIn("（ ）", parts[0])
+
     def test_fill_between_places_images_before_subquestions(self):
         source = (
             "根据装置完成实验。\n"

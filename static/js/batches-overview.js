@@ -154,18 +154,22 @@
       const chips = row.querySelector('.bo-chips');
       if (chips) {
         chips.innerHTML = '';
-        const add = (text, cls) => {
+        const add = (text, cls, iconName) => {
           const s = document.createElement('span');
           s.className = cls;
-          s.textContent = text;
+          if (iconName && window.QFIcon) {
+            const markup = window.QFIcon(iconName);
+            if (markup) s.insertAdjacentHTML('beforeend', markup);
+          }
+          s.appendChild(document.createTextNode(text));
           chips.appendChild(s);
         };
-        if (b.converting) add('🔄 转换中 ' + b.converting, 'bp-st');
-        if (b.pending) add('⏳ 等待 ' + b.pending, 'bp-st');
-        if (b.ready) add('✅ 待审核 ' + b.ready, 'bp-st bp-ready');
+        if (b.converting) add('转换中 ' + b.converting, 'bp-st', 'refresh-cw');
+        if (b.pending) add('等待 ' + b.pending, 'bp-st', 'clock');
+        if (b.ready) add('待审核 ' + b.ready, 'bp-st bp-ready', 'check-circle');
         if (b.awaiting_block_review)
-          add('✂ 待拆题审核 ' + b.awaiting_block_review, 'bp-st bp-ready');
-        if (b.errors) add('❌ 错误 ' + b.errors, 'bp-st bp-err-st');
+          add('待拆题审核 ' + b.awaiting_block_review, 'bp-st bp-ready', 'scissors');
+        if (b.errors) add('错误 ' + b.errors, 'bp-st bp-err-st', 'alert-triangle');
         if (b.reviewed) add('已处理 ' + b.reviewed, 'muted');
         if (b.cancelled) add('已中止', 'muted');
       }

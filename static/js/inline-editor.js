@@ -16,7 +16,28 @@
       difficulty: editor.querySelector('.inline-difficulty'),
       source: editor.querySelector('.inline-source'),
       tags: editor.querySelector('.inline-tags'),
+      solutionPreview: editor.querySelector('[data-preview-field="solution"]'),
+      notePreview: editor.querySelector('[data-preview-field="note"]'),
     };
+  }
+
+  function autoSize(textarea) {
+    if (!textarea?.matches('.inline-solution-source, .inline-note-source')) return;
+    const min = 84;
+    const max = 280;
+    textarea.style.height = 'auto';
+    const height = Math.max(min, Math.min(max, textarea.scrollHeight));
+    textarea.style.height = `${height}px`;
+    textarea.style.overflowY = textarea.scrollHeight > max ? 'auto' : 'hidden';
+  }
+
+  function initEditor(editor) {
+    if (!editor || editor.dataset.optionalReady === '1') return;
+    editor.dataset.optionalReady = '1';
+    editor.querySelectorAll('.inline-preview-toggle').forEach(toggle => {
+      toggle.addEventListener('click', event => event.stopPropagation());
+      toggle.addEventListener('keydown', event => event.stopPropagation());
+    });
   }
 
   function payload(editor) {
@@ -63,6 +84,7 @@
     const solutionBody = editor.querySelector('.inline-preview-solution-body');
     const noteBox = editor.querySelector('.inline-preview-note');
     const noteBody = editor.querySelector('.inline-preview-note-body');
+    const fields = controls(editor);
     const generation = (previewGenerations.get(editor) || 0) + 1;
     previewGenerations.set(editor, generation);
     if (editor.dataset.new === '1' && !controls(editor).body.value.trim()) {
@@ -94,9 +116,9 @@
       if (!response.ok || !data.ok) throw new Error(data.error || '预览失败');
       body.innerHTML = data.body_html || '';
       solutionBody.innerHTML = data.solution_html || '';
-      solutionBox.hidden = !data.solution_html;
+      solutionBox.hidden = !data.solution_html || !fields.solutionPreview?.checked;
       noteBody.innerHTML = data.note_html || '';
-      noteBox.hidden = !data.note_html;
+      noteBox.hidden = !data.note_html || !fields.notePreview?.checked;
       status.hidden = true;
       window.QMath?.typeset(editor.querySelector('.inline-preview-pane'));
     } catch (error) {
@@ -115,7 +137,10 @@
   function openEditor(card, focusField = 'body') {
     const editor = card.querySelector('.inline-editor');
     if (!editor) return;
+    initEditor(editor);
     const focusTarget = focusField === 'note' ? controls(editor).note : controls(editor).body;
+    const optionalField = focusTarget.closest('.inline-optional-field');
+    if (optionalField) optionalField.open = true;
     if (!editor.hidden) {
       focusTarget.focus();
       return;
@@ -126,6 +151,9 @@
     snapshots.set(editor, signature(editor));
     setStatus(editor, '');
     setMode(editor, 'live');
+    requestAnimationFrame(() => {
+      editor.querySelectorAll('.inline-solution-source, .inline-note-source').forEach(autoSize);
+    });
     focusTarget.focus();
   }
 
@@ -198,6 +226,7 @@
   document.addEventListener('input', event => {
     const editor = event.target.closest('.inline-editor');
     if (!editor || !event.target.matches('textarea, input, select')) return;
+    autoSize(event.target);
     if (editor.querySelector('.inline-editor-workbench').dataset.mode !== 'source') {
       schedulePreview(editor, 260);
     }
@@ -205,7 +234,7 @@
 
   document.addEventListener('change', event => {
     const editor = event.target.closest('.inline-editor');
-    if (editor && event.target.matches('select')) schedulePreview(editor, 0);
+    if (editor && event.target.matches('select, .inline-preview-enabled')) schedulePreview(editor, 0);
   });
 
   document.addEventListener('keydown', event => {
@@ -220,5 +249,6 @@
     }
   });
 
-  window.QInlineEditor = {open: openEditor};
+  document.querySelectorAll('.inline-editor').forEach(initEditor);
+  window.QInlineEditor = {open: openEditor, init: initEditor};
 })();

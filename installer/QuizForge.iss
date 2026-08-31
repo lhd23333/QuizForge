@@ -1,8 +1,8 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.0"
+  #define MyAppVersion "2.0.0"
 #endif
 #ifndef MyFileVersion
-  #define MyFileVersion "1.1.0.0"
+  #define MyFileVersion "2.0.0.0"
 #endif
 #ifndef MySourceDir
   #define MySourceDir "..\build\desktop\QuizForge"
@@ -48,6 +48,13 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Source: "{#MySourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\LICENSE"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}\licenses"; Flags: ignoreversion
+
+[InstallDelete]
+Type: files; Name: "{app}\licenses\preview-license.txt"
+Type: files; Name: "{app}\licenses\THIRD_PARTY_NOTICES-preview.md"
+Type: files; Name: "{app}\_internal\assets\cloud_entitlement_public_key.pem"
+Type: files; Name: "{app}\_internal\assets\license_public_key.pem"
+Type: files; Name: "{app}\_internal\static\js\activation.js"
 
 [Icons]
 Name: "{group}\QuizForge"; Filename: "{app}\QuizForge.exe"; WorkingDir: "{app}"

@@ -1171,8 +1171,10 @@ def list_navigation_tree(active_id: str = "") -> list[dict]:
         nodes = []
         for directory in subdirs(path):
             rel = directory.relative_to(root).as_posix()
-            on_active_path = active_id == rel or active_id.startswith(rel + "/")
-            expanded = depth == 0 or on_active_path
+            # 只预载当前题集的祖先。当前节点自身即使还有子目录也保持折叠，
+            # 更不能因为它位于顶层就自动展开整支树。
+            on_active_path = active_id.startswith(rel + "/")
+            expanded = on_active_path
             children = build(directory, rel, depth + 1) if expanded else []
             nodes.append({
                 "id": rel,

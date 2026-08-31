@@ -1,7 +1,8 @@
+{% from "_icons.html" import icon %}
 <article class="card {% if q['selected'] %}selected{% endif %}" data-id="{{ q['id'] }}"
          data-path="{{ q['path'] }}" draggable="true">
   <div class="card-head">
-    {% if question_card_sort=='custom' %}<span class="drag-handle" title="拖拽排序">⠿</span>{% endif %}
+    {% if question_card_sort=='custom' %}<span class="drag-handle" title="拖拽排序">{{ icon('grip') }}</span>{% endif %}
     <label class="sel-box">
       <input type="checkbox" class="sel-toggle" data-id="{{ q['id'] }}"
              {% if q['selected'] %}checked{% endif %}>
@@ -33,7 +34,7 @@
           <button type="button" class="card-summary-button type-summary-trigger"
                   data-card-popover-trigger="type" aria-haspopup="menu" aria-expanded="false"
                   title="修改题型">
-            <span class="type-summary-value">{{ q['type']|qtype_label if q['type'] else '未分类' }}</span><span aria-hidden="true">⌄</span>
+            <span class="type-summary-value">{{ q['type']|qtype_label if q['type'] else '未分类' }}</span>{{ icon('chevron-down') }}
           </button>
           <span class="type-chips question-popover type-popover" data-id="{{ q['id'] }}"
                 data-card-popover="type" role="menu" aria-label="设置题型" hidden>
@@ -53,7 +54,7 @@
           <button type="button" class="card-summary-button difficulty-summary-trigger"
                   data-card-popover-trigger="difficulty" aria-haspopup="menu" aria-expanded="false"
                   title="修改难度">
-            难度 <span class="difficulty-summary-value">{{ q['difficulty'] or '—' }}</span><span aria-hidden="true">⌄</span>
+            难度 <span class="difficulty-summary-value">{{ q['difficulty'] or '—' }}</span>{{ icon('chevron-down') }}
           </button>
           <span class="diff-dots question-popover difficulty-popover" data-id="{{ q['id'] }}"
                 data-card-popover="difficulty" role="menu" aria-label="设置难度" hidden>
@@ -73,7 +74,7 @@
       <span class="card-star-source">
         <button type="button" class="star-toggle {% if q['starred'] %}on{% endif %}"
                 data-id="{{ q['id'] }}" aria-pressed="{{ 'true' if q['starred'] else 'false' }}"
-                title="标星：标记高质量题（点击切换）" aria-label="切换标星">★</button>
+                title="标星：标记高质量题（点击切换）" aria-label="切换标星">{{ icon('star') }}</button>
         {% if q['source'] %}
           <span class="card-head-source" title="题源：{{ q['source'] }}">{{ q['source'] }}</span>
         {% endif %}
@@ -85,16 +86,16 @@
       A4 视图
     </button>
     <button type="button" class="link inline-edit-trigger card-edit-button" title="在当前题卡原地编辑">
-      <span aria-hidden="true">✎</span><span>编辑</span>
+      {{ icon('edit') }}<span>编辑</span>
     </button>
     <button type="button" class="link single-tex-export"
             data-url="{{ url_for('question_export_tex_zip', qid=q['id']) }}"
             title="把当前题目、图片和解析导出为 TeX ZIP">
-      <span aria-hidden="true">⇩</span><span>TeX ZIP</span>
+      {{ icon('download') }}<span>TeX ZIP</span>
     </button>
     <div class="desktop-card-more card-control-group">
       <button type="button" class="card-more-trigger" data-card-popover-trigger="more"
-              aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">⋯</button>
+              aria-haspopup="menu" aria-expanded="false" title="更多操作" aria-label="更多操作">{{ icon('more-horizontal') }}</button>
       <div class="question-popover card-action-menu" data-card-popover="more" role="menu" hidden>
         <button type="button" class="card-menu-action question-rename-trigger"
                 data-title="{{ q['title'] }}" role="menuitem">重命名题卡</button>
@@ -129,7 +130,8 @@
             title="保存的是图片占导出版心的百分比；窗口变化只改变屏幕预览，最终 PDF 比例不变。也可拖动图片右下角手柄微调">
         <span class="img-width-label">导出宽度</span>
         <span class="img-width-value">35%</span>
-        <span class="img-width-reset" title="清除自定义宽度，恢复默认">×</span>
+        <button type="button" class="img-width-reset" title="清除自定义宽度，恢复默认"
+                aria-label="清除自定义宽度">{{ icon('x') }}</button>
       </span>
       <span class="img-width-presets" title="按导出版心设置图片宽度；最终效果可在预览中确认">
         {% for w in (25, 35, 50, 70) %}<span class="img-width-chip" data-width="{{ w }}">{{ w }}%</span>{% endfor %}
@@ -169,8 +171,12 @@
         <span class="img-split-chip {% if _sm == 'after' %}on{% endif %}"
               data-mode="after" title="图片排在全部小问之后">题目后</span>
       {% endif %}
-      <span class="img-redraw-btn" title="用 AI 把这张图重绘成矢量图（高考风格黑白线条图）">✎ AI 重绘</span>
-      <span class="img-restore-btn" title="退回重绘前的原图" hidden>↺ 还原原图</span>
+      <button type="button" class="img-redraw-btn" title="用 AI 把这张图重绘成矢量图（高考风格黑白线条图）">
+        {{ icon('edit') }}<span>AI 重绘</span>
+      </button>
+      <button type="button" class="img-restore-btn" title="退回重绘前的原图" hidden>
+        {{ icon('undo-2') }}<span>还原原图</span>
+      </button>
     </div>
   {% endif %}
   <div class="body body-structured">{{ q | qbody }}</div>
@@ -192,7 +198,8 @@
                 title="保存的是图片占导出版心的百分比；窗口变化只改变屏幕预览，最终 PDF 比例不变。也可拖动图片右下角手柄微调">
             <span class="img-width-label">导出宽度</span>
             <span class="img-width-value">35%</span>
-            <span class="img-width-reset" title="清除自定义宽度，恢复默认">×</span>
+            <button type="button" class="img-width-reset" title="清除自定义宽度，恢复默认"
+                    aria-label="清除自定义宽度">{{ icon('x') }}</button>
           </span>
           <span class="img-width-presets" title="按导出版心设置图片宽度；最终效果可在预览中确认">
             {% for w in (25, 35, 50, 70) %}<span class="img-width-chip" data-width="{{ w }}">{{ w }}%</span>{% endfor %}

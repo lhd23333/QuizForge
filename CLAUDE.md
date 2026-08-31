@@ -54,7 +54,7 @@ node --check static/js/text-preview.js
 ### 模块职责
 
 ```
-app.py              Flask 应用与全部路由（~59KB，单体路由文件）
+app.py              Flask 应用、页面与 API 路由，并注册 Agent 目录蓝图
 config.py           路径、常量、上传边界配置
 filestore.py        文件式题库存储层（替代服务器版的 db.py）
                     ——每题一个 .md，YAML frontmatter 往返解析
@@ -89,6 +89,8 @@ qrender.py          页面侧题目正文结构化渲染
                     ——题干与解析各自消费图片分栏设置；公式不碰（留给前端 KaTeX）
 import_defaults.py  新导入题目的图片位置、方向与逐图布局默认规则
                     ——只接收科目和配对判定，不读取 Flask 请求或题库
+import_bundle.py    带图 Markdown 包的 ZIP 安全校验、资产暂存、改写与失败回滚
+prompt_store.py     官方提示词读取与本地自定义提示词 schema/原子存储
 handouts.py         讲义 schema、题目快照、Markdown 往返与安全原子存储
 handout_exporter.py 讲义题卡局部编译及 PDF/TeX/ZIP 导出适配
 library_ops.py      资料库文件／文件夹的新建、改名、移动与复制安全边界
@@ -99,6 +101,15 @@ providers.py        LLM 配置管理（cc-switch 风格，多套可切换）
                     ——两条用途：md（导入识别） / redraw（配图重绘）
                     ——supports_vision 标记控制重绘快速切换按钮
                     ——redraw 解析不到时回落 md，反方向不回落
+agent_core.py       Agent 会话持久化、轮次序列、操作锁与幂等取消
+agent_orchestrator.py
+                    Chat Completions/Responses 流聚合与受控工具循环
+agent_provider.py   Agent Provider 加密配置、协议参数与客户端适配
+agent_tools.py / agent_actions.py
+                    Agent 工具描述、参数校验和 QuizForge 业务动作
+agent_approvals.py  标准／危险模式审批、会话授权与审计日志
+agent_upload.py     Agent 材料上传、安全暂存与转换任务接线
+agent_catalog.py    Skill／模板目录、schema 迁移、预览确认与管理 API
 llm_client.py       OpenAI 兼容 LLM 客户端
                     ——SSRF 防护（拒绝内网地址，但放行 loopback——单机版需要本地推理）
                     ——假完成检测（模型在长文档上提前 stop 导致漏题）
@@ -116,6 +127,9 @@ ocr_pool.py         MinerU/Doc2X 统一请求池——多凭证轮转、跨窗�
 tools/eval_doc2x.py Doc2X 真实 PDF 回归；按内容哈希复用付费结果，再跑最新本地逻辑
 tikz_render.py      TikZ 代码 → xelatex → PDF + dvisvgm → SVG（带沙箱三道闸）
 tikz_redraw.py      AI 重绘配图（多模态模型看图 → TikZ → 矢量图）
+template_pipeline.py
+                    TeX 模板契约、schema v2 迁移、源码哈希和真实预览
+tex_sandbox.py      外部 TeX 资源检查与受限 XeLaTeX 进程执行
 ui_prefs.py         界面外观偏好（深浅色/主题色/壁纸）
 static/js/text-preview.js
                     编辑页、导入校对和拆题审核的轻量实时表格/图片预览
@@ -143,6 +157,13 @@ MinerU 路径的 PDF/图片规范化引擎已整体 vendor 进 `vendor/project_a
 data/
   .enc_key           Fernet 密钥（不进 git，删掉=已存 key 永久解不开）
   providers.json     LLM 配置（API Key 存密文）
+  agent_providers.json Agent Provider 配置（API Key 存密文）
+  agent_sessions.json  Agent 会话与消息
+  agent_preferences.json Agent 本机偏好
+  agent_audit.jsonl  Agent 工具与审批审计日志
+  agent_skills.json  Skill 目录；资源位于 agent_skills/
+  agent_templates.json schema v2 模板目录；资源位于 agent_templates/
+  prompts.json       用户自定义提示词（schema JSON）
   mineru.json        MinerU Token（密文）
   doc2x.json         旧 Doc2X Key 回退文件（只读）
   doc2x_local.json   本机多份 Doc2X Key（密文）
@@ -151,6 +172,7 @@ data/
   corpus/            识别语料留档（_raw.md / _blocks.json / _normalized.md）
   uploads/           上传文件暂存
   wallpaper/         壁纸文件
+  banks/<题库摘要>/   各题库的选题、任务、历史、上传与导出状态
 ```
 
 题库本身在 `BANK_DIR`（默认 `D:\data\笔记本\Obsidian\QuizForge`），由环境变量 `QUIZFORGE_BANK` 覆盖。Obsidian 插件启动时自动传入它所在 vault 的根目录。图片统一写入 `ASSETS_DIR`；桌面版从全局 `desktop.json.assets_dir` 读取并在导入应用前设置 `QUIZFORGE_ASSETS_DIR`，所有题库窗口共用同一路径。源码或 Obsidian 未显式设置时才兼容回落 `BANK_DIR/_assets`。
@@ -165,8 +187,9 @@ data/
 - API Key / MinerU Token / Doc2X Key 用 Fernet 加密存盘，明文只在内存中存在、永不回显；任务快照和语料元数据只记后端名，不记凭据
 - 核心功能按 `GPL-3.0-or-later` 免费开放，不读取邀请码、设备身份、离线许可证或云端账号权益；服务器联网仅用于用户主动触发的更新检查
 - 旧 `activation.json`、`device_identity.dat`、`license.qflicense` 与 `cloud_account.json` 仍属于升级保护数据，程序不读取但覆盖更新不得删除或改写
+- Agent Provider／会话／偏好／审计、用户提示词、Skill 与完整模板目录同属升级保护数据，`DirectBundle` 覆盖前后必须核对
 - `llm_client.py` 的 SSRF 防护放行 loopback（本地推理 Ollama/LM Studio），但拒绝局域网和非 HTTPS 公网地址
-- TikZ 编译有三道沙箱闸：黑名单（`\write18`/`\input`/`\directlua` 等）、`-no-shell-escape`、`openin_any=p`/`openout_any=p`
+- TikZ 与自定义模板编译都必须经过危险原语和资源检查、`-no-shell-escape`、`openin_any=p`/`openout_any=p`、超时与进程树终止
 - 图片服务 `/assets/<name>` 只从全局 `ASSETS_DIR` 走 `send_from_directory`（内建 `safe_join`）；永久清理还必须跨全部登记题库 fail-closed 扫引用
 - 所有「外来文本 → 落盘」必须过 `filestore.normalize_newlines`，写盘 `newline="\n"`、读盘 `newline=""`——Windows 的 `\r\n` 翻译会让换行每存一轮翻一倍
 

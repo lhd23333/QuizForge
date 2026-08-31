@@ -3,13 +3,18 @@
    html[data-theme="dark"]，变量要在 :root 层被覆盖才能被全页取到。
    ui_prefs 由 app.py 的 context_processor 注入，各视图不用逐个传参
    —— base.html 是所有页面的外壳，漏一个视图就是那一页主题失效。 #}
-<html lang="zh" data-theme="{{ ui.theme_mode }}"{% if desktop_host %} class="desktop-host"{% endif %}
-      {% if ui.theme_color %}style="--primary: {{ ui.theme_color }};"{% endif %}>
+<html lang="zh" data-theme="{{ ui.theme_mode }}"
+      data-theme-color="{{ ui.theme_color }}"
+      data-theme-color-custom="{{ 1 if ui.theme_color_custom else 0 }}"
+      {% if desktop_host %}class="desktop-host"{% endif %}
+      style="--qf-user-on-accent: {{ ui.accent_foreground }}; --qf-user-accent-text: {{ ui.accent_text_color }};{% if ui.theme_color_custom %} --qf-user-accent: {{ ui.theme_color }}; --primary: {{ ui.theme_color }};{% endif %}">
+{% from "_icons.html" import icon %}
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}QuizForge 题库{% endblock %}</title>
-  <link rel="icon" type="image/svg+xml" href="{{ static_v('favicon.svg') }}">
+  <link rel="icon" type="image/svg+xml" href="{{ static_v('brand/quizforge-app-icon.svg') }}">
+  <link rel="alternate icon" type="image/x-icon" href="{{ static_v('brand/quizforge-app-icon.ico') }}">
   <link rel="stylesheet" href="{{ static_v('style.css') }}">
   <meta name="csrf-token" content="{{ csrf_token() }}">
   <script>
@@ -60,7 +65,8 @@
      拖动区和最小化/最大化/关闭入口；浏览器与 Obsidian 不显示这一层。 #}
   <div class="desktop-titlebar" id="desktop-titlebar"{% if not desktop_host %} hidden{% endif %}>
     <div class="desktop-titlebar-brand pywebview-drag-region">
-      <span class="desktop-app-mark" aria-hidden="true">QF</span>
+      <img class="desktop-app-mark" src="{{ static_v('brand/quizforge-app-icon.svg') }}"
+           alt="" aria-hidden="true">
       <span class="desktop-app-name">QuizForge</span>
       <span class="desktop-app-caption">本地题库</span>
       <span class="desktop-app-version" id="desktop-app-version">{% if desktop_host %}{{ desktop_version }}{% endif %}</span>
@@ -68,14 +74,14 @@
     <div class="desktop-titlebar-drag pywebview-drag-region" aria-hidden="true"></div>
     <div class="desktop-window-controls" aria-label="窗口控制">
       <button type="button" data-window-action="minimize" title="最小化" aria-label="最小化">
-        <span aria-hidden="true">—</span>
+        {{ icon('minus') }}
       </button>
       <button type="button" data-window-action="maximize" title="最大化" aria-label="最大化">
         <span class="window-maximize-icon" aria-hidden="true"></span>
       </button>
       <button type="button" class="desktop-window-close" data-window-action="close"
               title="关闭" aria-label="关闭">
-        <span aria-hidden="true">×</span>
+        {{ icon('x') }}
       </button>
     </div>
   </div>
@@ -85,12 +91,51 @@
     <div class="desktop-resize-handle desktop-resize-{{ edge }}"
          data-resize-edge="{{ edge }}" aria-hidden="true"></div>
   {% endfor %}
-  {% from "_icons.html" import icon %}
+  {# 动态脚本也只能从这一处取得 SVG，避免各文件复制 path 或重新引入图标库。 #}
+  <div id="qf-icon-templates" hidden aria-hidden="true">
+    {% for _qf_icon in [
+        'book-open', 'notebook', 'folder', 'folder-plus', 'file', 'upload',
+        'download', 'clock', 'archive', 'search', 'trash', 'database', 'cpu',
+        'heart', 'settings', 'help', 'info', 'user', 'bot', 'palette', 'filter',
+        'scan', 'file-output', 'external-link', 'save', 'eye', 'paperclip', 'copy', 'send',
+        'menu', 'more-horizontal', 'check', 'check-circle', 'star', 'edit', 'move',
+        'grip', 'drag', 'scissors', 'plus', 'minus', 'x', 'arrow-up', 'arrow-down',
+        'arrow-left', 'arrow-right',
+        'arrow-left-right', 'arrow-up-down',
+        'chevron-up', 'chevron-right', 'chevron-down', 'expand', 'undo-2', 'redo-2',
+        'list', 'list-ordered', 'quote', 'layout-columns', 'layout-rows', 'square',
+        'refresh-cw', 'alert-triangle', 'warning'
+      ] %}
+      <template data-qf-icon="{{ _qf_icon }}">{{ icon(_qf_icon) }}</template>
+    {% endfor %}
+  </div>
+  <script>
+  // 页面内联脚本和 defer 脚本共用这一份图标契约；未知名称返回空串，调用方仍能正常显示文字。
+  (function () {
+    var host = document.getElementById('qf-icon-templates');
+    var templates = Object.create(null);
+    if (host) host.querySelectorAll('template[data-qf-icon]').forEach(function (tpl) {
+      templates[tpl.dataset.qfIcon] = tpl;
+    });
+    window.QFIcon = function (name, className) {
+      var tpl = templates[String(name || '')];
+      if (!tpl) return '';
+      var svg = tpl.content.querySelector('svg');
+      if (!svg) return '';
+      var clone = svg.cloneNode(true);
+      String(className || '').split(/\s+/).forEach(function (token) {
+        if (/^[A-Za-z0-9_-]+$/.test(token)) clone.classList.add(token);
+      });
+      return clone.outerHTML;
+    };
+  }());
+  </script>
   <aside class="app-sidebar" aria-label="全局导航">
     <nav>
       {% set endpoint = request.endpoint or '' %}
       <a href="{{ url_for('index') }}" class="brand" aria-label="QuizForge 题库">
-        <span class="brand-mark">QF</span><span class="brand-name">QuizForge</span>
+        <img class="brand-mark" src="{{ static_v('brand/quizforge-app-icon.svg') }}"
+             alt="" aria-hidden="true"><span class="brand-name">QuizForge</span>
       </a>
       <div class="nav-group">
       <a href="{{ url_for('index') }}" title="题库" class="nav-link{% if endpoint == 'index' %} active{% endif %}">{{ icon('book-open') }}<span>题库</span></a>
@@ -104,8 +149,10 @@
       </div>
       <div class="nav-group nav-tools">
       <span class="nav-group-label">工具</span>
+      <a href="{{ url_for('prompts_page') }}" title="提示词" class="nav-link nav-link-utility{% if endpoint == 'prompts_page' %} active{% endif %}">{{ icon('file') }}<span>提示词</span></a>
       <a href="{{ url_for('dedup_page') }}" title="查重" class="nav-link nav-link-utility{% if endpoint == 'dedup_page' %} active{% endif %}">{{ icon('search') }}<span>查重</span></a>
       <a href="{{ url_for('recycle_bin') }}" title="回收站" class="nav-link nav-link-utility{% if endpoint == 'recycle_bin' %} active{% endif %}">{{ icon('trash') }}<span>回收站</span></a>
+      <button type="button" class="nav-link nav-link-utility" id="agent-open" title="Agent">{{ icon('bot') }}<span>Agent</span></button>
       </div>
       <div class="nav-spacer"></div>
       {# 仅独立桌面壳注入 window.pywebview 后显示；浏览器/Obsidian 中保持隐藏。 #}
@@ -125,6 +172,274 @@
          data-split-key="app-nav"></div>
   </aside>
 
+  {# Agent 是固定在右侧的工作面，不使用原生 dialog：这样它能和题库主工作区并排，
+     也不会在桌面外壳切换 iframe 时丢失会话和滚动位置。嵌入页会由 CSS 隐藏这一层，
+     只保留最外层工作区的 Agent 面板。 #}
+  <button type="button" id="agent-backdrop" class="agent-backdrop" hidden
+          aria-label="关闭 Agent 面板"></button>
+  <div id="agent-panel-resizer" class="agent-panel-resizer" role="separator"
+       tabindex="0" aria-label="调整 Agent 面板宽度" aria-orientation="vertical"
+       title="拖动调整 Agent 面板宽度，双击恢复"
+       data-split-resizer data-split-owner="root" data-split-panel=".agent-panel"
+       data-split-property="--agent-panel-width" data-split-side="right"
+       data-split-min="420" data-split-max="720" data-split-main-min="460"
+       data-split-key="agent-panel"></div>
+  {# 业务页被第三方 iframe（例如 Obsidian）直接承载时没有 QuizForge 外壳导航，
+     Agent 脚本会按父窗口是否提供面板决定是否显示这个最小触发按钮。 #}
+  <button type="button" id="agent-embedded-open" class="agent-embedded-open" hidden
+          title="打开 Agent" aria-label="打开 Agent">{{ icon('bot') }}</button>
+  <aside id="agent-dialog" class="agent-panel" role="dialog" aria-modal="false"
+         aria-labelledby="agent-panel-title" hidden>
+    <header class="agent-panel-head">
+      <div class="agent-panel-title">
+        <div class="agent-panel-title-copy">
+          <h2 id="agent-panel-title">QuizForge Agent</h2>
+          <span class="agent-status-line"><span class="agent-status-dot" aria-hidden="true"></span>
+            <span id="agent-status" class="agent-status" data-state="ready">就绪</span></span>
+        </div>
+      </div>
+      <div class="agent-panel-head-actions">
+        <button type="button" class="agent-icon-button" id="agent-new"
+                title="新建对话" aria-label="新建对话">{{ icon('plus') }}</button>
+        <button type="button" class="agent-icon-button" id="agent-close"
+                title="关闭 Agent" aria-label="关闭 Agent">{{ icon('x') }}</button>
+      </div>
+    </header>
+
+    <div class="agent-toolbar" aria-label="Agent 工作范围、模型和权限">
+      <button type="button" id="agent-scope-toggle" class="agent-scope-button"
+              aria-expanded="false" aria-controls="agent-scope-menu">
+        <span class="agent-scope-button-icon" aria-hidden="true">{{ icon('folder') }}</span>
+        <span class="agent-scope-button-copy">
+          <small>工作范围</small>
+          <strong id="agent-scope-label">当前题库</strong>
+        </span>
+        <span class="agent-scope-chevron" aria-hidden="true">{{ icon('chevron-down') }}</span>
+      </button>
+      <label class="agent-mode-control" for="agent-mode">
+        <span>权限</span>
+        <select id="agent-mode" aria-label="Agent 权限模式">
+          <option value="standard">标准</option>
+          <option value="danger">危险</option>
+        </select>
+      </label>
+      <label class="agent-provider-control" for="agent-provider">
+        <span>模型</span>
+        <select id="agent-provider" aria-label="Agent 对话模型"
+                aria-describedby="agent-provider-status"
+                title="选择本次对话使用的模型">
+          <option value="">未连接模型 · 本地快捷模式</option>
+        </select>
+      </label>
+      <button type="button" class="agent-icon-button agent-provider-settings"
+              id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型">
+        {{ icon('settings') }}
+      </button>
+      <span id="agent-provider-status" class="agent-provider-status" role="status"
+            aria-live="polite">未连接模型 · 本地快捷模式</span>
+    </div>
+
+    <div id="agent-danger-banner" class="agent-danger-banner" role="status" hidden>
+      <span class="agent-danger-icon" aria-hidden="true">{{ icon('warning') }}</span>
+      <div>
+        <strong>危险模式</strong>
+        <span>当前会话可免确认执行本机命令和受控写操作</span>
+      </div>
+      <button type="button" id="agent-danger-exit" class="agent-danger-exit">退出</button>
+    </div>
+
+    <section id="agent-provider-popover" class="agent-provider-popover" hidden
+             aria-labelledby="agent-provider-popover-title">
+      <div class="agent-provider-popover-head">
+        <div>
+          <strong id="agent-provider-popover-title">Agent 模型</strong>
+          <small>与导入识别模型独立配置</small>
+        </div>
+        <button type="button" class="agent-icon-button" id="agent-provider-close"
+          title="关闭模型设置" aria-label="关闭模型设置">{{ icon('x') }}</button>
+      </div>
+      <p class="agent-provider-protocol">
+        支持 Chat Completions 与 CC Switch 使用的 Responses API。Base URL 可填写到
+        <code>/v1</code>，程序会自动拼接请求端点；API Key 不会返回前端或写入日志。
+      </p>
+      <div id="agent-provider-list" class="agent-provider-list" aria-live="polite"></div>
+      <div class="agent-provider-import">
+        <strong>导入 CC Switch 配置</strong>
+        <span>选择 config.toml 与 auth.json，密钥只在本机解析并加密保存。</span>
+        <div class="agent-provider-import-row">
+          <label>config.toml<input id="agent-cc-config" type="file" accept=".toml,text/plain"></label>
+          <label>auth.json<input id="agent-cc-auth" type="file" accept=".json,application/json"></label>
+          <button type="button" class="agent-provider-action" id="agent-cc-import">导入</button>
+        </div>
+      </div>
+      <form id="agent-provider-form" class="agent-provider-form">
+        <div class="agent-provider-form-title">添加 Provider</div>
+        <div class="agent-provider-grid">
+          <label class="agent-provider-wide">服务商预设
+            <select id="agent-provider-preset" name="preset" class="input">
+              <option value="">自定义 OpenAI 兼容服务</option>
+            </select>
+          </label>
+          <label>名称<input name="name" required placeholder="例如 我的中转站"></label>
+          <label>模型<input name="model" list="agent-provider-model-options" required
+                placeholder="例如 deepseek-chat"></label>
+          <datalist id="agent-provider-model-options"></datalist>
+          <label class="agent-provider-wide">Base URL<input name="base_url" required
+                placeholder="https://api.example.com/v1"></label>
+          <label class="agent-provider-wide">API Key<input name="api_key" type="password"
+                autocomplete="new-password" placeholder="本地模型可留空"></label>
+          <label>接口协议<select name="wire_api"><option value="chat">Chat Completions</option><option value="responses">Responses（CC Switch）</option></select></label>
+          <label>最大输出<input name="max_tokens" type="number" min="256" max="200000" value="8192"></label>
+          <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option></select></label>
+          <label>服务等级<select name="service_tier"><option value="">默认</option><option value="auto">Auto</option><option value="default">Default</option><option value="flex">Flex</option><option value="scale">Scale</option><option value="priority">Priority</option><option value="fast">Fast</option></select></label>
+          <label class="agent-provider-check"><input name="supports_tools" type="checkbox" checked> 支持工具调用</label>
+          <label class="agent-provider-check"><input name="supports_vision" type="checkbox"> 支持图片输入</label>
+          <label class="agent-provider-check"><input name="store_responses" type="checkbox"> 保存 Responses 云端记录</label>
+        </div>
+        <div class="agent-provider-form-actions">
+          <span id="agent-provider-form-status" role="status"></span>
+          <button type="button" class="agent-provider-action" id="agent-provider-edit-cancel" hidden>取消编辑</button>
+          <button type="submit" class="btn primary">添加模型</button>
+        </div>
+      </form>
+    </section>
+
+    <div id="agent-scope-menu" class="agent-scope-menu" hidden>
+      <div class="agent-scope-menu-title">选择 Agent 能看到的范围</div>
+      <label class="agent-scope-option">
+        <input type="radio" name="agent-scope" value="bank" checked>
+        <span class="agent-scope-option-icon" aria-hidden="true">{{ icon('database') }}</span>
+        <span class="agent-scope-option-copy"><strong>当前题库</strong><small>可搜索、导入、查重和整理题目</small></span>
+      </label>
+      <label class="agent-scope-option">
+        <input type="radio" name="agent-scope" value="chat">
+        <span class="agent-scope-option-icon" aria-hidden="true">{{ icon('bot') }}</span>
+        <span class="agent-scope-option-copy"><strong>仅聊天</strong><small>不读取、不上传或修改本地文件</small></span>
+      </label>
+      <div class="agent-workdir-field" id="agent-workdir-field">
+        <label for="agent-workdir">工作目录</label>
+        <div class="agent-workdir-row">
+          <select id="agent-workdir" aria-label="Agent 工作目录">
+            <option value="">题库根目录</option>
+          </select>
+          <button type="button" class="agent-browse-button" id="agent-workdir-browse"
+                  title="选择题库目录">选择</button>
+          <button type="button" class="agent-browse-button agent-workdir-refresh" id="agent-workdir-refresh"
+                  title="刷新目录">刷新</button>
+        </div>
+        <div class="agent-workdir-manual-row">
+          <input id="agent-workdir-manual" type="text" placeholder="也可输入题库内相对路径，如：数学/微积分"
+                 autocomplete="off" spellcheck="false" aria-label="手动输入工作目录">
+          <button type="button" class="agent-browse-button" id="agent-workdir-apply">应用</button>
+        </div>
+        <div class="agent-workdir-row agent-output-dir-row">
+          <label for="agent-output-dir">导出目录</label>
+          <select id="agent-output-dir" aria-label="Agent 导出目录">
+            <option value="">跟随工作目录</option>
+          </select>
+        </div>
+        <div class="agent-workdir-row agent-input-dir-row">
+          <label for="agent-input-dir">材料目录</label>
+          <select id="agent-input-dir" aria-label="Agent 材料目录">
+            <option value="">跟随题库目录</option>
+          </select>
+          <button type="button" class="agent-browse-button" id="agent-input-dir-apply"
+                  title="选择材料目录">选择</button>
+        </div>
+        <p id="agent-scope-status" class="agent-scope-status" role="status"></p>
+      </div>
+      <button type="button" class="agent-scope-done" id="agent-scope-done">完成</button>
+    </div>
+
+    <div class="agent-workspace" id="agent-workspace">
+      <button type="button" id="agent-conversation-backdrop" class="agent-conversation-backdrop"
+              tabindex="-1" aria-label="关闭对话列表"></button>
+      <aside class="agent-conversations" id="agent-conversation-pane" aria-label="Agent 对话列表">
+        <div class="agent-conversations-head">
+          <div class="agent-conversations-heading">
+            <span>对话</span>
+            <small id="agent-session-count" aria-live="polite"></small>
+          </div>
+          <button type="button" class="agent-mini-button" id="agent-new-small"
+                  title="新建对话" aria-label="新建对话">{{ icon('plus') }}</button>
+        </div>
+        <label class="agent-conversation-search">
+          <span class="agent-visually-hidden">搜索对话</span>
+          <input id="agent-session-search" type="search" placeholder="搜索对话" autocomplete="off">
+        </label>
+        <div id="agent-sessions" class="agent-sessions" role="listbox" aria-label="会话"></div>
+        <div id="agent-sessions-empty" class="agent-sessions-empty" hidden>
+          <span>还没有对话</span>
+          <button type="button" id="agent-empty-new" class="agent-empty-new">新建对话</button>
+        </div>
+      </aside>
+
+      <div class="split-resizer agent-conversation-resizer" role="separator" tabindex="0"
+           aria-label="调整 Agent 会话列表宽度" aria-orientation="vertical"
+           title="拖动调整会话列表宽度，双击恢复"
+           data-split-resizer data-split-owner="#agent-workspace"
+           data-split-panel="#agent-conversation-pane"
+           data-split-property="--agent-conversation-width" data-split-side="left"
+           data-split-min="180" data-split-max="420" data-split-main-min="280"
+           data-split-key="agent-conversations"></div>
+
+      <section class="agent-chat" aria-label="Agent 对话">
+        <header class="agent-chat-head">
+          <div class="agent-chat-heading">
+            <button type="button" class="agent-mobile-conversations" id="agent-toggle-conversations"
+                    title="显示或隐藏对话列表" aria-label="显示或隐藏对话列表">{{ icon('menu') }}</button>
+            <div>
+              <strong id="agent-chat-title">新对话</strong>
+              <span id="agent-chat-meta" class="agent-chat-meta">准备开始</span>
+            </div>
+          </div>
+          <button type="button" class="agent-icon-button agent-chat-menu" id="agent-chat-menu"
+                  title="对话选项" aria-label="对话选项">{{ icon('more-horizontal') }}</button>
+        </header>
+
+        <div id="agent-messages" class="agent-messages" role="log" aria-live="polite" aria-relevant="additions">
+          <div id="agent-welcome" class="agent-welcome">
+            <h3>今天要处理什么？</h3>
+            <div class="agent-quick-actions" aria-label="常用任务">
+              <button type="button" data-agent-quick="搜索当前题库中关于微积分的题目">搜索题库</button>
+              <button type="button" data-agent-quick="帮我导入一份试卷并检查题号、题型和重复题">导入试卷</button>
+              <button type="button" data-agent-quick="从当前题库生成一份复习试卷">生成试卷</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="agent-activity" class="agent-activity" hidden aria-live="polite">
+          <span class="agent-activity-spinner" aria-hidden="true"></span>
+          <span id="agent-activity-text">正在处理…</span>
+          <button type="button" id="agent-cancel" class="agent-activity-cancel"
+                  title="停止生成" aria-label="停止生成">{{ icon('square') }}</button>
+        </div>
+        <div id="agent-approval" class="agent-approval" hidden></div>
+
+        <form id="agent-form" class="agent-composer">
+          <div id="agent-attachments" class="agent-attachments" hidden></div>
+          <textarea id="agent-input" class="input agent-input" rows="2"
+                    placeholder="描述要处理的题库任务…" autocomplete="off"></textarea>
+          <div class="agent-composer-actions">
+            <div class="agent-composer-tools">
+              <button type="button" id="agent-attach" class="agent-composer-tool"
+                      title="上传 PDF、DOCX 或 ZIP" aria-label="上传文件">{{ icon('paperclip') }}</button>
+              <input type="file" id="agent-file" class="agent-visually-hidden"
+                     accept=".pdf,.doc,.docx,.zip,application/pdf,application/zip" multiple>
+              <input type="file" id="agent-directory-picker" class="agent-visually-hidden"
+                     webkitdirectory directory multiple tabindex="-1" aria-hidden="true">
+              <span id="agent-composer-hint" class="agent-composer-hint agent-visually-hidden">当前题库</span>
+            </div>
+            <button class="btn primary agent-send" id="agent-send" type="submit"
+                    title="发送" aria-label="发送">
+              <span data-agent-send-icon aria-hidden="true">{{ icon('arrow-up', 'agent-send-mark') }}</span>
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  </aside>
+
   <dialog class="page-help-dialog" id="page-help-dialog" aria-labelledby="page-help-title">
     <div class="page-help-head">
       <h2 id="page-help-title">当前页面帮助</h2>
@@ -133,6 +448,9 @@
     <div class="page-help-body" id="page-help-body"></div>
   </dialog>
   {% include "_page_help.html" %}
+  <script src="{{ static_v('js/custom-select.js') }}" defer></script>
+  <script src="{{ static_v('js/agent-markdown.bundle.js') }}" defer></script>
+  <script src="{{ static_v('js/agent.js') }}" defer></script>
 
   <dialog class="desktop-bank-dialog" id="desktop-bank-dialog">
     <div class="desktop-bank-dialog-head">
@@ -141,7 +459,7 @@
         <span class="muted">像 Obsidian 一样切换，或在新窗口同时打开多个题库</span>
       </div>
       <button type="button" class="icon-btn" data-bank-dialog-close
-              aria-label="关闭" title="关闭">×</button>
+              aria-label="关闭" title="关闭">{{ icon('x') }}</button>
     </div>
     <div class="desktop-bank-dialog-body">
       <div class="desktop-bank-list" id="desktop-bank-list" role="list"
@@ -397,7 +715,9 @@
 
         var icon = document.createElement('span');
         icon.className = 'desktop-bank-item-icon';
-        icon.textContent = '▱';
+        icon.innerHTML = window.QFIcon
+          ? window.QFIcon('database', 'desktop-bank-item-glyph')
+          : '';
         icon.setAttribute('aria-hidden', 'true');
 
         var details = document.createElement('div');

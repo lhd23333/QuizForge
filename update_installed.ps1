@@ -17,6 +17,10 @@ $workspaceRoot = Split-Path -Parent $projectRoot
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $buildDesktop = Join-Path $projectRoot "build_desktop.ps1"
 $buildInstaller = Join-Path $projectRoot "build_installer.ps1"
+$previousPycachePrefix = [Environment]::GetEnvironmentVariable(
+    "PYTHONPYCACHEPREFIX", "Process")
+$updatePycachePrefix = Join-Path $projectRoot `
+    (".quizforge-update-pycache-" + [Guid]::NewGuid().ToString("N"))
 
 if (-not $InstallDir) {
     $InstallDir = Join-Path $workspaceRoot "QuizForge"
@@ -24,6 +28,13 @@ if (-not $InstallDir) {
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $installedExe = Join-Path $InstallDir "QuizForge.exe"
 $uninstaller = Join-Path $InstallDir "unins000.exe"
+$obsoleteProgramFiles = @(
+    "licenses\preview-license.txt",
+    "licenses\THIRD_PARTY_NOTICES-preview.md",
+    "_internal\assets\cloud_entitlement_public_key.pem",
+    "_internal\assets\license_public_key.pem",
+    "_internal\static\js\activation.js"
+)
 
 # These files are current or historical user state, never release files. Old
 # activation/account files stay protected even though the open-source build no
@@ -38,11 +49,20 @@ $protectedRootNames = @(
     "doc2x.json",
     "doc2x_local.json",
     "providers.json",
+    "agent_providers.json",
+    "agent_skills.json",
+    "agent_templates.json",
+    "agent_preferences.json",
+    "agent_sessions.json",
+    "agent_audit.jsonl",
     "service_ports.json",
+    "prompts.json",
     "ui_prefs.json"
 )
 $protectedStateNames = @("conversion_tasks.json", "selections.json")
 $protectedTreeNames = @("history")
+$protectedTreeNames += @("agent_skills", "agent_templates")
+$protectedContentTreeNames = @("agent_templates")
 $protectedResumePatterns = @(".mineru_task_*.json", ".mineru_result_*.zip.part")
 
 function Assert-LastExitCode([string]$Step) {
@@ -76,6 +96,38 @@ function Assert-ExeVersion([string]$Path, [string]$ProductVersion,
     $actualFile = ([string]$info.FileVersion).Trim()
     if ($actualProduct -ne $ProductVersion -or $actualFile -ne $FileVersion) {
         throw "$Label version mismatch: product=$actualProduct file=$actualFile; expected product=$ProductVersion file=$FileVersion"
+    }
+}
+
+function Get-ObsoleteProgramPath([string]$ProgramDir, [string]$RelativePath) {
+    $root = [System.IO.Path]::GetFullPath($ProgramDir).TrimEnd("\")
+    $candidate = [System.IO.Path]::GetFullPath((Join-Path $root $RelativePath))
+    if (-not $candidate.StartsWith($root + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Obsolete program path escaped the install directory: $candidate"
+    }
+    return $candidate
+}
+
+function Remove-ObsoleteProgramFiles([string]$ProgramDir) {
+    foreach ($relativePath in $obsoleteProgramFiles) {
+        $candidate = Get-ObsoleteProgramPath $ProgramDir $relativePath
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            Remove-Item -LiteralPath $candidate -Force
+        }
+    }
+}
+
+function Assert-ObsoleteProgramFilesAbsent([string]$ProgramDir,
+                                           [string]$Label) {
+    $remaining = @()
+    foreach ($relativePath in $obsoleteProgramFiles) {
+        $candidate = Get-ObsoleteProgramPath $ProgramDir $relativePath
+        if (Test-Path -LiteralPath $candidate) {
+            $remaining += $relativePath
+        }
+    }
+    if ($remaining.Count -gt 0) {
+        throw "$Label still contains obsolete program files: $($remaining -join '; ')"
     }
 }
 
@@ -130,8 +182,8 @@ function Get-ProtectedSnapshot([string]$AppDataDir, [string]$ProgramDir,
 
     # History can contain large source PDFs. Re-hashing every source four times
     # during an update would make the protection check grow with the archive.
-    # Path, size and mtime still detect replacement/removal, while the small
-    # manifests and Markdown results receive a full content hash.
+    # Agent templates are executable user assets, so every file in that tree
+    # receives a full content hash regardless of its suffix.
     foreach ($treeName in $protectedTreeNames) {
         foreach ($tree in @(Get-ChildItem -LiteralPath $AppDataDir -Recurse -Force `
                             -Directory -Filter $treeName `
@@ -139,7 +191,8 @@ function Get-ProtectedSnapshot([string]$AppDataDir, [string]$ProgramDir,
             foreach ($file in @(Get-ChildItem -LiteralPath $tree.FullName -Recurse `
                                 -Force -File -ErrorAction SilentlyContinue)) {
                 $key = Get-RelativeKey "appdata" $appRoot $file
-                if ($file.Name -eq "manifest.json" -or $file.Extension -eq ".md") {
+                if (($protectedContentTreeNames -contains $treeName) -or
+                    $file.Name -eq "manifest.json" -or $file.Extension -eq ".md") {
                     $snapshot[$key] = (Get-FileHash -LiteralPath $file.FullName `
                                       -Algorithm SHA256).Hash
                 } else {
@@ -270,6 +323,9 @@ Assert-QuizForgeClosed
 
 Push-Location $projectRoot
 try {
+    # 更新前检查与构建使用独立缓存，避免活动进程锁住源码树的 __pycache__。
+    New-Item -ItemType Directory -Path $updatePycachePrefix | Out-Null
+    $env:PYTHONPYCACHEPREFIX = $updatePycachePrefix
     $versionOutput = & $python -c "import desktop_product; print(desktop_product.PRODUCT_VERSION)"
     Assert-LastExitCode "Reading PRODUCT_VERSION"
     $productVersion = ([string]($versionOutput | Select-Object -Last 1)).Trim()
@@ -332,8 +388,12 @@ try {
         "mineru_store.py", "doc2x_client.py", "doc2x_store.py", "imgorder.py",
         "blockpipe.py", "blocksplit.py", "blocknorm.py", "mechfix.py", "importer.py",
         "dedup.py", "llm_client.py", "providers.py", "qrender.py", "task_store.py",
+        "prompt_store.py", "import_bundle.py",
         "history_store.py",
         "cleanup_output.py", "corpus.py", "update_client.py", "tools\eval_doc2x.py",
+        "agent_core.py", "agent_tools.py", "agent_actions.py",
+        "agent_approvals.py", "agent_orchestrator.py", "agent_provider.py",
+        "agent_upload.py", "agent_catalog.py", "template_pipeline.py", "tex_sandbox.py",
         "vendor\project_alpha\src\mineru_client.py"
     )
     & $python -m py_compile @compileFiles
@@ -352,9 +412,11 @@ try {
     if ($null -eq $npm) {
         throw "npm.cmd was not found; handout frontend tests cannot run"
     }
+    & $npm.Source run build
+    Assert-LastExitCode "Frontend build"
     & $npm.Source run test:handouts
     Assert-LastExitCode "Handout frontend tests"
-    Write-Output "[5/9] Handout frontend tests passed"
+    Write-Output "[5/9] Frontend build and tests passed"
 
     if ($DirectBundle) {
         if (-not $SkipBuild) {
@@ -377,6 +439,7 @@ try {
     }
     $bundleExe = Join-Path $projectRoot "build\desktop\QuizForge\QuizForge.exe"
     $installerPath = Join-Path $projectRoot "build\installer\QuizForge-$productVersion-Setup.exe"
+    Assert-ObsoleteProgramFilesAbsent (Split-Path -Parent $bundleExe) "Built bundle"
     Assert-ExeVersion $bundleExe $productVersion $fileVersion "Built bundle"
     if ($DirectBundle) {
         Write-Output "[6/9] Desktop release bundle passed version and bundle checks; no installer was built"
@@ -439,6 +502,8 @@ try {
         }
     }
 
+    Remove-ObsoleteProgramFiles $InstallDir
+    Assert-ObsoleteProgramFilesAbsent $InstallDir "Installed application"
     Assert-ExeVersion $installedExe $productVersion $fileVersion "Installed application"
     Assert-BundleMatchesInstall (Split-Path -Parent $bundleExe) $InstallDir
     $protectedAfterInstall = Get-ProtectedSnapshot $appDataDir $InstallDir $true $false
@@ -496,5 +561,12 @@ try {
         Write-Output "[OK] Installer log: $setupLog"
     }
 } finally {
+    if ($null -eq $previousPycachePrefix) {
+        Remove-Item Env:PYTHONPYCACHEPREFIX -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPYCACHEPREFIX = $previousPycachePrefix
+    }
+    Remove-Item -LiteralPath $updatePycachePrefix -Recurse -Force `
+        -ErrorAction SilentlyContinue
     Pop-Location
 }

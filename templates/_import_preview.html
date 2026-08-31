@@ -1,3 +1,4 @@
+{% from "_icons.html" import icon %}
 {% if preview is not none %}
   {% if queue_id %}
     <div class="flash flash-ok">
@@ -13,7 +14,7 @@
   <h3>切分预览：共 {{ preview|length }} 题</h3>
   {% if missing_numbers %}
   <div class="flash flash-err">
-    ⚠ 你指定「只取题号」里的这些题没识别出来：<b>{{ missing_numbers|join('、') }}</b>。
+    {{ icon('alert-triangle', 'status-inline-icon') }}你指定「只取题号」里的这些题没识别出来：<b>{{ missing_numbers|join('、') }}</b>。
     可能是识别漏题或题号格式特殊，建议核对原文件后手动补录。
   </div>
   {% endif %}
@@ -22,10 +23,10 @@
      前者不说用户会以为模板生效了、对着切歪的结果找不到原因；后者不说就是一道
      选项空白的题静默进题库，而 OCR 丢的内容后面任何一层都补不回来。 #}
   {% if split_note %}
-  <div class="flash flash-err">⚠ {{ split_note }}</div>
+  <div class="flash flash-err">{{ icon('alert-triangle', 'status-inline-icon') }}{{ split_note }}</div>
   {% endif %}
   {% if batch_id %}
-  {# 🔁 重新转换：识别结果不对时用原文件重跑一次，不必删掉重传。独立于 confirm-form，
+  {# 重新转换：识别结果不对时用原文件重跑一次，不必删掉重传。独立于 confirm-form，
      所以摆在它外面（HTML 不允许嵌套 form）。 #}
   <div class="prev-toolbar">
     <form method="post" style="display:inline"
@@ -50,7 +51,7 @@
         <input type="checkbox" name="num_template_clear" value="1"> 清除自定义模板
       </label>
       {% endif %}
-      <button type="submit" class="btn" title="用原文件重新跑一次识别转换">🔁 重新转换</button>
+      <button type="submit" class="btn" title="用原文件重新跑一次识别转换">{{ icon('refresh-cw') }}<span>重新转换</span></button>
     </form>
   </div>
   {% endif %}
@@ -59,6 +60,7 @@
           action="{{ url_for('import_md') }}">
       <input type="hidden" name="job_id" value="{{ job_id or '' }}">
       {% if queue_id %}<input type="hidden" name="queue_id" value="{{ queue_id }}">{% endif %}
+      <input type="hidden" name="bundle_stage_id" value="{{ bundle_stage_id or '' }}">
       {% if batch_id %}
         <input type="hidden" name="batch_id" value="{{ batch_id }}">
         <input type="hidden" name="batch_gid" value="{{ batch_gid }}">
@@ -139,7 +141,8 @@
 
         {# data-types：拆分出的新卡要渲染题型下拉，JS 从这里读（不往脚本里内联 tojson） #}
         <div class="prev-cards" id="prev-cards" data-types="{{ types | tojson | forceescape }}"
-             data-subject="{{ bank_subject }}">
+             data-subject="{{ bank_subject }}"
+             data-max-image-bytes="{{ upload_limits.max_image_bytes }}">
           {% for p in preview %}
             <article class="card qcard {% if p['dup'] %}dup-card{% endif %}" data-idx="{{ p['idx'] }}">
               <div class="card-head">
@@ -169,9 +172,9 @@
                 {% if p['dup'] %}<span class="badge badge-exact">{{ p['dup'] }}</span>{% endif %}
                 <div class="spacer"></div>
                 <button type="button" class="btn btn-sm card-merge-up"
-                        title="把本题内容并入上一题（用于误拆的小问）">⬆ 合并到上一题</button>
+                        title="把本题内容并入上一题（用于误拆的小问）">{{ icon('arrow-up') }}<span>合并到上一题</span></button>
                 <button type="button" class="btn btn-sm card-split"
-                        title="在本题下方插入一张空题卡，把多余的小问剪贴过去">✂ 拆分</button>
+                        title="在本题下方插入一张空题卡，把多余的小问剪贴过去">{{ icon('scissors') }}<span>拆分</span></button>
                 <button type="button" class="link link-danger card-remove">移除</button>
               </div>
               <div class="qcard-render body-structured">{{ p | qbody }}</div>
@@ -206,6 +209,11 @@
                 <textarea class="input qcard-solution" name="solution_{{ p['idx'] }}"
                           rows="3" placeholder="本题解析 / 答案">{{ p['solution'] }}</textarea>
               </details>
+              <details class="qcard-note-wrap" {% if p.get('note') %}open{% endif %}>
+                <summary class="muted">备注（仅用于题库整理）</summary>
+                <textarea class="input qcard-note" name="note_{{ p['idx'] }}"
+                          rows="3" placeholder="本题备注">{{ p.get('note', '') }}</textarea>
+              </details>
               <div class="qcard-meta">
                 <span class="qcard-diff-label muted">难度</span>
                 <span class="diff-dots qcard-diff" title="点击设置难度 1-5，再点当前值清除">
@@ -214,7 +222,7 @@
                   {% endfor %}
                 </span>
                 <input type="hidden" name="diff_{{ p['idx'] }}" class="qcard-diff-val" value="">
-                <span class="star-toggle qcard-star" title="标星：标记高质量题（点击切换）">★</span>
+                <span class="star-toggle qcard-star" title="标星：标记高质量题（点击切换）">{{ icon('star') }}</span>
                 <input type="hidden" name="star_{{ p['idx'] }}" class="qcard-star-val" value="">
                 <input type="text" name="tag_{{ p['idx'] }}" class="input qcard-tag"
                        placeholder="本题额外标签（逗号分隔）">

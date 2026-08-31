@@ -1382,6 +1382,75 @@ class DesktopApi:
             return {"ok": False, "error": f"所选目录无效：{exc}"}
         return {"ok": True, "bank_dir": str(target)}
 
+    def browse_agent_directory(self) -> dict:
+        """选择 Agent 工作目录，并将结果收敛为当前题库内的相对目录。
+
+        Agent 只能在当前题库边界内工作；目录选择器返回的绝对路径不会直接
+        进入会话或模型上下文，必须先拒绝链接、系统目录和路径穿越。
+        """
+        import webview
+
+        if self._window is None:
+            return {"ok": False, "error": "桌面窗口尚未就绪"}
+        root = self.bank_dir.resolve()
+        if _is_link_or_junction(root) or not root.is_dir():
+            return {"ok": False, "error": "当前题库不是普通目录"}
+        # 新版 pywebview 暴露模块级常量；兼容旧版 FileDialog.FOLDER，
+        # 这样目录版升级时不会因为 WebView 后端版本差异失效。
+        dialog_kind = getattr(webview, "FOLDER_DIALOG", None)
+        if dialog_kind is None:
+            dialog_kind = getattr(getattr(webview, "FileDialog", None), "FOLDER", None)
+        if dialog_kind is None:
+            return {"ok": False, "error": "当前桌面运行时不支持目录选择"}
+        try:
+            selected = self._window.create_file_dialog(
+                dialog_kind, directory=str(root), allow_multiple=False,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).exception("打开 Agent 工作目录选择器失败")
+            return {"ok": False, "error": f"无法打开目录选择器：{exc}"}
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        raw_path = selected if isinstance(selected, str) else selected[0]
+        if not raw_path:
+            return {"ok": False, "cancelled": True}
+        try:
+            def _is_under(base: Path, candidate: Path) -> bool:
+                common = os.path.commonpath((str(base), str(candidate)))
+                return (os.path.normcase(os.path.normpath(common))
+                        == os.path.normcase(os.path.normpath(str(base))))
+
+            # 先按未解析的路径检查边界和各级链接，再 resolve；否则一个指向
+            # 题库外部的 junction 会在 resolve 后伪装成合法目录。
+            lexical = Path(raw_path).expanduser()
+            if not lexical.is_absolute():
+                raise ValueError("工作目录必须是绝对路径")
+            lexical = lexical.absolute()
+            if not _is_under(root, lexical):
+                raise ValueError("工作目录必须位于当前题库内")
+            relative_lexical = lexical.relative_to(root)
+            parts = relative_lexical.parts
+            reserved = {"_assets", "_handouts", "_backups", ".trash"}
+            if any(part in ("", ".", "..") for part in parts):
+                raise ValueError("工作目录路径无效")
+            if any(part.startswith(".") or part.lower() in reserved for part in parts):
+                raise ValueError("不能选择隐藏目录或题库系统目录")
+            current = root
+            for part in parts:
+                current = current / part
+                if _is_link_or_junction(current):
+                    raise ValueError("工作目录不能包含符号链接或联接点")
+                if not current.is_dir():
+                    raise ValueError("所选路径不是普通目录")
+            target = lexical.resolve(strict=True)
+            if (not target.is_dir() or _is_link_or_junction(target)
+                    or not _is_under(root, target)):
+                raise ValueError("工作目录必须是当前题库内的普通目录")
+            relative = target.relative_to(root).as_posix()
+        except (OSError, RuntimeError, ValueError) as exc:
+            return {"ok": False, "error": f"所选工作目录无效：{exc}"}
+        return {"ok": True, "workdir_id": relative, "relative_path": relative}
+
     def browse_bank_parent_directory(self) -> dict:
         """选择新题库的父目录；创建动作由显式的名称确认完成。"""
         import webview
@@ -1879,7 +1948,8 @@ def main() -> int:
         width=1440,
         height=920,
         min_size=(1024, 680),
-        background_color="#f3f6fa",
+        # 与深色基线画布一致，避免 WebView 首帧加载前出现浅色闪屏。
+        background_color="#202124",
         frameless=True,
         easy_drag=False,
         shadow=True,

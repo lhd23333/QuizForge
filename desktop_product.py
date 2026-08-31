@@ -15,7 +15,7 @@ import mineru_store
 import doc2x_store
 
 
-PRODUCT_VERSION = "1.1.0"
+PRODUCT_VERSION = "2.0.0"
 DEMO_FOLDER = "QuizForge 示例题库"
 
 

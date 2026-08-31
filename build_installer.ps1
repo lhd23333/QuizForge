@@ -1,6 +1,6 @@
 param(
-    [string]$Version = "1.1.0",
-    [string]$FileVersion = "1.1.0.0",
+    [string]$Version = "2.0.0",
+    [string]$FileVersion = "2.0.0.0",
     [switch]$SkipDesktopBuild,
     [string]$SigningCertificateThumbprint = $env:QUIZFORGE_SIGNING_CERT_THUMBPRINT,
     [string]$TimestampUrl = "http://timestamp.digicert.com",

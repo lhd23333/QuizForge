@@ -1409,6 +1409,18 @@ class PageTests(unittest.TestCase):
         self.assertIn("position: fixed", popover_rule.group(1))
         self.assertIn("width: min(380px, calc(100vw - 24px))", popover_rule.group(1))
         self.assertIn("overflow: auto", popover_rule.group(1))
+        self.assertIn("html:not(.desktop-host) .bulkbar.show", stylesheet)
+        self.assertRegex(
+            stylesheet,
+            r"html:not\(\.desktop-host\) \.bulkbar\.show\s*\{"
+            r"[^}]*position:\s*static;[^}]*max-height:\s*none;",
+        )
+        self.assertRegex(
+            stylesheet,
+            r"@media \(max-width: 760px\)[\s\S]*?"
+            r"body:has\(\.card\.inline-editing\) \.new-question-fab\s*"
+            r"\{\s*display:\s*none;\s*\}",
+        )
 
         tabs_rules = re.findall(
             r"(?:^|\n)\.collection-tabs\s*\{([^}]*)\}", stylesheet, re.S)
@@ -1668,8 +1680,7 @@ class PageTests(unittest.TestCase):
         self.assertIn(b'<option value="practice">', page.data)
         self.assertIn(b'<select name="paper_tone">', page.data)
         self.assertIn('米黄护眼'.encode("utf-8"), page.data)
-        self.assertIn('页眉 / 页脚设置（所有导出模式适用）'.encode("utf-8"),
-                      page.data)
+        self.assertIn('页眉与页脚'.encode("utf-8"), page.data)
 
     def test_home_renders_only_one_folder_move_select(self):
         tree = [{
@@ -1765,11 +1776,12 @@ class PageTests(unittest.TestCase):
             app_module.filestore._cache.clear()
             app_module.filestore.invalidate_scan_cache()
             app_module._question_pages.clear()
-            app_module.filestore.create_questions_batch(
+            ids = app_module.filestore.create_questions_batch(
                 [{"body": f"无限滚动题目 {number}", "number": number}
                  for number in range(1, 66)],
                 "高考卷/分页测试/测试卷",
             )
+            app_module.filestore.clear_selected()
             client = app_module.app.test_client()
             first = client.get(
                 "/", query_string={"collection": "高考卷/分页测试"})
@@ -1783,21 +1795,35 @@ class PageTests(unittest.TestCase):
             self.assertIsNotNone(token_match)
             token = token_match.group(1)
 
-            second = client.get(
-                "/questions/page", query_string={"token": token, "offset": 30})
-            second_data = second.get_json()
-            self.assertEqual(second.status_code, 200)
-            self.assertEqual(second_data["html"].count('<article class="card '), 30)
-            self.assertEqual(second_data["next_offset"], 60)
-            self.assertFalse(second_data["done"])
+            try:
+                # 快照建立后才改变勾选状态，后续页必须读取服务端最新状态，不能
+                # 沿用建快照时的旧记录。
+                app_module.filestore.select_ids(ids)
+                second = client.get(
+                    "/questions/page", query_string={"token": token, "offset": 30})
+                second_data = second.get_json()
+                self.assertEqual(second.status_code, 200)
+                self.assertEqual(second_data["html"].count('<article class="card '), 30)
+                self.assertEqual(
+                    second_data["html"].count('<article class="card selected'), 30)
+                self.assertEqual(len(re.findall(
+                    r'class="sel-toggle"[^>]*\bchecked\b', second_data["html"], re.S)), 30)
+                self.assertEqual(second_data["next_offset"], 60)
+                self.assertFalse(second_data["done"])
 
-            third = client.get(
-                "/questions/page", query_string={"token": token, "offset": 60})
-            third_data = third.get_json()
-            self.assertEqual(third.status_code, 200)
-            self.assertEqual(third_data["html"].count('<article class="card '), 5)
-            self.assertEqual(third_data["next_offset"], 65)
-            self.assertTrue(third_data["done"])
+                app_module.filestore.clear_selected()
+                third = client.get(
+                    "/questions/page", query_string={"token": token, "offset": 60})
+                third_data = third.get_json()
+                self.assertEqual(third.status_code, 200)
+                self.assertEqual(third_data["html"].count('<article class="card '), 5)
+                self.assertNotIn('<article class="card selected', third_data["html"])
+                self.assertNotRegex(
+                    third_data["html"], r'class="sel-toggle"[^>]*\bchecked\b')
+                self.assertEqual(third_data["next_offset"], 65)
+                self.assertTrue(third_data["done"])
+            finally:
+                app_module.filestore.clear_selected()
 
         app_module.filestore._cache.clear()
         app_module.filestore.invalidate_scan_cache()
@@ -2092,6 +2118,69 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertEqual(updated["note"], payload["note"])
         self.assertEqual(updated["difficulty"], "4")
         self.assertEqual(updated["tags"], ["代数", "校内"])
+
+    def test_inline_save_preserves_current_server_selection_in_replacement_card(self):
+        qid = app_module.filestore.create_question("局部编辑勾选状态")
+        app_module.filestore.clear_selected()
+        try:
+            app_module.filestore.select_ids([qid])
+            response = self.client.post(
+                f"/question/{qid}/inline",
+                json={
+                    "body": "局部编辑后的正文", "solution": "", "note": "",
+                    "type": "填空题", "source": "", "difficulty": "",
+                    "tags": "", "card_sort": "browse",
+                },
+                headers=self.headers,
+            )
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual(response.status_code, 200)
+        card_html = response.get_json()["card_html"]
+        self.assertIn('<article class="card selected', card_html)
+        self.assertRegex(card_html, r'class="sel-toggle"[^>]*\bchecked\b')
+
+    def test_optional_editor_fields_default_from_content_on_both_edit_surfaces(self):
+        qid = app_module.filestore.create_question(
+            "编辑器折叠状态", solution="已有解析", note="已有备注")
+        record = app_module.filestore.get_question(qid)
+        with app_module.app.test_request_context("/"):
+            inline_html = app_module.render_template(
+                "_inline_question_editor.html", q=record,
+                types=config.QUESTION_TYPES,
+            )
+        standalone_html = self.client.get(f"/question/{qid}/edit").get_data(as_text=True)
+        empty_html = self.client.get("/question/new").get_data(as_text=True)
+
+        def optional_block(html_text, field):
+            match = re.search(
+                rf'<details class="inline-optional-field"[^>]*'
+                rf'data-inline-optional="{field}".*?</details>',
+                html_text,
+                re.S,
+            )
+            self.assertIsNotNone(match)
+            return match.group(0)
+
+        for html_text in (inline_html, standalone_html):
+            for field in ("solution", "note"):
+                block = optional_block(html_text, field)
+                opening = block.split(">", 1)[0]
+                self.assertRegex(opening, r"\bopen\b")
+                self.assertRegex(
+                    block,
+                    rf'data-preview-field="{field}"[^>]*\bchecked\b',
+                )
+
+        for field in ("solution", "note"):
+            block = optional_block(empty_html, field)
+            opening = block.split(">", 1)[0]
+            self.assertNotRegex(opening, r"\bopen\b")
+            self.assertNotRegex(
+                block,
+                rf'data-preview-field="{field}"[^>]*\bchecked\b',
+            )
 
     def test_card_and_inline_preview_hide_solution_leading_label_only(self):
         qid = app_module.filestore.create_question(

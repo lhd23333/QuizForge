@@ -3,27 +3,61 @@
 {% block content %}
 <h2>{% if q %}编辑题目 #{{ q['id'] }}{% else %}新增题目{% endif %}</h2>
 
-<form method="post" class="edit-form">
+<form method="post" class="edit-form standalone-question-editor"
+      data-preview-url="{{ url_for('question_inline_preview', qid=q['id']) if q else url_for('question_inline_create_preview') }}">
   {# 文件夹右键「新增题目」带过来的落点：存完直接把新题归进这个文件夹 #}
   {% if not q and preset_collection %}
     <input type="hidden" name="collection" value="{{ preset_collection }}">
   {% endif %}
-  <div class="field">
-    <label>题目正文（规范化 Markdown，公式用 <code>$\displaystyle ...$</code>）</label>
-    <textarea name="body" rows="10" class="input" required
-      oninput="renderPreview()">{{ q['body'] if q else '' }}</textarea>
-  </div>
-
-  <div class="field">
-    <label>解析（可选，公式同样用 <code>$...$</code>）</label>
-    <textarea name="solution" rows="6" class="input"
-      placeholder="题目的解析 / 答案，留空则无">{{ q['solution'] if q and q['solution'] else '' }}</textarea>
-  </div>
-
-  <div class="field">
-    <label>备注（可选，可通过普通搜索或 <code>note:</code> 查找）</label>
-    <textarea name="note" rows="4" class="input"
-      placeholder="记录易错点、讲法或使用提示">{{ q['note'] if q and q['note'] else '' }}</textarea>
+  <div class="standalone-editor-workbench">
+    <div class="inline-source-pane">
+      <label class="inline-field">
+        <span>题目正文</span>
+        <textarea name="body" rows="12" class="input standalone-body-source" required
+                  spellcheck="false">{{ q['body'] if q else '' }}</textarea>
+      </label>
+      <details class="inline-optional-field" data-inline-optional="solution"
+               {% if q and q['solution'] %}open{% endif %}>
+        <summary>
+          <span>解析</span>
+          <label class="inline-preview-toggle" title="在右侧显示解析预览">
+            <input type="checkbox" class="standalone-preview-enabled"
+                   data-preview-field="solution" {% if q and q['solution'] %}checked{% endif %}>
+            <span>预览</span>
+          </label>
+        </summary>
+        <div class="inline-optional-body">
+          <textarea name="solution" rows="2" class="input standalone-auto-textarea"
+                    spellcheck="false" placeholder="可选：输入答案或解析…">{{ q['solution'] if q and q['solution'] else '' }}</textarea>
+        </div>
+      </details>
+      <details class="inline-optional-field" data-inline-optional="note"
+               {% if q and q['note'] %}open{% endif %}>
+        <summary>
+          <span>备注</span>
+          <label class="inline-preview-toggle" title="在右侧显示备注预览">
+            <input type="checkbox" class="standalone-preview-enabled"
+                   data-preview-field="note" {% if q and q['note'] %}checked{% endif %}>
+            <span>预览</span>
+          </label>
+        </summary>
+        <div class="inline-optional-body">
+          <textarea name="note" rows="2" class="input standalone-auto-textarea"
+                    spellcheck="false" placeholder="可选：记录易错点、讲法或使用提示…">{{ q['note'] if q and q['note'] else '' }}</textarea>
+        </div>
+      </details>
+    </div>
+    <aside class="inline-preview-pane standalone-preview-pane" aria-live="polite">
+      <div class="inline-preview-status">{{ '输入题目后显示预览' if not q else '正在编译预览…' }}</div>
+      <div class="inline-preview-body body-structured"></div>
+      <div class="inline-preview-solution" hidden>
+        <div class="inline-preview-solution-body body-structured"></div>
+      </div>
+      <div class="inline-preview-note" hidden>
+        <strong>备注</strong>
+        <div class="inline-preview-note-body body-structured"></div>
+      </div>
+    </aside>
   </div>
 
   <div class="row">
@@ -59,27 +93,11 @@
            placeholder="导数, 高考真题, 压轴题">
   </div>
 
-  <div class="field">
-    <label>实时预览</label>
-    <div id="preview" class="preview-box"></div>
-  </div>
-
   <button type="submit" class="btn btn-primary">保存</button>
   <a href="{{ url_for('index') }}" class="btn btn-ghost">取消</a>
 </form>
 {% endblock %}
 
 {% block scripts %}
-<script>
-function renderPreview() {
-  const txt = document.querySelector('textarea[name=body]').value;
-  const box = document.getElementById('preview');
-  box.innerHTML = window.QTextPreview.render(txt, {imageMode: 'obsidian'});
-  // 公式渲染统一走 QMath（见 static/js/math.js）——定界符和 macros 只该有一份配置。
-  // 这里以前调的是 MathJax，而 base.html 早已换成自托管 KaTeX，那段是死代码：
-  // 编辑页的实时预览里公式一直是裸 $...$ 源码。
-  if (window.QMath) window.QMath.typeset(box);
-}
-window.addEventListener('load', renderPreview);
-</script>
+<script src="{{ static_v('js/question-editor.js') }}" defer></script>
 {% endblock %}

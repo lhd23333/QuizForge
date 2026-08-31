@@ -21,6 +21,9 @@ from pathlib import Path
 
 import config
 import export_tables
+import mechfix
+import template_pipeline
+import tex_sandbox
 
 
 class ExportError(Exception):
@@ -344,7 +347,7 @@ def split_choice_options(body: str) -> tuple[str, list[str], str] | None:
     if spans is None:
         return None
     stem_end, opt_spans, opts_end = spans
-    stem = body[:stem_end].rstrip()
+    stem = mechfix.strip_choice_answer_blank(body[:stem_end].rstrip())
     opts = [re.sub(r"\s+", " ", body[s:e].strip()) for s, e in opt_spans]
     tail = body[opts_end:].strip()
     return stem, opts, tail
@@ -367,7 +370,13 @@ def _choice_spans(body: str) -> tuple[int, list[tuple[int, int]], int] | None:
     # 末选项到本行末为止，行以后的内容归尾部（见 split_choice_options 的 docstring）
     last_start = seq[-1][1]
     nl = body.find("\n", last_start)
-    opts_end = len(body) if nl < 0 else nl
+    # MinerU 的图片选项通常把最后一个选项写成“D.\nQFIGSLOT...文字”。
+    # 仅取 D 标签所在行会把 D 误判为尾部，四图配选项因此失效。只要最后
+    # 一个标签后紧邻图片哨兵，就把后续内容视为该选项，题干/解析已在调用
+    # 方切开，不会吞掉下一题。
+    continuation = body[last_start:] if nl < 0 else body[nl:]
+    image_option_tail = bool(re.search(r"\n\s*QFIGSLOT\d+\b", continuation))
+    opts_end = len(body) if nl < 0 or image_option_tail else nl
 
     spans: list[tuple[int, int]] = []
     for i, (_letter, start) in enumerate(seq):
@@ -2710,12 +2719,14 @@ _MATH_UNICODE_REPLACEMENTS = {
     "Ⅲ": r"\mathrm{III}",
     "ⅰ": r"\mathrm{i}",
     "ⅱ": r"\mathrm{ii}",
-    "①": r"\textcircled{1}",
-    "②": r"\textcircled{2}",
-    "③": r"\textcircled{3}",
-    "④": r"\textcircled{4}",
-    "⑤": r"\textcircled{5}",
-    "⑥": r"\textcircled{6}",
+    # \textcircled 是文本命令；数学区必须通过 \text 切回文本模式，
+    # 否则 XeLaTeX 会报 "Command \\textcircled invalid in math mode"。
+    "①": r"\text{\textcircled{1}}",
+    "②": r"\text{\textcircled{2}}",
+    "③": r"\text{\textcircled{3}}",
+    "④": r"\text{\textcircled{4}}",
+    "⑤": r"\text{\textcircled{5}}",
+    "⑥": r"\text{\textcircled{6}}",
     "、": r"\text{、}",
     "．": ".",
     # OCR 偶尔把“左/中/右”直接塞进数学下标；Latin Modern 数学字体没有中文字形。
@@ -2806,9 +2817,10 @@ def _normalize_unicode_text_symbols(text: str) -> str:
         "⋅": r" $\cdot$ ", "∩": r" $\cap$ ", "∪": r" $\cup$ ",
         "⊥": r" $\perp$ ", "∵": r" $\because$ ", "∴": r" $\therefore$ ",
         "λ": r" $\lambda$ ",
-        "①": r" $\textcircled{1}$ ", "②": r" $\textcircled{2}$ ",
-        "③": r" $\textcircled{3}$ ", "④": r" $\textcircled{4}$ ",
-        "⑤": r" $\textcircled{5}$ ", "⑥": r" $\textcircled{6}$ ",
+        # 文本区直接使用文本命令，不再把 \textcircled 错误包进数学模式。
+        "①": r" \textcircled{1} ", "②": r" \textcircled{2} ",
+        "③": r" \textcircled{3} ", "④": r" \textcircled{4} ",
+        "⑤": r" \textcircled{5} ", "⑥": r" \textcircled{6} ",
     }
     parts = _MATH_SPLIT_RE.split(text)
     for i in range(0, len(parts), 2):
@@ -3242,11 +3254,87 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
     return staged
 
 
+def _resolve_template_path(raw: str | Path | None, *, mode: str | None = None) -> Path:
+    """校验导出模板路径，只允许内置资源或 Agent 模板目录中的普通文件。"""
+    custom = raw is not None and str(raw).strip() != ""
+    source = Path(raw).expanduser() if custom else Path(config.TEX_TEMPLATE)
+    try:
+        if source.is_symlink():
+            raise ExportError("导出模板不能是符号链接")
+    except OSError as exc:
+        raise ExportError("导出模板不存在或无法读取") from exc
+    try:
+        resolved = source.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ExportError("导出模板不存在或无法读取") from exc
+    if not resolved.is_file() or resolved.suffix.lower() != ".tex":
+        raise ExportError("导出模板必须是普通 .tex 文件")
+
+    try:
+        builtin = Path(config.TEX_TEMPLATE).expanduser().resolve(strict=True)
+        agent_root = Path(config.AGENT_TEMPLATES_DIR).expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise ExportError("导出模板目录无法解析") from exc
+    if not custom:
+        if resolved != builtin:
+            raise ExportError("内置导出模板路径不一致")
+        return resolved
+    if resolved == builtin:
+        return resolved
+    if agent_root not in resolved.parents:
+        raise ExportError("自定义导出模板必须位于 QuizForge 模板目录内")
+    if custom:
+        try:
+            package_root = template_pipeline.package_root(resolved)
+            info = template_pipeline.inspect_directory(package_root)
+            if Path(info["entrypoint_path"]) != resolved:
+                raise template_pipeline.TemplatePipelineError(
+                    "导出路径不是模板清单声明的入口文件",
+                    code="invalid_entrypoint")
+            if mode:
+                template_pipeline.ensure_mode(info, mode)
+            # Agent 模板目录中的文件必须继续绑定目录元数据里的验证哈希。路径
+            # 解析与真正导出之间即使有人手工改了文件，也不能编译未经确认的版本。
+            if package_root.parent != agent_root:
+                raise template_pipeline.TemplatePipelineError(
+                    "自定义模板包必须是模板目录的直属条目",
+                    code="template_not_registered", status=409)
+            import agent_catalog
+            try:
+                row = agent_catalog.get_template(package_root.name)
+            except agent_catalog.CatalogError as exc:
+                raise template_pipeline.TemplatePipelineError(
+                    "模板目录没有对应的目录记录",
+                    code="template_not_registered", status=409) from exc
+            if (not row.get("enabled") or row.get("status") != "enabled"
+                    or row.get("validation_hash") != info["source_hash"]):
+                raise template_pipeline.TemplatePipelineError(
+                    "模板验证哈希已失效，需要重新验证并启用",
+                    code="template_stale", status=409)
+        except template_pipeline.TemplatePipelineError as exc:
+            raise ExportError(str(exc)) from exc
+    return resolved
+
+
+def _stage_template_resources(source: Path, work_dir: Path) -> Path:
+    """把用户模板及同目录资源复制到隔离工作区，保持相对引用可用。"""
+    try:
+        root = template_pipeline.package_root(source)
+        info = template_pipeline.inspect_directory(root)
+        target = template_pipeline.copy_package(root, work_dir)
+    except (OSError, RuntimeError, template_pipeline.TemplatePipelineError) as exc:
+        raise ExportError(f"导出模板资源复制失败：{exc}") from exc
+    if Path(info["entrypoint_path"]) != source.resolve(strict=True):
+        raise ExportError("导出模板入口与清单不一致")
+    return target
+
+
 def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
            mode: str = "list", keypoints: str = "", fullpage_ids=None,
            header_footer: dict = None, solution_mode: str = "none",
            std_opts: dict = None, paper_tone: str = "white",
-           wimath_logo: bool = False, bank_subject: str = "math") -> Path:
+           wimath_logo: bool = False, bank_subject: str = "math",
+           template_path: str | Path | None = None) -> Path:
     """在有界编译槽内导出；公开签名保持不变。"""
     with _EXPORT_SLOTS:
         return _export_unlocked(
@@ -3254,7 +3342,7 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
             fullpage_ids=fullpage_ids, header_footer=header_footer,
             solution_mode=solution_mode, std_opts=std_opts,
             paper_tone=paper_tone, wimath_logo=wimath_logo,
-            bank_subject=bank_subject,
+            bank_subject=bank_subject, template_path=template_path,
         )
 
 
@@ -3264,7 +3352,8 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
                      std_opts: dict = None,
                      paper_tone: str = "white",
                      wimath_logo: bool = False,
-                     bank_subject: str = "math") -> Path:
+                     bank_subject: str = "math",
+                     template_path: str | Path | None = None) -> Path:
     """导出为 tex / pdf / zip（tex + 插图打包），返回产物路径。
 
     questions: dict 列表，每项含 id/body/type/solution。
@@ -3273,6 +3362,8 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     header_footer: 6 位置页眉页脚 dict（header_left/center/right, footer_*）。
     std_opts: 标准试卷 exam_std 选项（secret_notice/exam_notes/section_points）。
     paper_tone: 所有模式共用的纸张底色（white / cream）；非法值退回 white。
+    template_path: 可选的已校验 TeX 模板。模板所在目录中的资源会复制到本次
+        导出工作区；不传时继续使用内置 exam_template.tex。
     """
     if not questions:
         raise ExportError("没有题目可导出")
@@ -3302,8 +3393,11 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     )
 
     # 2. pandoc → tex（页眉页脚用 -V 变量传入，不被 pandoc 转义）
+    template_source = _resolve_template_path(template_path, mode=mode)
+    template_for_pandoc = _stage_template_resources(
+        template_source, work_dir) if template_path is not None else template_source
     cmd = [config.PANDOC, str(md_path), "-o", str(tex_path),
-           "--template", str(config.TEX_TEMPLATE)]
+           "--template", str(template_for_pandoc)]
     if mode == "slides":
         cmd += ["-V", "slides=1"]
     elif mode == "practice":
@@ -3323,14 +3417,20 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     #    跑两遍：第一遍把总页数写进 .aux，第二遍 \pageref{LastPage} 才解析成真实数字
     #    （只跑一遍页脚「总页数」会显示 ??）。第二遍去掉 -halt-on-error，避免
     #    第一遍已生成 PDF 后因残留告警中断。
-    for i in range(2):
-        _run(
-            [config.XELATEX, "-interaction=nonstopmode",
-             *(["-halt-on-error"] if i == 0 else []),
-             f"{stem}.tex"],
-            cwd=work_dir,
-            step="xelatex",
-        )
+    if template_path is not None:
+        try:
+            tex_sandbox.compile_xelatex(tex_path, passes=2, timeout=120)
+        except tex_sandbox.TexSandboxError as exc:
+            raise ExportError(f"[xelatex 沙箱] {exc}") from exc
+    else:
+        for i in range(2):
+            _run(
+                [config.XELATEX, "-interaction=nonstopmode",
+                 *(["-halt-on-error"] if i == 0 else []),
+                 f"{stem}.tex"],
+                cwd=work_dir,
+                step="xelatex",
+            )
     if not pdf_path.exists():
         raise ExportError("xelatex 未生成 PDF，请检查 .log 文件")
     return pdf_path
@@ -3359,17 +3459,34 @@ def _paper_tone_variable_args(paper_tone: str) -> list[str]:
 
 
 def _zip_tex(tex_path: Path, stem: str, work_dir: Path) -> Path:
-    """把 .tex 和本次导出暂存的插图（quiz_<stamp>_img_*）打成一个 zip。
+    """把主 .tex、图片和自定义模板资源打成一个可移植 ZIP。
 
     .tex 单独文件不便携带——里面 \\includegraphics 引用的图片是本次导出
     暂存在 OUTPUT_DIR 的相对文件名，脱离目录就编译不出图。故打包成 zip：
-    解压到任意目录即可直接用 xelatex 编译（图片路径原样能找到）。
+    解压到任意目录即可直接用 xelatex 编译（图片路径和模板相对引用原样能找到）。
+
+    自定义模板会在同一个隔离工作目录中暂存 `.sty`、`.cls`、字体和图片等
+    资源。只打包 ``stem_img_*`` 会让 ZIP 离开本机后无法编译，因此这里按
+    模板资源白名单收集文件；日志、aux、PDF 和 Markdown 中间文件永远不进入
+    用户产物。
     """
+    resource_suffixes = {
+        ".tex", ".sty", ".cls", ".bbx", ".cbx", ".def", ".cfg",
+        ".bib", ".png", ".jpg", ".jpeg", ".webp", ".pdf", ".svg", ".eps",
+        ".ttf", ".otf", ".txt", ".md", ".json", ".yaml", ".yml",
+    }
     zip_path = work_dir / f"{stem}.zip"
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.write(tex_path, arcname=tex_path.name)
-        for img in sorted(work_dir.glob(f"{stem}_img_*")):
-            zf.write(img, arcname=img.name)
+        for item in sorted(work_dir.rglob("*")):
+            if not item.is_file() or item.is_symlink() or item == tex_path:
+                continue
+            # 排除本次函数正在写入的 ZIP 及编译产物；主 tex 已在上面写入。
+            if item == zip_path or item.name in {f"{stem}.md", f"{stem}.pdf"} \
+                    or item.suffix.lower() not in resource_suffixes:
+                continue
+            arcname = item.relative_to(work_dir).as_posix()
+            zf.write(item, arcname=arcname)
     return zip_path
 
 

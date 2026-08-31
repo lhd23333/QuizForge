@@ -5,10 +5,13 @@
 {% block content %}
 <section class="product-page">
   <div class="product-hero">
-    <div class="product-mark" aria-hidden="true">QF</div>
+    <img class="product-mark" src="{{ static_v('brand/quizforge-app-icon.svg') }}"
+         alt="QuizForge">
     <div>
       <h1>QuizForge</h1>
       <p class="product-eyebrow">版本 {{ report.version }}</p>
+      <img class="product-brand-lockup" src="{{ static_v('brand/quizforge-by-wimath.svg') }}"
+           alt="QuizForge by WIMath">
     </div>
   </div>
 

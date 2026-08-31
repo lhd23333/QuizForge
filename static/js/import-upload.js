@@ -34,6 +34,8 @@
       maxMdFiles: raw.max_md_files || 50,
       maxMdFileBytes: raw.max_md_file_bytes || 5 * MB,
       maxMdBatchBytes: raw.max_md_batch_bytes || 20 * MB,
+      maxImportBundleBytes: raw.max_import_bundle_bytes || 100 * MB,
+      maxImportBundleBatchBytes: raw.max_import_bundle_batch_bytes || 500 * MB,
       examExts: raw.exam_exts || ['.bmp', '.docx', '.jpeg', '.jpg', '.pdf', '.png', '.webp'],
       imageExts: raw.image_exts || ['.bmp', '.jpeg', '.jpg', '.png', '.webp'],
       mdExts: raw.md_exts || ['.markdown', '.md', '.txt'],
@@ -49,6 +51,7 @@
   const isExamImage = f => LIMITS.imageExts.includes(extOf(f.name));
   const isExamFile = f => LIMITS.examExts.includes(extOf(f.name));
   const isMdFile = f => LIMITS.mdExts.includes(extOf(f.name));
+  const isImportBundle = f => String(f.name || '').toLowerCase().endsWith('.zip');
   const mb = bytes => Math.round(bytes / MB);
 
   /* 单个试卷文件的格式与大小，与后端 _check_exam_file 一一对应。
@@ -93,8 +96,9 @@
         const rm = document.createElement('button');
         rm.type = 'button';
         rm.className = 'dz-rm';
-        rm.textContent = '×';
+        rm.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
         rm.title = '移除';
+        rm.setAttribute('aria-label', rm.title);
         rm.addEventListener('click', ev => {
           ev.stopPropagation();   // 否则冒泡到 zone 又弹出文件选择框
           files.splice(i, 1);
@@ -258,26 +262,34 @@
     if (!dz) return;
 
     btn.addEventListener('click', async () => {
-      if (!dz.files.length) { alert('请先选择 .md 文件'); return; }
+      if (!dz.files.length) { alert('请先选择 Markdown 或 ZIP 资源包'); return; }
       // 份数与体量：与后端 import_batch_start 的三道检查对应（那边整个队列连全文
       // 一起留在内存里，所以不是可有可无的形式检查）。
       if (dz.files.length > LIMITS.maxMdFiles) {
         statusEl.textContent = `md 文件过多（${dz.files.length} 个，上限 ${LIMITS.maxMdFiles} 个）`;
         return;
       }
-      const bad = dz.files.find(f => !isMdFile(f));
+      const bad = dz.files.find(f => !isMdFile(f) && !isImportBundle(f));
       if (bad) {
-        statusEl.textContent = `「${bad.name}」不是 .md / .markdown / .txt 文件`;
+        statusEl.textContent = `「${bad.name}」不是 Markdown 或 QuizForge ZIP 资源包`;
         return;
       }
-      const oversize = dz.files.find(f => f.size > LIMITS.maxMdFileBytes);
+      const oversize = dz.files.find(f => f.size > (isImportBundle(f)
+        ? LIMITS.maxImportBundleBytes : LIMITS.maxMdFileBytes));
       if (oversize) {
-        statusEl.textContent = `「${oversize.name}」过大（单文件上限 ${mb(LIMITS.maxMdFileBytes)}MB）`;
+        const limit = isImportBundle(oversize)
+          ? LIMITS.maxImportBundleBytes : LIMITS.maxMdFileBytes;
+        statusEl.textContent = `「${oversize.name}」过大（单文件上限 ${mb(limit)}MB）`;
         return;
       }
-      const mdTotal = dz.files.reduce((s, f) => s + f.size, 0);
+      const mdTotal = dz.files.filter(isMdFile).reduce((s, f) => s + f.size, 0);
       if (mdTotal > LIMITS.maxMdBatchBytes) {
         statusEl.textContent = `md 文件总量超过上限（${mb(LIMITS.maxMdBatchBytes)}MB）`;
+        return;
+      }
+      const bundleTotal = dz.files.filter(isImportBundle).reduce((s, f) => s + f.size, 0);
+      if (bundleTotal > LIMITS.maxImportBundleBatchBytes) {
+        statusEl.textContent = `ZIP 资源包总量超过上限（${mb(LIMITS.maxImportBundleBatchBytes)}MB）`;
         return;
       }
       const fd = new FormData();
@@ -310,6 +322,11 @@
       if (!f) return;
       ev.preventDefault();
       ta.classList.remove('drag-over');
+      if (!isMdFile(f)) {
+        const statusEl = document.getElementById('md-status');
+        if (statusEl) statusEl.textContent = 'ZIP 资源包请放入左侧上传区校对';
+        return;
+      }
       const r = new FileReader();
       r.onload = () => { ta.value = String(r.result || ''); };
       r.readAsText(f, 'utf-8');
@@ -366,7 +383,8 @@
       const twist = document.createElement('span');
       twist.className = 'batch-folder-twist';
       twist.setAttribute('aria-hidden', 'true');
-      twist.textContent = folder.has_children ? '›' : '';
+      twist.innerHTML = folder.has_children && window.QFIcon
+        ? window.QFIcon('chevron-right') : '';
       const label = document.createElement('span');
       label.textContent = folder.name;
       row.append(twist, label);

@@ -29,6 +29,8 @@
       key: storagePrefix + (handle.dataset.splitKey || handle.dataset.splitProperty),
       initial: panel.getBoundingClientRect().width || cssWidth,
       customized: false,
+      // 面板可能由 hidden 父节点承载，等它真正可见后再恢复本地宽度。
+      pendingStored: null,
     };
   }
 
@@ -129,7 +131,12 @@
       let stored = NaN;
       try { stored = Number(localStorage.getItem(state.key)); } catch (_) { /* 使用 CSS 默认宽度。 */ }
       if (Number.isFinite(stored) && stored > 0) {
-        apply(state, stored, false);
+        // 隐藏面板的 owner 宽度为 0，过早 apply 会把已保存宽度错误压到最小值。
+        if (state.owner !== document.documentElement && !visible(state)) {
+          state.pendingStored = stored;
+        } else {
+          apply(state, stored, false);
+        }
       } else {
         // 隐藏中的右栏宽度为 0；未拖动时保留 CSS 默认值，才能继续响应媒体查询。
         syncAria(state, state.panel.getBoundingClientRect().width || state.initial);
@@ -140,7 +147,11 @@
   window.addEventListener('resize', () => {
     states.forEach(state => {
       if (!visible(state)) return;
-      if (state.customized) {
+      if (state.pendingStored !== null) {
+        const stored = state.pendingStored;
+        state.pendingStored = null;
+        apply(state, stored, false);
+      } else if (state.customized) {
         apply(state, state.panel.getBoundingClientRect().width, false);
       } else {
         syncAria(state, state.panel.getBoundingClientRect().width);

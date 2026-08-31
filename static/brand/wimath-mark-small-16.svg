@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16"
+     role="img" aria-labelledby="title desc">
+  <title id="title">WIMath 16 像素专用标志</title>
+  <desc id="desc">保留圆周、W/M 粗笔画与衬线 I 两级结构的像素吸附版本。</desc>
+  <g>
+    <circle cx="8" cy="8" r="6.75" fill="none" stroke="#2457D6" stroke-width=".55"/>
+    <g fill="none" stroke="#2457D6" stroke-width="1.15"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3.7 3.25 L5.5 6.85 L7.25 4.25"/>
+      <path d="M12.3 3.25 L10.5 6.85 L8.75 4.25"/>
+      <path d="M3.7 3.25 L5.5 6.85 L7.25 4.25" transform="rotate(180 8 8)"/>
+      <path d="M12.3 3.25 L10.5 6.85 L8.75 4.25" transform="rotate(180 8 8)"/>
+    </g>
+    <path d="M6.5 3.5 H9.5 V4.5 H8.5 V11.5 H9.5 V12.5 H6.5 V11.5 H7.5 V4.5 H6.5 Z"
+          fill="#6F89A3"/>
+  </g>
+</svg>

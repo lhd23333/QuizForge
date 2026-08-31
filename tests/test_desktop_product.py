@@ -658,6 +658,10 @@ class DesktopFirstRunTests(unittest.TestCase):
         )
         self.assertIn("LicenseFile=..\\LICENSE", installer)
         self.assertIn('Source: "..\\LICENSE"', installer)
+        self.assertIn(
+            "AppId={{A63C2B5C-5B3A-4DCE-8FC5-8F2E0EE258A4}", installer
+        )
+        self.assertIn("UsePreviousAppDir=yes", installer)
 
     def test_empty_bank_gets_original_demo_only_once(self):
         with tempfile.TemporaryDirectory() as td:
@@ -755,7 +759,8 @@ class DesktopFirstRunTests(unittest.TestCase):
         self.assertIn('data-sidebar-tab="files"', desktop_html)
         self.assertIn('data-sidebar-tab="filters"', desktop_html)
         self.assertIn("quizforge.sidebar.activePanel", desktop_html)
-        self.assertIn("static/favicon.svg", desktop_html)
+        self.assertIn("static/brand/quizforge-app-icon.svg", desktop_html)
+        self.assertNotIn("static/favicon.svg", desktop_html)
         self.assertIn("desktop-card-controls", card_template)
         self.assertIn("legacy-card-controls", card_template)
         self.assertIn("card-more-trigger", card_template)

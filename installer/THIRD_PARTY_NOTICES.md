@@ -34,13 +34,14 @@ Redistribution and use in source and binary forms, with or without modification,
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-## 讲义编辑器的 MIT 组件
+## 前端工作区的 MIT 组件
 
-讲义编排工作台在开发期使用 npm 构建，发行包只包含编译后的本地 JavaScript/CSS/字体，不需要 Node.js，也不会在运行时从 CDN 下载资源。下列生产依赖均采用 MIT 许可证：
+讲义编排与 Agent 工作区在开发期使用 npm 构建，发行包只包含编译后的本地 JavaScript/CSS/字体，不需要 Node.js，也不会在运行时从 CDN 下载资源。下列生产依赖均采用 MIT 许可证：
 
 - Tiptap `3.27.4`（`@tiptap/core`、`@tiptap/pm`、`@tiptap/markdown`、`@tiptap/starter-kit`、`@tiptap/extension-mathematics`）及 StarterKit 锁定的 Tiptap `3.30.0` 子扩展，Copyright © 2023-present ueberdosis GmbH；
 - ProseMirror（model/state/view/transform/history/commands/inputrules/keymap/dropcursor/gapcursor/schema-list/tables/changeset）及 `orderedmap`、`rope-sequence`、`w3c-keyname`，Copyright © Marijn Haverbeke 与各贡献者；
 - KaTeX `0.16.22`，Copyright © 2013-2020 Khan Academy and other contributors；
+- markdown-it `14.1.0` 及除 `entities` 外的运行时依赖，用于 Agent 的本地安全 Markdown 渲染；
 - marked `17.0.6`、linkifyjs `4.3.3`、commander `8.3.0`，版权归各自作者与贡献者所有。
 
 上述组件共同适用的 MIT 许可证全文：
@@ -50,3 +51,29 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” 
 > The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 >
 > THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## entities 4.5.0 / 8.0.0
+
+- 用途：由 markdown-it 与讲义编辑器依赖，用于本地 HTML 实体解析。
+- 许可证：BSD 2-Clause。
+
+Copyright (c) Felix Böhm
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the documentation and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+## WIMath / QuizForge 品牌资产
+
+发行包中的 `assets/brand/`、`static/brand/` 以及由其生成的
+`assets/quizforge.png`、`assets/quizforge.ico` 是 QuizForge 产品与 WIMath 母品牌的
+图形资产，不属于第三方软件依赖，也不因 QuizForge 的 GPL 许可证自动获得品牌或商标
+授权。受控源文件、用途、SHA-256 和更新流程见 `assets/brand/README.md`，产品场景与
+许可边界见 `docs/BRAND_ASSETS.md`；公开发行前必须由项目维护者确认使用授权并完成
+商标清权。运行时线性功能图标由项目自身的 `templates/_icons.html` 宏提供，不属于
+第三方图标库依赖。

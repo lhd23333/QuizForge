@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}提示词 · QuizForge{% endblock %}
+{% block content %}
+<section class="app-page settings-page prompts-page" data-prompts-api="{{ url_for('prompts_api') }}">
+  <header class="app-page-head">
+    <h1>提示词</h1>
+    <div class="app-page-head-actions">
+      <button type="button" class="btn" id="prompt-new">新建</button>
+    </div>
+  </header>
+
+  <div class="settings-layout">
+    <nav class="settings-section-nav" id="prompt-list" aria-label="提示词列表"></nav>
+    <div class="settings-panels">
+      <section class="settings-section" id="prompt-editor" hidden>
+        <div class="settings-form-grid">
+          <div class="field grow">
+            <label for="prompt-title">标题</label>
+            <input type="text" class="input" id="prompt-title" maxlength="120">
+          </div>
+          <div class="field">
+            <label for="prompt-category">分类</label>
+            <input type="text" class="input" id="prompt-category" maxlength="40">
+          </div>
+        </div>
+        <div class="field">
+          <label for="prompt-content">正文</label>
+          <textarea class="input" id="prompt-content" rows="24" spellcheck="false"></textarea>
+        </div>
+        <div class="settings-action-row">
+          <button type="button" class="btn btn-primary" id="prompt-save">保存</button>
+          <button type="button" class="btn" id="prompt-copy">复制正文</button>
+          <button type="button" class="btn" id="prompt-clone">复制为自定义</button>
+          <button type="button" class="btn btn-danger-text" id="prompt-delete">删除</button>
+          <span class="muted" id="prompt-status" role="status" aria-live="polite"></span>
+        </div>
+      </section>
+      <section class="settings-section" id="prompt-empty">
+        <p class="muted">正在读取提示词…</p>
+      </section>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_v('js/prompts.js') }}" defer></script>
+{% endblock %}

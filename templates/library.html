@@ -15,7 +15,7 @@
           {{ icon('file-output') }}
         </button>
         <button type="button" id="library-new-folder" class="library-sidebar-action"
-                title="新建顶层文件夹" aria-label="新建顶层文件夹">＋</button>
+                title="新建顶层文件夹" aria-label="新建顶层文件夹">{{ icon('plus') }}</button>
       </div>
     </div>
     <div id="library-tree" class="library-tree" role="tree" aria-label="文件列表"
@@ -37,13 +37,13 @@
       <span class="library-workspace-hint">本地资料</span>
       <div class="library-split-actions" aria-label="分栏布局">
         <button type="button" id="library-tasks-button" class="library-layout-button"
-                title="转换任务" aria-label="转换任务">↻</button>
+                title="转换任务" aria-label="转换任务">{{ icon('refresh-cw') }}</button>
         <button type="button" class="library-layout-button" data-library-layout="vertical"
-                title="左右分栏" aria-label="左右分栏">◫</button>
+                title="左右分栏" aria-label="左右分栏">{{ icon('layout-columns') }}</button>
         <button type="button" class="library-layout-button" data-library-layout="horizontal"
-                title="上下分栏" aria-label="上下分栏">⬒</button>
+                title="上下分栏" aria-label="上下分栏">{{ icon('layout-rows') }}</button>
         <button type="button" class="library-layout-button" data-library-layout="single"
-                title="关闭分栏" aria-label="关闭分栏">□</button>
+                title="关闭分栏" aria-label="关闭分栏">{{ icon('square') }}</button>
       </div>
     </div>
     <div id="library-panes" class="library-panes is-single"></div>

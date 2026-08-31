@@ -63,7 +63,10 @@ jobs:
           # Runner 用户目录可能以 8.3 短路径暴露；统一到规范路径，避免同一目录被误判为两个题库。
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1 -SkipBundleScan
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1
+          -SkipBundleScan
+          -ExpectedTag "v${{ steps.version.outputs.version }}"
 
       - name: Build unsigned desktop bundle
         shell: pwsh
@@ -87,7 +90,9 @@ jobs:
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
-        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_release.ps1
+          -ExpectedTag "v${{ steps.version.outputs.version }}"
 
       - name: Confirm unsigned candidate and record digest
         id: candidate

@@ -179,7 +179,7 @@ class SlidesExportTests(unittest.TestCase):
         self.assertIn(r"\theta ", repaired)
         self.assertIn(r"\geqslant ", repaired)
         self.assertIn(r"\pi ", repaired)
-        self.assertIn(r"\textcircled{1}", repaired)
+        self.assertIn(r"\text{\textcircled{1}}", repaired)
         self.assertIn(r"f^{\prime\prime}", repaired)
         self.assertIn(r"$a$ $\neq$ 0", repaired)
 
@@ -207,7 +207,8 @@ class SlidesExportTests(unittest.TestCase):
 
     def test_unicode_text_math_symbols_do_not_use_latin_text_glyphs(self):
         repaired = exporter._normalize_unicode_text_symbols("① A∩B，∵a⊥b∴λ=1")
-        self.assertIn(r"$\textcircled{1}$", repaired)
+        self.assertIn(r"\textcircled{1}", repaired)
+        self.assertNotIn(r"$\textcircled{1}$", repaired)
         self.assertIn(r"$\cap$", repaired)
         self.assertIn(r"$\because$", repaired)
         self.assertIn(r"$\perp$", repaired)

@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 260" width="1000" height="260"
+     role="img" aria-labelledby="title desc">
+  <title id="title">QuizForge by WIMath 联名标志</title>
+  <desc id="desc">QuizForge 产品名称由 WIMath 母品牌背书。</desc>
+  <g transform="translate(8 24) scale(.72)">
+    <circle cx="128" cy="128" r="108" fill="none" stroke="#2457D6" stroke-width="7"/>
+    <g fill="none" stroke="#2457D6" stroke-width="18"
+       stroke-linecap="round" stroke-linejoin="round">
+      <path d="M60 50 C69 67 79 93 88 108 C91 114 94 114 97 107 L120 70"/>
+      <path d="M196 50 C187 67 177 93 168 108 C165 114 162 114 159 107 L136 70"/>
+      <path d="M60 50 C69 67 79 93 88 108 C91 114 94 114 97 107 L120 70"
+            transform="rotate(180 128 128)"/>
+      <path d="M196 50 C187 67 177 93 168 108 C165 114 162 114 159 107 L136 70"
+            transform="rotate(180 128 128)"/>
+    </g>
+    <path d="M104 61 H152 V69 C145 70 141 72 138 76 V180 C141 184 145 186 152 187
+             V195 H104 V187 C111 186 115 184 118 180 V76 C115 72 111 70 104 69 Z"
+          fill="#6F89A3"/>
+  </g>
+  <text x="218" y="118" fill="#081A33" font-family="Inter, Segoe UI, Arial, sans-serif"
+        font-size="74" font-weight="720" letter-spacing="-2">QuizForge</text>
+  <text x="222" y="174" fill="#2457D6" font-family="Inter, Segoe UI, Arial, sans-serif"
+        font-size="24" font-weight="600" letter-spacing="1.2">BY</text>
+  <g transform="translate(278 147) scale(.34)" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g stroke="#081A33" stroke-width="13">
+      <path d="M6 8 L24 94 L48 43 L72 94 L90 8"/>
+      <path d="M116 8 V94"/>
+      <path d="M144 94 V8 L176 59 L208 8 V94"/>
+    </g>
+    <g stroke="#081A33" stroke-width="8.5">
+      <path d="M273 48 C266 39 248 38 239 48 C228 61 232 88 249 93 C260 96 270 88 273 77 M273 42 V94"/>
+      <path d="M303 41 H334 M319 18 V77 C319 88 324 94 334 94"/>
+      <path d="M356 8 V94 M356 62 C360 47 371 40 382 42 C394 44 399 53 399 67 V94"/>
+    </g>
+  </g>
+  <text x="222" y="226" fill="#132238" opacity=".68"
+        font-family="Noto Sans SC, Microsoft YaHei, sans-serif" font-size="22">本地数学题库与组卷工具</text>
+</svg>

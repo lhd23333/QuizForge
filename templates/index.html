@@ -4,15 +4,16 @@
 {# 递归渲染文件夹树。node 含 id/name/parent_id/cnt/children/depth（软件版无内置文件夹概念）。 #}
 {% macro render_folder_tree(nodes, active) %}
   {% for n in nodes %}
-    {% set on_active_path = active == n['id'] or active.startswith(n['id'] ~ '/') %}
+    {% set on_active_path = active.startswith(n['id'] ~ '/') %}
     {% set children_loaded = n.get('children_loaded', on_active_path) %}
     {% set has_children = n.get('has_children', n['children']|length > 0) %}
-    <li class="folder-item {% if active == n['id'] %}active{% endif %} {% if has_children %}has-children{% endif %} {% if has_children and not children_loaded %}collapsed{% endif %}"
-        data-folder-id="{{ n['id'] }}" data-folder-name="{{ n['name'] }}">
+    <li class="folder-item {% if active == n['id'] %}active{% endif %} {% if has_children %}has-children{% endif %} {% if has_children and not on_active_path %}collapsed{% endif %}"
+        data-folder-id="{{ n['id'] }}" data-folder-name="{{ n['name'] }}"
+        data-active-path="{{ 1 if on_active_path else 0 }}">
       <div class="folder-row" draggable="true">
         {% if has_children %}
           <span class="folder-twist" title="展开/折叠">
-            <span aria-hidden="true">›</span>
+            {{ icon('chevron-right') }}
           </span>
         {% else %}
           <span class="folder-twist folder-twist-empty"></span>
@@ -21,17 +22,17 @@
           {{ n['name'] }}
         </a>
         <span class="folder-actions">
-          <button type="button" class="folder-act folder-newsub" title="新建子文件夹"
-                  >＋</button>
-          <button type="button" class="folder-act folder-rename" title="重命名"
-                  >✎</button>
-          <button type="button" class="folder-act folder-movebtn" title="移动到…"
-                  >⇄</button>
-          <button type="button" class="folder-act folder-del" title="删除">×</button>
+          <button type="button" class="folder-act folder-newsub" title="新建子文件夹" aria-label="新建子文件夹"
+                  >{{ icon('plus') }}</button>
+          <button type="button" class="folder-act folder-rename" title="重命名" aria-label="重命名"
+                  >{{ icon('edit') }}</button>
+          <button type="button" class="folder-act folder-movebtn" title="移动到…" aria-label="移动到…"
+                  >{{ icon('move') }}</button>
+          <button type="button" class="folder-act folder-del" title="删除" aria-label="删除">{{ icon('x') }}</button>
         </span>
       </div>
       {% if has_children %}
-        <ul class="folder-children {% if not children_loaded %}collapsed{% endif %}"
+        <ul class="folder-children {% if not on_active_path %}collapsed{% endif %}"
             data-parent-id="{{ n['id'] }}" data-loaded="{{ 1 if children_loaded else 0 }}">
           {% if children_loaded %}
             {{ render_folder_tree(n['children'], active) }}
@@ -78,8 +79,8 @@
                      {% if t in active_tags %}checked{% endif %}>
               {{ t }}
             </label>
-            <button type="button" class="tag-rename" title="改名"
-                    data-name="{{ t }}">✎</button>
+            <button type="button" class="tag-rename" title="改名" aria-label="改名"
+                    data-name="{{ t }}">{{ icon('edit') }}</button>
           </div>
           {% else %}
             <p class="muted">还没有标签</p>
@@ -118,7 +119,7 @@
       <div class="field">
         <label class="star-filter">
           <input type="checkbox" name="starred" value="1" {% if starred_only %}checked{% endif %}>
-          仅看 <span class="star-inline">★</span> 标星题
+          仅看 <span class="star-inline">{{ icon('star') }}</span> 标星题
         </label>
       </div>
 
@@ -143,9 +144,9 @@
              role="tabpanel" aria-labelledby="sidebar-tab-files" data-sidebar-panel="files">
       <div class="folder-pane-head">
         <h3 class="coll-title" style="margin:0;padding-top:0;border-top:none">题集</h3>
-        <button type="button" class="folder-newbtn" id="folder-newbtn" title="新建顶级文件夹">＋</button>
+        <button type="button" class="folder-newbtn" id="folder-newbtn" title="新建顶级文件夹" aria-label="新建顶级文件夹">{{ icon('plus') }}</button>
       </div>
-      <ul class="folder-list" id="folder-tree">
+      <ul class="folder-list" id="folder-tree" data-bank-key="{{ bank_tree_key }}">
         {% if folder_tree %}
           {{ render_folder_tree(folder_tree, active_collection) }}
         {% endif %}
@@ -170,8 +171,8 @@
     <ul class="folder-ctx" id="folder-ctx" hidden>
       <li data-act="new-question">新增题目</li>
       <li data-act="new-folder">新建子文件夹</li>
-      <li data-act="rename">✎ 重命名</li>
-      <li data-act="move">⇄ 移动到…</li>
+      <li data-act="rename">{{ icon('edit') }}<span>重命名</span></li>
+      <li data-act="move">{{ icon('move') }}<span>移动到…</span></li>
       <li data-act="delete" class="ctx-danger">删除文件夹</li>
     </ul>
   </aside>
@@ -193,10 +194,10 @@
           <span class="collection-tab-label">{{ active_collection_name or ('空白页' if blank else '全部题目') }}</span>
         </button>
         <button type="button" class="collection-tab-close" hidden
-                aria-label="关闭当前页" title="关闭">×</button>
+                aria-label="关闭当前页" title="关闭">{{ icon('x') }}</button>
       </div>
       <button type="button" class="collection-tab-add" data-collection-tab-add
-              aria-label="新建空白页" title="新建空白页">＋</button>
+              aria-label="新建空白页" title="新建空白页">{{ icon('plus') }}</button>
     </div>
     <form method="get" action="{{ url_for('index') }}" class="search-bar{% if blank %} hidden{% endif %}" id="search-form">
       {% for name, value in search_scope_fields %}
@@ -253,18 +254,50 @@
         <input type="hidden" name="tags" value="{{ active_tags|join(',') }}">
         <input type="hidden" name="match" value="{{ match }}">
         <input type="hidden" name="type" value="{{ active_type or '' }}">
-        <label>模式
-          <select name="mode" id="export-mode">
-            <option value="exam">试卷（题型分组，解答题一页两题）</option>
-            <option value="exam_std">标准试卷形式（仿国标考卷版式）</option>
-            <option value="note">笔记（一页两题）</option>
-            <option value="lecture">讲解（一页一题）</option>
-            <option value="slides">横版课件（16:9，PPT 式一页一题）</option>
-            <option value="practice">双栏刷题（题型分组，解答题按难度与小问留白）</option>
-            <option value="list">清单（紧凑无间隔）</option>
-            <option value="handout">讲义（知识要点+可标独占整页）</option>
-          </select>
-        </label>
+        <div class="export-primary-grid">
+          <label>模式
+            <select name="mode" id="export-mode">
+              <option value="exam">试卷（题型分组，解答题一页两题）</option>
+              <option value="exam_std">标准试卷形式（仿国标考卷版式）</option>
+              <option value="note">笔记（一页两题）</option>
+              <option value="lecture">讲解（一页一题）</option>
+              <option value="slides">横版课件（16:9，PPT 式一页一题）</option>
+              <option value="practice">双栏刷题（题型分组，解答题按难度与小问留白）</option>
+              <option value="list">清单（紧凑无间隔）</option>
+              <option value="handout">讲义（知识要点+可标独占整页）</option>
+            </select>
+          </label>
+          <label>格式
+            <select name="fmt" id="export-format">
+              <option value="pdf">PDF</option>
+              <option value="docx">Word 文档（.docx，可继续编辑）</option>
+              <option value="tex">LaTeX 源码（.tex）</option>
+              <option value="zip">LaTeX 源码包（.tex + 图片，.zip）</option>
+            </select>
+            <small class="export-runtime-hint" id="word-export-hint" hidden>Word 保留可编辑内容并由 Word/WPS 自行重排；底色与现有 WIMath 标志仅用于 PDF/TeX。</small>
+          </label>
+          <label>试卷标题
+            <input type="text" name="title" value="试卷" class="input">
+          </label>
+          <label>范围
+            <select name="scope">
+              <option value="selected">已勾选题目</option>
+              <option value="filtered">当前筛选结果</option>
+              <option value="all">全部题目</option>
+            </select>
+          </label>
+          <label>解析
+            <select name="solution_mode">
+              <option value="none">不带解析</option>
+              <option value="inline">题后附解析</option>
+              <option value="separate">解析另起页</option>
+            </select>
+          </label>
+          <div class="export-primary-actions">
+            <button type="button" class="btn" id="preview-btn">预览分页</button>
+            <button type="submit" class="btn btn-primary">导出</button>
+          </div>
+        </div>
 
         <!-- 标准试卷（exam_std）专属：保密说明/卷首须知/科目/信息栏/各大题分值 -->
         <details class="hf-block" id="std-fields" style="display:none">
@@ -292,74 +325,65 @@
           </div>
         </details>
 
-        <label>格式
-          <select name="fmt" id="export-format">
-            <option value="pdf">PDF</option>
-            <option value="docx">Word 文档（.docx，可继续编辑）</option>
-            <option value="tex">LaTeX 源码（.tex）</option>
-            <option value="zip">LaTeX 源码包（.tex + 图片，.zip）</option>
-          </select>
-          <small class="export-runtime-hint" id="word-export-hint" hidden>Word 保留可编辑内容并由 Word/WPS 自行重排；底色与现有 WIMath 标志仅用于 PDF/TeX。</small>
-        </label>
-        <label>PDF 处理方式
-          <select name="tex_backend" id="tex-backend">
-            <option value="local">本机 TeX</option>
-          </select>
-        </label>
-        <label>预览方式
-          <select name="preview_kind" id="preview-kind">
-            <option value="pdf">PDF 版式预览</option>
-            <option value="html">免费 HTML/KaTeX 近似预览</option>
-          </select>
-        </label>
-        <label id="paper-tone-field">纸张底色
-          <select name="paper_tone">
-            <option value="white">纯白</option>
-            <option value="cream">米黄护眼</option>
-          </select>
-        </label>
-        <label id="wimath-logo-field"><input type="checkbox" name="wimath_logo" value="1"> 添加 WIMath 标志</label>
-        <label>试卷标题 <input type="text" name="title" value="试卷" class="input"></label>
-        <label>范围
-          <select name="scope">
-            <option value="selected">已勾选题目</option>
-            <option value="filtered">当前筛选结果</option>
-            <option value="all">全部题目</option>
-          </select>
-        </label>
-        <label>解析
-          <select name="solution_mode">
-            <option value="none">不带解析</option>
-            <option value="inline">题后附解析</option>
-            <option value="separate">解析另起页</option>
-          </select>
-        </label>
-        <label><input type="checkbox" name="show_source" value="1"> 显示题源</label>
-
-        <!-- 页眉页脚 DIY（所有模式共用；双栏模式中横跨整页，不被切成左右两份） -->
-        <details class="hf-block">
-          <summary>页眉 / 页脚设置（所有导出模式适用）</summary>
-          <div class="hf-grid">
-            <span class="hf-tag">页眉</span>
-            <input class="input" name="header_left"   placeholder="左">
-            <input class="input" name="header_center" placeholder="中">
-            <input class="input" name="header_right"  placeholder="右">
-            <span class="hf-tag">页脚</span>
-            <input class="input" name="footer_left"   placeholder="左">
-            <input class="input" name="footer_center" placeholder="中" value="第 {页码} / {总页数} 页">
-            <input class="input" name="footer_right"  placeholder="右">
-          </div>
-        </details>
-
-        <button type="button" class="btn" id="preview-btn">预览分页</button>
-        <button type="submit" class="btn btn-primary">导出</button>
-
         <!-- 讲义模式专属：知识要点 -->
         <div id="keypoints-field" class="keypoints-field hidden">
           <label style="display:block">知识要点</label>
           <textarea name="keypoints" rows="4" class="input"
                     placeholder="本讲重点：&#10;1. ...&#10;2. ..."></textarea>
         </div>
+
+        <details class="export-advanced">
+          <summary>高级导出设置</summary>
+          <div class="export-advanced-grid">
+            <label id="export-template-field">模板
+              <select name="template_id" id="export-template">
+                <option value="">内置模板（exam_template.tex）</option>
+                {% for template in export_templates or [] %}
+                  <option value="{{ template.id }}"
+                          data-supported-modes="{{ (template.supported_modes or [])|join(',') }}"
+                          {% if export_selected_template and export_selected_template.id == template.id %}selected{% endif %}>
+                    {{ template.name }}（{{ template.format|upper }}）
+                  </option>
+                {% endfor %}
+              </select>
+              <small class="export-runtime-hint">只列出已验证并与当前模式兼容的模板；Word 不使用 TeX 模板。</small>
+            </label>
+            <label>PDF 处理方式
+              <select name="tex_backend" id="tex-backend">
+                <option value="local">本机 TeX</option>
+              </select>
+            </label>
+            <label>预览方式
+              <select name="preview_kind" id="preview-kind">
+                <option value="pdf">PDF 版式预览</option>
+                <option value="html">HTML/KaTeX 近似预览</option>
+              </select>
+            </label>
+            <label id="paper-tone-field">纸张底色
+              <select name="paper_tone">
+                <option value="white">纯白</option>
+                <option value="cream">米黄护眼</option>
+              </select>
+            </label>
+            <label class="export-check" id="wimath-logo-field"><input type="checkbox" name="wimath_logo" value="1"> 添加 WIMath 标志</label>
+            <label class="export-check"><input type="checkbox" name="show_source" value="1"> 显示题源</label>
+          </div>
+
+          <!-- 页眉页脚 DIY（所有模式共用；双栏模式中横跨整页，不被切成左右两份） -->
+          <details class="hf-block">
+            <summary>页眉与页脚</summary>
+            <div class="hf-grid">
+              <span class="hf-tag">页眉</span>
+              <input class="input" name="header_left"   placeholder="左">
+              <input class="input" name="header_center" placeholder="中">
+              <input class="input" name="header_right"  placeholder="右">
+              <span class="hf-tag">页脚</span>
+              <input class="input" name="footer_left"   placeholder="左">
+              <input class="input" name="footer_center" placeholder="中" value="第 {页码} / {总页数} 页">
+              <input class="input" name="footer_right"  placeholder="右">
+            </div>
+          </details>
+        </details>
       </form>
     </div>
 
@@ -393,12 +417,10 @@
     {% else %}
       {% if blank %}
         <div class="empty-state">
-          <div class="empty-state-mark" aria-hidden="true">QF</div>
           <h2>未选择题集</h2>
         </div>
       {% else %}
         <div class="empty-state">
-          <div class="empty-state-mark" aria-hidden="true">＋</div>
           <h2>这里还没有题目</h2>
           <div class="empty-state-actions">
             <button type="button" class="btn btn-primary" data-open-new-question>新增题目</button>
@@ -421,7 +443,7 @@
   <button type="button" class="new-question-fab{% if blank %} hidden{% endif %}" id="new-question-fab"
           data-open-new-question
           title="在“{{ active_collection_name or '题库根目录' }}”末尾添加题目"
-          aria-label="在当前文件夹末尾添加题目">＋</button>
+          aria-label="在当前文件夹末尾添加题目">{{ icon('plus') }}</button>
 
 <div class="split-resizer question-bulk-resizer" role="separator" tabindex="0"
      aria-label="调整已选题目栏宽度" aria-orientation="vertical"
@@ -643,11 +665,21 @@ function syncSelectionSummary(count) {
   if (counter) counter.textContent = normalized;
   syncBulkbar(normalized);
 }
+function normalizeSelectionValue(value) {
+  return value === true || value === 1 || value === '1';
+}
+function setQuestionSelected(id, selected) {
+  const normalized = normalizeSelectionValue(selected);
+  listEl?.querySelectorAll(`.card[data-id="${CSS.escape(String(id))}"]`).forEach(card => {
+    card.classList.toggle('selected', normalized);
+    const checkbox = card.querySelector('.sel-toggle');
+    if (checkbox) checkbox.checked = normalized;
+  });
+  return normalized;
+}
 function setVisibleCardsSelected(selected) {
   listEl?.querySelectorAll('.card').forEach(card => {
-    card.classList.toggle('selected', selected);
-    const checkbox = card.querySelector('.sel-toggle');
-    if (checkbox) checkbox.checked = selected;
+    setQuestionSelected(card.dataset.id, selected);
   });
 }
 function setVisibleSelectionDisabled(disabled) {
@@ -664,6 +696,7 @@ function initQuestionCard(card) {
   window.QImgLayout?.initBars(card);
   window.QImgLayout?.bindSplitChips(card);
   window.QImgLayout?.bindStackChips(card);
+  window.QInlineEditor?.init(card.querySelector('.inline-editor'));
   window.QImgLayout?.bindQuadChips(card);
   window.QImgRedraw?.bindAll(card);
   window.QCardDisplay?.apply(card);
@@ -1075,9 +1108,7 @@ listEl?.addEventListener('change', event => {
     }).then(data => {
       // clear 已经排在本请求之后时，中间结果无需再闪回页面；服务端随后会清空。
       if (selectionClearInFlight) return;
-      const selected = data.selected === 1;
-      cb.checked = selected;
-      card?.classList.toggle('selected', selected);
+      const selected = setQuestionSelected(id, data.selected);
       syncSelectionSummary(data.count);
     }).catch(error => {
       if (selectionClearInFlight) return;
@@ -1378,7 +1409,9 @@ function renderTagRow(name) {
   label.append(input, document.createTextNode(' ' + name));
   const rename = document.createElement('button');
   rename.type = 'button'; rename.className = 'tag-rename'; rename.title = '改名';
-  rename.dataset.name = name; rename.textContent = '✎';
+  rename.setAttribute('aria-label', rename.title);
+  rename.dataset.name = name;
+  rename.innerHTML = window.QFIcon ? window.QFIcon('edit') : '';
   row.append(label, rename);
   return row;
 }
@@ -1477,19 +1510,38 @@ if (modeSel) {
 const exportFormatSel = document.getElementById('export-format');
 const paperToneField = document.getElementById('paper-tone-field');
 const wimathLogoField = document.getElementById('wimath-logo-field');
+const exportTemplateField = document.getElementById('export-template-field');
+const exportTemplateSel = document.getElementById('export-template');
 const wordExportHint = document.getElementById('word-export-hint');
+function syncExportTemplateOptions() {
+  if (!exportTemplateSel) return;
+  const mode = modeSel?.value || 'exam';
+  Array.from(exportTemplateSel.options).forEach((option, index) => {
+    if (index === 0) return;
+    const supported = String(option.dataset.supportedModes || '')
+      .split(',').map(value => value.trim()).filter(Boolean);
+    option.hidden = supported.length > 0 && !supported.includes(mode);
+    option.disabled = option.hidden;
+  });
+  if (exportTemplateSel.selectedOptions[0]?.hidden) exportTemplateSel.value = '';
+  window.QFSelect?.refresh(exportTemplateSel);
+}
 function syncExportFormatUI() {
   const isWord = exportFormatSel && exportFormatSel.value === 'docx';
   [paperToneField, wimathLogoField].forEach(field => {
     if (!field) return;
     field.querySelectorAll('input, select').forEach(control => { control.disabled = isWord; });
   });
+  if (exportTemplateSel) exportTemplateSel.disabled = isWord;
+  if (exportTemplateField) exportTemplateField.classList.toggle('is-disabled', isWord);
   if (wordExportHint) wordExportHint.hidden = !isWord;
 }
 if (exportFormatSel) {
   exportFormatSel.addEventListener('change', syncExportFormatUI);
   syncExportFormatUI();
 }
+if (modeSel) modeSel.addEventListener('change', syncExportTemplateOptions);
+syncExportTemplateOptions();
 
 // —— 真实 PDF 预览 / 导出 ——
 // 两者都是「POST 拿一个取件地址，再由地址去取文件」，不再直接收文件流。原因是本页
@@ -1595,6 +1647,23 @@ if (exportForm) {
 const folderTree = document.getElementById('folder-tree');
 const collectionOverviewHost = document.getElementById('collection-overview-host');
 let folderLoadGeneration = 0;
+const FOLDER_TREE_STORE = `quizforge:folder-tree:v1:${folderTree?.dataset.bankKey || 'default'}`;
+
+function readFolderExpansion() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(FOLDER_TREE_STORE) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeFolderExpansion(id, expanded) {
+  if (!id) return;
+  const value = readFolderExpansion();
+  value[id] = Boolean(expanded);
+  try { sessionStorage.setItem(FOLDER_TREE_STORE, JSON.stringify(value)); } catch (_) {}
+}
 
 // 每个标签是一个独立页面槽位。点击题集只替换当前槽位，只有右侧加号会创建新页；
 // 回切时仍按分页深度和可见题卡恢复位置，不在内存中复制题卡 DOM。
@@ -1692,7 +1761,7 @@ function renderCollectionTabs() {
     closeButton.dataset.collectionTabClose = tab.key;
     closeButton.title = '关闭';
     closeButton.setAttribute('aria-label', `关闭 ${tab.name}`);
-    closeButton.textContent = '×';
+    closeButton.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
     closeButton.hidden = collectionTabsState.tabs.length <= 1;
     item.append(switchButton, closeButton);
     collectionTabsHost.appendChild(item);
@@ -1704,7 +1773,7 @@ function renderCollectionTabs() {
   addButton.dataset.collectionTabAdd = '1';
   addButton.title = '新建空白页';
   addButton.setAttribute('aria-label', '新建空白页');
-  addButton.textContent = '＋';
+  addButton.innerHTML = window.QFIcon ? window.QFIcon('plus') : '';
   collectionTabsHost.appendChild(addButton);
 
   const activeItem = [...collectionTabsHost.children]
@@ -2465,7 +2534,7 @@ function renderLazyFolder(node) {
   row.className = 'folder-row';
   row.draggable = true;
   row.innerHTML = node.has_children
-    ? '<span class="folder-twist" title="展开/折叠"><span aria-hidden="true">›</span></span>'
+    ? '<span class="folder-twist" title="展开/折叠">' + (window.QFIcon ? window.QFIcon('chevron-right') : '') + '</span>'
     : '<span class="folder-twist folder-twist-empty"></span>';
   const link = document.createElement('a');
   link.className = 'folder-link'; link.dataset.ajax = '1';
@@ -2477,10 +2546,14 @@ function renderLazyFolder(node) {
   link.title = node.name; link.textContent = node.name;
   const actions = document.createElement('span');
   actions.className = 'folder-actions';
-  actions.innerHTML = '<button type="button" class="folder-act folder-newsub" title="新建子文件夹">＋</button>'
-    + '<button type="button" class="folder-act folder-rename" title="重命名">✎</button>'
-    + '<button type="button" class="folder-act folder-movebtn" title="移动到…">⇄</button>'
-    + '<button type="button" class="folder-act folder-del" title="删除">×</button>';
+  actions.innerHTML = '<button type="button" class="folder-act folder-newsub" title="新建子文件夹" aria-label="新建子文件夹">'
+    + (window.QFIcon ? window.QFIcon('plus') : '') + '</button>'
+    + '<button type="button" class="folder-act folder-rename" title="重命名" aria-label="重命名">'
+    + (window.QFIcon ? window.QFIcon('edit') : '') + '</button>'
+    + '<button type="button" class="folder-act folder-movebtn" title="移动到…" aria-label="移动到…">'
+    + (window.QFIcon ? window.QFIcon('move') : '') + '</button>'
+    + '<button type="button" class="folder-act folder-del" title="删除" aria-label="删除">'
+    + (window.QFIcon ? window.QFIcon('x') : '') + '</button>';
   row.append(link, actions);
   li.appendChild(row);
   if (node.has_children) {
@@ -2516,7 +2589,7 @@ function ensureFolderChildrenHost(parentItem, parentId) {
   if (twist?.classList.contains('folder-twist-empty')) {
     twist.classList.remove('folder-twist-empty');
     twist.title = '展开/折叠';
-    twist.innerHTML = '<span aria-hidden="true">›</span>';
+    twist.innerHTML = window.QFIcon ? window.QFIcon('chevron-right') : '';
   }
   parentItem.classList.add('has-children');
   parentItem.classList.remove('collapsed');
@@ -2628,7 +2701,10 @@ function renderBulkFolderNode(node) {
   twist.className = `bulk-folder-twist${node.has_children ? '' : ' is-empty'}`;
   twist.dataset.bulkFolderTwist = '1';
   twist.tabIndex = node.has_children ? 0 : -1;
-  twist.textContent = node.has_children ? '›' : '';
+  twist.title = node.has_children ? `展开 ${node.name}` : '没有子文件夹';
+  twist.setAttribute('aria-label', twist.title);
+  twist.disabled = !node.has_children;
+  twist.innerHTML = node.has_children && window.QFIcon ? window.QFIcon('chevron-right') : '';
   const pick = document.createElement('button');
   pick.type = 'button';
   pick.className = 'bulk-folder-pick';
@@ -2712,6 +2788,11 @@ bulkFolderTree?.addEventListener('click', async event => {
       }
       children.hidden = !children.hidden;
       item.setAttribute('aria-expanded', String(!children.hidden));
+      const twist = item.querySelector(':scope > .bulk-folder-row > [data-bulk-folder-twist]');
+      if (twist) {
+        twist.title = children.hidden ? `展开 ${item.dataset.folderName}` : `折叠 ${item.dataset.folderName}`;
+        twist.setAttribute('aria-label', twist.title);
+      }
       scheduleBulkFolderPopoverPosition();
     } catch (error) {
       flashToast(error.message, 'err');
@@ -2743,17 +2824,12 @@ document.addEventListener('scroll', event => {
   if (!bulkFolderPopover?.contains(event.target)) scheduleBulkFolderPopoverPosition();
 }, true);
 
-folderTree?.addEventListener('click', async event => {
-  const twist = event.target.closest('.folder-twist:not(.folder-twist-empty)');
-  if (!twist) return;
-  event.preventDefault();
-  event.stopPropagation();
-  const li = twist.closest('.folder-item');
+async function setFolderExpanded(li, expanding, persist = true) {
   const children = li?.querySelector(':scope > .folder-children');
   if (!li || !children) return;
-  const expanding = li.classList.contains('collapsed');
+  const twist = li.querySelector(':scope > .folder-row > .folder-twist:not(.folder-twist-empty)');
   if (expanding && children.dataset.loaded !== '1') {
-    twist.classList.add('loading');
+    twist?.classList.add('loading');
     try {
       const response = await fetch('/collections/children?parent='
                                    + encodeURIComponent(children.dataset.parentId));
@@ -2761,16 +2837,47 @@ folderTree?.addEventListener('click', async event => {
       if (!response.ok || !data.ok) throw new Error(data.error || '读取文件夹失败');
       children.replaceChildren(...data.children.map(renderLazyFolder));
       children.dataset.loaded = '1';
+      await restoreFolderExpansion(children);
     } catch (error) {
       flashToast(error.message, 'err');
       return;
     } finally {
-      twist.classList.remove('loading');
+      twist?.classList.remove('loading');
     }
   }
   li.classList.toggle('collapsed', !expanding);
   children.classList.toggle('collapsed', !expanding);
+  li.setAttribute('aria-expanded', String(expanding));
+  if (persist) writeFolderExpansion(li.dataset.folderId, expanding);
+}
+
+async function restoreFolderExpansion(scope = folderTree) {
+  if (!scope) return;
+  const saved = readFolderExpansion();
+  const items = [...scope.querySelectorAll(':scope > .folder-item')];
+  for (const li of items) {
+    if (!li.classList.contains('has-children')) continue;
+    const forced = li.dataset.activePath === '1';
+    const stored = Object.prototype.hasOwnProperty.call(saved, li.dataset.folderId)
+      ? Boolean(saved[li.dataset.folderId]) : null;
+    const expanding = forced || stored === true;
+    if (expanding !== !li.classList.contains('collapsed')) {
+      await setFolderExpanded(li, expanding, false);
+    } else if (expanding) {
+      await restoreFolderExpansion(li.querySelector(':scope > .folder-children'));
+    }
+  }
+}
+
+folderTree?.addEventListener('click', async event => {
+  const twist = event.target.closest('.folder-twist:not(.folder-twist-empty)');
+  if (!twist) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const li = twist.closest('.folder-item');
+  await setFolderExpanded(li, li?.classList.contains('collapsed'), true);
 });
+void restoreFolderExpansion(folderTree);
 
 // 顶部「＋」：新建顶级文件夹（展开输入框）
 const folderNewBtn = document.getElementById('folder-newbtn');
@@ -2786,6 +2893,13 @@ folderNewBtn?.addEventListener('click', () => {
 // 切换的 HTML 不仅增加体积，还会迫使服务端反复递归扫描整棵目录树。
 const folderMoveSelect = document.getElementById('folder-move-select');
 let collectionOptionsPromise = null;
+function folderMoveControlNode() {
+  return folderMoveSelect?.closest('.qf-select') || folderMoveSelect;
+}
+function placeFolderMoveControl(afterNode) {
+  const control = folderMoveControlNode();
+  if (control && afterNode) afterNode.after(control);
+}
 function collectionActionUrl(fid, action) {
   const path = fid.split('/').map(encodeURIComponent).join('/');
   return `/collections/${path}/${action}`;
@@ -2794,7 +2908,7 @@ function resetCollectionOptions() {
   collectionOptionsPromise = null;
   resetBulkFolderPicker();
   if (folderMoveSelect) {
-    if (folderTree?.contains(folderMoveSelect)) folderTree.after(folderMoveSelect);
+    if (folderTree?.contains(folderMoveSelect)) placeFolderMoveControl(folderTree);
     while (folderMoveSelect.options.length > 2) folderMoveSelect.remove(2);
     folderMoveSelect.dataset.loaded = '';
     folderMoveSelect.dataset.id = '';
@@ -2806,10 +2920,11 @@ function replaceFolderTreeFromDocument(doc) {
   const incomingTree = doc.getElementById('folder-tree');
   if (!folderTree || !incomingTree) return;
   if (folderMoveSelect && folderTree.contains(folderMoveSelect)) {
-    folderTree.after(folderMoveSelect);
+    placeFolderMoveControl(folderTree);
   }
   folderTree.innerHTML = incomingTree.innerHTML;
   resetCollectionOptions();
+  void restoreFolderExpansion(folderTree);
 }
 function remapActiveCollection(oldId, newId, keepSuffix = true) {
   const url = new URL(location.href);
@@ -2916,7 +3031,7 @@ function insertExistingFolderItemSorted(host, item) {
 }
 function moveFolderTreeItem(item, oldId, newId, newParentId) {
   if (!item) return;
-  if (folderMoveSelect && item.contains(folderMoveSelect)) folderTree.after(folderMoveSelect);
+  if (folderMoveSelect && item.contains(folderMoveSelect)) placeFolderMoveControl(folderTree);
   const oldHost = item.parentElement;
   item.remove();
   cleanupEmptyFolderHost(oldHost);
@@ -3001,7 +3116,7 @@ async function showFolderMove(li) {
     opt.disabled = (target === '__choose__'
                     || target === fid || target.startsWith(fid + '/'));
   });
-  li.querySelector(':scope > .folder-row').after(folderMoveSelect);
+  placeFolderMoveControl(li.querySelector(':scope > .folder-row'));
   folderMoveSelect.focus();
 }
 

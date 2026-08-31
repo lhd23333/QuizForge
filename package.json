@@ -2,10 +2,12 @@
   "name": "quizforge-desktop-ui",
   "private": true,
   "type": "module",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "QuizForge 独立软件版前端构建工具",
   "scripts": {
+    "build:agent": "esbuild frontend/agent-markdown.js --bundle --minify --outfile=static/js/agent-markdown.bundle.js",
     "build:handouts": "esbuild frontend/handout-editor.js --bundle --minify --outfile=static/js/handout-editor.bundle.js",
+    "build": "npm run build:agent && npm run build:handouts",
     "test:handouts": "node --test frontend/tests/*.test.js"
   },
   "dependencies": {
@@ -14,7 +16,8 @@
     "@tiptap/markdown": "3.27.4",
     "@tiptap/pm": "3.27.4",
     "@tiptap/starter-kit": "3.27.4",
-    "katex": "0.16.22"
+    "katex": "0.16.22",
+    "markdown-it": "14.1.0"
   },
   "devDependencies": {
     "esbuild": "0.25.12",

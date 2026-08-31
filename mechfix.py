@@ -912,6 +912,26 @@ def has_choice_answer_blank(text: str) -> bool:
     return _EMPTY_ANSWER_PAREN_RE.search(text) is not None
 
 
+def strip_choice_answer_blank(text: str) -> str:
+    """去掉题干末尾的空答题括号，保留括号内有内容的数学表达式。
+
+    选择题的 ``（ ）`` 只用于原题答题，不应跟着题干进入卡片和试卷排版；
+    但题干中间的区间、函数括号不能误删，因此只处理文本末尾且位于数学区外的
+    空括号。导入阶段仍保留原括号，供题型识别和选项恢复使用。
+    """
+    if not text:
+        return text
+    end = len(text.rstrip())
+    for match in reversed(list(_EMPTY_ANSWER_PAREN_RE.finditer(text[:end]))):
+        if match.end() != end:
+            continue
+        if any(span.start() < match.start() < span.end()
+               for span in _MATH_SPAN_RE.finditer(text)):
+            continue
+        return text[:match.start()].rstrip()
+    return text
+
+
 def normalize_embedded_choice_labels(text: str) -> str:
     """恢复被塞进上一选项公式末尾的 B/C/D 标签。
 

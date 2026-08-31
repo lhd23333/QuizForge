@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 
 {% block title %}讲义 · QuizForge{% endblock %}
 
@@ -8,7 +9,7 @@
     <div class="handout-rail-section handout-documents-section">
       <div class="handout-section-head">
         <h1>讲义</h1>
-        <button type="button" class="btn primary compact" id="handout-create">新建</button>
+        <button type="button" class="btn primary compact" id="handout-create">{{ icon('plus') }}<span>新建</span></button>
       </div>
       <div class="handout-document-list" id="handout-document-list">
         <p class="muted">正在读取讲义…</p>
@@ -19,7 +20,7 @@
       <div class="handout-section-head">
         <h2>已选试题</h2>
         <button type="button" class="icon-btn" id="handout-refresh-selected"
-                title="刷新已选试题" aria-label="刷新已选试题">↻</button>
+                title="刷新已选试题" aria-label="刷新已选试题">{{ icon('refresh-cw') }}</button>
       </div>
       <div class="handout-question-list" id="handout-question-list">
         <p class="muted">正在读取选题篮…</p>
@@ -37,39 +38,45 @@
 
   <section class="handout-workspace">
     <div class="handout-document-bar">
-      <input type="text" id="handout-title" class="handout-title-input"
-             aria-label="讲义标题" maxlength="200" placeholder="讲义标题">
-      <label>版面
-        <select id="handout-page-format">
-          <option value="a4-1">A4 单栏</option>
-          <option value="a4-2">A4 双栏</option>
-          <option value="slides">16:9 横版</option>
+      <div class="handout-document-main">
+        <input type="text" id="handout-title" class="handout-title-input"
+               aria-label="讲义标题" maxlength="200" placeholder="讲义标题">
+        <span class="handout-save-state" id="handout-save-state">尚未打开讲义</span>
+      </div>
+      <div class="handout-layout-controls" aria-label="讲义版面设置">
+        <label>版面
+          <select id="handout-page-format">
+            <option value="a4-1">A4 单栏</option>
+            <option value="a4-2">A4 双栏</option>
+            <option value="slides">16:9 横版</option>
+          </select>
+        </label>
+        <label>解析
+          <select id="handout-solution-default">
+            <option value="hidden">隐藏</option>
+            <option value="inline">题后</option>
+            <option value="appendix">文末答案区</option>
+          </select>
+        </label>
+        <label>底色
+          <select id="handout-paper-tone">
+            <option value="white">白色</option>
+            <option value="cream">护眼米色</option>
+          </select>
+        </label>
+        <label class="handout-logo-option"><input type="checkbox" id="handout-wimath-logo">WIMath</label>
+      </div>
+      <div class="handout-export-controls" aria-label="保存与导出">
+        <button type="button" class="btn secondary compact" id="handout-save">保存</button>
+        <button type="button" class="btn secondary compact" id="handout-preview">预览</button>
+        <select id="handout-export-format" aria-label="导出格式">
+          <option value="pdf">PDF</option>
+          <option value="md">Markdown</option>
+          <option value="tex">TeX</option>
+          <option value="zip">tex.zip</option>
         </select>
-      </label>
-      <label>默认解析
-        <select id="handout-solution-default">
-          <option value="hidden">隐藏</option>
-          <option value="inline">题后</option>
-          <option value="appendix">文末答案区</option>
-        </select>
-      </label>
-      <label>底色
-        <select id="handout-paper-tone">
-          <option value="white">白色</option>
-          <option value="cream">护眼米色</option>
-        </select>
-      </label>
-      <label class="handout-logo-option"><input type="checkbox" id="handout-wimath-logo">WIMath 标志</label>
-      <span class="handout-save-state" id="handout-save-state">尚未打开讲义</span>
-      <button type="button" class="btn secondary compact" id="handout-save">保存</button>
-      <button type="button" class="btn secondary compact" id="handout-preview">PDF 预览</button>
-      <select id="handout-export-format" aria-label="导出格式">
-        <option value="pdf">PDF</option>
-        <option value="md">Markdown</option>
-        <option value="tex">TeX</option>
-        <option value="zip">tex.zip</option>
-      </select>
-      <button type="button" class="btn primary compact" id="handout-export">导出</button>
+        <button type="button" class="btn primary compact" id="handout-export">导出</button>
+      </div>
     </div>
 
     <div class="handout-toolbar" role="toolbar" aria-label="讲义编辑工具栏">
@@ -80,16 +87,16 @@
       <span class="handout-toolbar-separator"></span>
       <button type="button" data-command="bold" title="粗体 Ctrl+B"><strong>B</strong></button>
       <button type="button" data-command="italic" title="斜体 Ctrl+I"><em>I</em></button>
-      <button type="button" data-command="bullet" title="无序列表">• 列表</button>
-      <button type="button" data-command="ordered" title="有序列表">1. 列表</button>
-      <button type="button" data-command="quote" title="引用">❝ 引用</button>
+      <button type="button" data-command="bullet" title="无序列表" aria-label="无序列表">{{ icon('list') }}</button>
+      <button type="button" data-command="ordered" title="有序列表" aria-label="有序列表">{{ icon('list-ordered') }}</button>
+      <button type="button" data-command="quote" title="引用" aria-label="引用">{{ icon('quote') }}</button>
       <span class="handout-toolbar-separator"></span>
       <button type="button" data-command="inline-math" title="行内公式">$x$</button>
       <button type="button" data-command="block-math" title="块公式">$$x$$</button>
       <button type="button" data-command="page-break" title="显式分页符">分页符</button>
       <span class="handout-toolbar-separator"></span>
-      <button type="button" data-command="undo" title="撤销 Ctrl+Z">↶</button>
-      <button type="button" data-command="redo" title="重做 Ctrl+Shift+Z">↷</button>
+      <button type="button" data-command="undo" title="撤销 Ctrl+Z" aria-label="撤销">{{ icon('undo-2') }}</button>
+      <button type="button" data-command="redo" title="重做 Ctrl+Shift+Z" aria-label="重做">{{ icon('redo-2') }}</button>
       <details class="handout-page-settings">
         <summary>页眉页脚</summary>
         <div class="handout-page-settings-popover">
@@ -129,7 +136,7 @@
   <aside class="handout-inspector" id="handout-inspector" hidden>
     <div class="handout-inspector-head">
       <div><strong>编辑题卡</strong><span id="handout-inspector-source">来源快照</span></div>
-      <button type="button" class="icon-btn" id="handout-inspector-close" aria-label="关闭题卡编辑">×</button>
+      <button type="button" class="icon-btn" id="handout-inspector-close" aria-label="关闭题卡编辑">{{ icon('x') }}</button>
     </div>
     <div class="handout-inspector-body">
       <label>讲义内题号
@@ -162,7 +169,7 @@
     <div class="handout-preview-head">
       <strong>真实 PDF 预览</strong>
       <span>分页以此处为准</span>
-      <button type="button" class="icon-btn" id="handout-preview-close" aria-label="关闭">×</button>
+      <button type="button" class="icon-btn" id="handout-preview-close" aria-label="关闭">{{ icon('x') }}</button>
     </div>
     <iframe id="handout-preview-frame" title="讲义 PDF 预览"></iframe>
   </dialog>

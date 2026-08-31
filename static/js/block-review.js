@@ -72,11 +72,11 @@
         ${block.section ? `<span class="muted" style="font-size:12px">分区：${escapeHtml(block.section)}</span>` : ''}
         ${block.group ? `<span class="muted" style="font-size:12px">分组：${escapeHtml(block.group)}</span>` : ''}
         <span class="spacer"></span>
-        <button type="button" class="btn btn-sm br-up" title="上移">⬆</button>
-        <button type="button" class="btn btn-sm br-down" title="下移">⬇</button>
-        <button type="button" class="btn btn-sm br-merge-up" title="把本块内容并入上一块（用于误拆）">⬆ 合并到上一块</button>
-        <button type="button" class="btn btn-sm br-split" title="在本块下方插入一张空块，把多余内容剪贴过去">✂ 拆分</button>
-        <button type="button" class="btn btn-sm br-delete" title="删除误切出来的块">🗑 删除</button>
+        <button type="button" class="btn btn-sm br-up" title="上移" aria-label="上移">${window.QFIcon ? window.QFIcon('arrow-up') : ''}</button>
+        <button type="button" class="btn btn-sm br-down" title="下移" aria-label="下移">${window.QFIcon ? window.QFIcon('arrow-down') : ''}</button>
+        <button type="button" class="btn btn-sm br-merge-up" title="把本块内容并入上一块（用于误拆）">${window.QFIcon ? window.QFIcon('arrow-up') : ''}<span>合并到上一块</span></button>
+        <button type="button" class="btn btn-sm br-split" title="在本块下方插入一张空块，把多余内容剪贴过去">${window.QFIcon ? window.QFIcon('scissors') : ''}<span>拆分</span></button>
+        <button type="button" class="btn btn-sm br-delete" title="删除误切出来的块">${window.QFIcon ? window.QFIcon('trash') : ''}<span>删除</span></button>
       </div>
       <textarea class="input br-text" rows="5"
                 style="font-size:12px;width:100%">${escapeHtml(block.text || '')}</textarea>

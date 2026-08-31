@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import icon %}
 {% block title %}批量导入 · QuizForge{% endblock %}
 {% block content %}
 <section class="app-page import-page">
@@ -15,67 +16,87 @@
      /convert/start 与 /convert/status 保留不动：方式一每组仍是一个 job，
      「重新转换」也还在用同一套 _jobs 结构。 #}
   <section class="import-box import-primary">
-    <h3>试卷转换</h3>
+    <div class="import-primary-head">
+      <h3>试卷转换</h3>
+      <label class="dz-opt import-stay-option">
+        <input type="checkbox" id="batch-stay"> 提交后留在本页
+      </label>
+    </div>
 
     {# 上传边界由后端 config 注入（见 app._upload_limits）：JS 提交前要按这些数
        早报错，但数只该有一份定义——前端自己抄一份常量必然出现「改了后端忘了改
        前端」的分叉（组数就这么从 20 落后到 500 的）。 #}
     <div id="task-list" data-limits='{{ upload_limits | tojson }}'><!-- 任务卡由 JS 动态生成 --></div>
 
-    <label class="conv-sol" style="display:block;margin:8px 0">PDF 解析服务（整批统一）
-      <select id="batch-ocr-backend" class="input" style="width:auto;margin-left:6px">
-        <option value="mineru" selected>MinerU</option>
-        <option value="doc2x">Doc2X</option>
-      </select>
-    </label>
-
-    {# 默认项必须与 app.py 的 _DEFAULT_ENGINE 一致（现在是 block），也与线上版
-       templates/import.html 的 #engine-select 一致：只有逐块路径会跑
-       mechfix.normalize_block，那是唯一收敛连续空行的地方，默认值一分叉，同一份
-       卷子在两版里的产物就不一样（解答题小问之间空三行 vs 不空）。 #}
-    <label class="conv-sol" style="display:block;margin:8px 0">拆题方式（整批统一）
-      <select id="batch-engine" class="input" style="width:auto;margin-left:6px">
-        <option value="block" selected>逐题识别</option>
-        <option value="whole">整篇识别</option>
-      </select>
-    </label>
-    {# 初始 display 跟着上面的默认项走（默认逐题识别，所以是显示）：写死 none 的话，
-       defer 的 import-upload.js 执行前会先闪一下再弹出来。 #}
-    <div id="batch-block-mode-wrap" style="margin:8px 0">
-      <label class="conv-sol">拆题处理方式
-        <select id="batch-block-mode" class="input" style="width:auto;margin-left:6px">
-          <option value="all_ai">切块后直接送 AI</option>
-          {# 勾了下面的「不审核直接入库」时这一项会被 JS 禁掉：免审就是要求全自动，
-             停下来等人自相矛盾，后端也会把它否决成 all_ai。 #}
-          <option value="manual">切块后暂停，先人工审核拆题结果</option>
-          <option value="no_ai" selected>全部不送入 AI，机械渲染（默认）</option>
-        </select>
-      </label>
-      <label class="conv-sol" title="选择强制白名单后会自动使用逐题识别；它不改变切块后是否送 AI">
-        题号边界
-        <select id="batch-boundary-mode" class="input" style="width:auto;margin-left:6px">
-          <option value="auto" selected>智能识别</option>
-          <option value="whitelist">强制白名单</option>
-        </select>
-      </label>
-      <label class="conv-sol"
-             title="智能识别时用于指定题号写法；强制白名单时作为内置 x.、第x题、第X题之外的额外白名单">
-        题号模板（可选）
-        <input type="text" id="batch-num-template" class="input"
-               style="width:220px;margin-left:6px"
-               placeholder="智能模式=指定格式；白名单=额外格式">
-      </label>
-    </div>
-
-    {# 落点与免审开关（整批统一）。子选项按层级缩进并跟着上一级显隐，
-       后端也按同样的层级收（没勾上一级的直接按 False 算）。 #}
-    <div class="batch-opts">
-      <label class="dz-opt" title="年份文件夹会创建在这里；留空表示题库根目录">
-        目标父文件夹
+    <div class="import-primary-toolbar">
+      <label class="import-target-field" title="年份文件夹会创建在这里；留空表示题库根目录">
+        <span>目标父文件夹</span>
         <input type="hidden" id="batch-target-parent" value="">
         <button type="button" class="btn btn-ghost batch-folder-pick"
                 id="batch-target-parent-open">题库根目录</button>
       </label>
+      <div class="batch-actions">
+        <button type="button" class="btn" id="add-task">添加任务组</button>
+        <button type="button" class="btn" id="import-folder">导入文件夹</button>
+        {# webkitdirectory 会连整棵子树一起给过来，PDF / Word / 图片都收（图片按所在
+           子目录归组，见 import-upload.js 的 folderKey）。这个 input 不写 accept：
+           目录选择模式下浏览器不按 accept 过滤，真正的筛选在 JS 里做。 #}
+        <input type="file" id="folder-input" webkitdirectory multiple hidden>
+        <button type="button" class="btn btn-primary" id="batch-start">开始批量转换</button>
+      </div>
+    </div>
+
+    <details class="import-advanced">
+      <summary>识别与入库设置</summary>
+      <div class="import-advanced-grid">
+        <label class="conv-sol">PDF 解析服务
+          <select id="batch-ocr-backend" class="input">
+            <option value="mineru" selected>MinerU</option>
+            <option value="doc2x">Doc2X</option>
+          </select>
+        </label>
+
+        {# 默认项必须与 app.py 的 _DEFAULT_ENGINE 一致（现在是 block），也与线上版
+           templates/import.html 的 #engine-select 一致：只有逐块路径会跑
+           mechfix.normalize_block，那是唯一收敛连续空行的地方，默认值一分叉，同一份
+           卷子在两版里的产物就不一样（解答题小问之间空三行 vs 不空）。 #}
+        <label class="conv-sol">拆题方式
+          <select id="batch-engine" class="input">
+            <option value="block" selected>逐题识别</option>
+            <option value="whole">整篇识别</option>
+          </select>
+        </label>
+        {# 初始 display 跟着上面的默认项走（默认逐题识别，所以是显示）：写死 none 的话，
+           defer 的 import-upload.js 执行前会先闪一下再弹出来。 #}
+        <div id="batch-block-mode-wrap" class="import-block-options">
+          <label class="conv-sol">拆题处理方式
+            <select id="batch-block-mode" class="input">
+              <option value="all_ai">切块后直接送 AI</option>
+              {# 勾了下面的「不审核直接入库」时这一项会被 JS 禁掉：免审就是要求全自动，
+                 停下来等人自相矛盾，后端也会把它否决成 all_ai。 #}
+              <option value="manual">切块后暂停，先人工审核拆题结果</option>
+              <option value="no_ai" selected>全部不送入 AI，机械渲染（默认）</option>
+            </select>
+          </label>
+          <label class="conv-sol" title="选择强制白名单后会自动使用逐题识别；它不改变切块后是否送 AI">
+            题号边界
+            <select id="batch-boundary-mode" class="input">
+              <option value="auto" selected>智能识别</option>
+              <option value="whitelist">强制白名单</option>
+            </select>
+          </label>
+          <label class="conv-sol"
+                 title="智能识别时用于指定题号写法；强制白名单时作为内置 x.、第x题、第X题之外的额外白名单">
+            题号模板（可选）
+            <input type="text" id="batch-num-template" class="input"
+                   placeholder="智能模式=指定格式；白名单=额外格式">
+          </label>
+        </div>
+      </div>
+
+      {# 落点与免审开关（整批统一）。子选项按层级缩进并跟着上一级显隐，
+         后端也按同样的层级收（没勾上一级的直接按 False 算）。 #}
+      <div class="batch-opts">
       <label class="dz-opt" title="把这一整批的所有题目都打包进同一个文件夹">
         <input type="checkbox" id="batch-pack-cb"> 该批全部放入同一文件夹
         <input type="text" id="batch-folder-name" class="input"
@@ -96,18 +117,8 @@
            都勾了的时候才露出来，露出来时它就该是开的。 #}
         <input type="checkbox" id="batch-keep-original-cb" checked> 一并保存原卷到该文件夹
       </label>
-    </div>
-
-    <div class="batch-actions">
-      <button type="button" class="btn" id="add-task">添加任务组</button>
-      <button type="button" class="btn" id="import-folder">导入文件夹</button>
-      {# webkitdirectory 会连整棵子树一起给过来，PDF / Word / 图片都收（图片按所在
-         子目录归组，见 import-upload.js 的 folderKey）。这个 input 不写 accept：
-         目录选择模式下浏览器不按 accept 过滤，真正的筛选在 JS 里做。 #}
-      <input type="file" id="folder-input" webkitdirectory multiple hidden>
-      <button type="button" class="btn btn-primary" id="batch-start">开始批量转换</button>
-      <label class="conv-sol"><input type="checkbox" id="batch-stay"> 提交后留在本页（接着排下一批）</label>
-    </div>
+      </div>
+    </details>
     <span id="batch-status" class="dz-status muted"></span>
   </section>
 
@@ -115,12 +126,12 @@
     <div class="batch-folder-dialog-head">
       <strong>选择目标父文件夹</strong>
       <button type="button" class="icon-btn" data-batch-folder-close
-              aria-label="关闭" title="关闭">×</button>
+              aria-label="关闭" title="关闭">{{ icon('x') }}</button>
     </div>
     <div class="batch-folder-tree" id="batch-target-parent-tree" role="tree">
       <button type="button" class="batch-folder-row is-root is-selected"
               data-folder-id="" data-folder-name="题库根目录">
-        <span class="batch-folder-twist" aria-hidden="true">›</span>
+        <span class="batch-folder-twist" aria-hidden="true">{{ icon('chevron-right') }}</span>
         <span>题库根目录</span>
       </button>
       <div class="batch-folder-children" data-folder-children="" hidden></div>
@@ -134,11 +145,11 @@
   <!-- 方式二 + 方式三：md 文件与粘贴，并排一行（都不经 AI，摆在批量转换之后） -->
   <div class="upload-grid">
     <section class="import-box">
-      <h3>Markdown 文件</h3>
+      <h3>Markdown / 带图资源包</h3>
       <div class="dropzone" id="dz-md" tabindex="0">
-        <div class="dz-hint desktop-only">把 .md / .markdown / .txt 拖到此处，或点击选择（可多选）</div>
-        <div class="dz-hint mobile-only">点击选择 .md 文件（可多选）</div>
-        <input type="file" accept=".md,.markdown,.txt" multiple hidden>
+        <div class="dz-hint desktop-only">把 Markdown 或 .qfimport.zip 拖到此处，或点击选择（可多选）</div>
+        <div class="dz-hint mobile-only">点击选择 Markdown 或 .qfimport.zip（可多选）</div>
+        <input type="file" accept=".md,.markdown,.txt,.qfimport.zip,.zip" multiple hidden>
         <ul class="dz-files"></ul>
       </div>
       <button type="button" class="btn btn-primary" id="md-submit">开始逐个校对</button>
@@ -299,6 +310,7 @@ if (prevCards) {
   const IMPORT_SUBJECT = prevCards.dataset.subject || 'math';
   const bodyArea = c => c.querySelector('textarea[name^="body_"]');
   const solArea = c => c.querySelector('textarea[name^="solution_"]');
+  const noteArea = c => c.querySelector('textarea[name^="note_"]');
 
   // 拆出的新题默认解答题（误拆多为解答题小问），仍可在下拉里改成其它题型。
   // 结构与模板里的题卡一致，好让 bindCard 原样复用。
@@ -323,8 +335,8 @@ if (prevCards) {
                 style="width:auto;font-size:12px;padding:2px 6px">${typeOpts}</select>
         <span class="muted">拆出的新题</span>
         <div class="spacer"></div>
-        <button type="button" class="btn btn-sm card-merge-up" title="并入上一题">⬆ 合并到上一题</button>
-        <button type="button" class="btn btn-sm card-split" title="再拆一张">✂ 拆分</button>
+        <button type="button" class="btn btn-sm card-merge-up" title="并入上一题">${window.QFIcon ? window.QFIcon('arrow-up') : ''}<span>合并到上一题</span></button>
+        <button type="button" class="btn btn-sm card-split" title="再拆一张">${window.QFIcon ? window.QFIcon('scissors') : ''}<span>拆分</span></button>
         <button type="button" class="link link-danger card-remove">移除</button>
       </div>
       <div class="qcard-render body-structured"></div>
@@ -345,7 +357,7 @@ if (prevCards) {
             <input type="hidden" name="img_flow_touched_${idx}"
                    class="qcard-img-flow-touched" value="">
           </label>
-          <button type="button" class="btn btn-sm qcard-image-pick">+ 添加图片</button>
+          <button type="button" class="btn btn-sm qcard-image-pick">${window.QFIcon ? window.QFIcon('plus') : ''}<span>添加图片</span></button>
           <input type="file" name="images_${idx}" class="qcard-image-input"
                  accept=".png,.jpg,.jpeg,.webp,.bmp" multiple hidden>
           <span class="muted qcard-image-count">可为本题附加图片</span>
@@ -357,11 +369,16 @@ if (prevCards) {
         <textarea class="input qcard-solution" name="solution_${idx}"
                   rows="3" placeholder="本题解析 / 答案"></textarea>
       </details>
+      <details class="qcard-note-wrap">
+        <summary class="muted">备注（仅用于题库整理）</summary>
+        <textarea class="input qcard-note" name="note_${idx}"
+                  rows="3" placeholder="本题备注"></textarea>
+      </details>
       <div class="qcard-meta">
         <span class="qcard-diff-label muted">难度</span>
         <span class="diff-dots qcard-diff" title="点击设置难度 1-5，再点当前值清除">${dots}</span>
         <input type="hidden" name="diff_${idx}" class="qcard-diff-val" value="">
-        <span class="star-toggle qcard-star" title="标星：标记高质量题（点击切换）">★</span>
+        <span class="star-toggle qcard-star" title="标星：标记高质量题（点击切换）">${window.QFIcon ? window.QFIcon('star') : ''}</span>
         <input type="hidden" name="star_${idx}" class="qcard-star-val" value="">
         <input type="text" name="tag_${idx}" class="input qcard-tag"
                placeholder="本题额外标签（逗号分隔）">
@@ -396,6 +413,12 @@ if (prevCards) {
       if (pSol && cSol && cSol.value.trim()) {
         pSol.value = (pSol.value.trim() + '\n' + cSol.value.trim()).trim();
         const wrap = pSol.closest('details');
+        if (wrap) wrap.open = true;
+      }
+      const pNote = noteArea(prev), cNote = noteArea(card);
+      if (pNote && cNote && cNote.value.trim()) {
+        pNote.value = (pNote.value.trim() + '\n' + cNote.value.trim()).trim();
+        const wrap = pNote.closest('details');
         if (wrap) wrap.open = true;
       }
       card.remove();   // 移除后本卡的 body_<idx> 不再提交

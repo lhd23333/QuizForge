@@ -2,8 +2,8 @@ param(
     [ValidateSet("auto", "pyinstaller", "nuitka")]
     [string]$Engine = "auto",
     [string]$OutputDir = "build\desktop",
-    [string]$Version = "1.1.0",
-    [string]$FileVersion = "1.1.0.0"
+    [string]$Version = "2.0.0",
+    [string]$FileVersion = "2.0.0.0"
 )
 
 # Keep this PowerShell 5.1 script ASCII-only. Windows PowerShell reads a UTF-8
@@ -66,6 +66,7 @@ try {
             "--include-package=webview",
             "--include-data-dir=$projectRoot\templates=templates",
             "--include-data-dir=$projectRoot\static=static",
+            "--include-data-dir=$projectRoot\assets\brand=assets/brand",
             "--include-data-dir=$projectRoot\prompts=prompts",
             "--include-data-dir=$projectRoot\vendor\project_alpha\templates=vendor/project_alpha/templates",
             "--include-data-files=$projectRoot\exam_template.tex=exam_template.tex",
@@ -84,8 +85,14 @@ try {
         & $python @args
         $dist = Join-Path $resolvedOutput "desktop.dist"
     } else {
-        $work = Join-Path $projectRoot "build\pyinstaller-work"
-        $spec = Join-Path $projectRoot "build\pyinstaller-spec"
+        # Keep rebuildable intermediate cache separate from locked legacy files.
+        $work = ""
+        $work = [System.IO.Path]::GetFullPath("$projectRoot\build\pyinstaller-work-sync")
+        New-Item -ItemType Directory -Force -Path $work | Out-Null
+        # Keep the generated spec separate from a read-only legacy cache.
+        $specPath = ""
+        $specPath = [System.IO.Path]::GetFullPath("$projectRoot\build\pyinstaller-spec-sync")
+        New-Item -ItemType Directory -Force -Path $specPath | Out-Null
         $versionResource = Join-Path $projectRoot "build\pyinstaller-version-generated.txt"
         $tuple = [string]::Join(", ", $FileVersion.Split("."))
         $resourceText = @"
@@ -119,6 +126,7 @@ VSVersionInfo(
             "--collect-all", "webview",
             "--add-data", "$projectRoot\templates;templates",
             "--add-data", "$projectRoot\static;static",
+            "--add-data", "$projectRoot\assets\brand;assets/brand",
             "--add-data", "$projectRoot\prompts;prompts",
             "--add-data", "$projectRoot\vendor\project_alpha\templates;vendor/project_alpha/templates",
             "--add-data", "$projectRoot\exam_template.tex;.",
@@ -126,7 +134,7 @@ VSVersionInfo(
             "--add-data", "$projectRoot\assets\word-reference.docx;assets",
             "--distpath", $resolvedOutput,
             "--workpath", $work,
-            "--specpath", $spec,
+            "--specpath", $specPath,
             "$projectRoot\desktop.py"
         )
         if ($runtimeFiles.Count -gt 0) {

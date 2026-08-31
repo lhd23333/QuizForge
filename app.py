@@ -7,8 +7,8 @@
 浏览器打开 http://127.0.0.1:5000
 """
 
-from flask import (Flask, render_template, request, redirect, url_for,
-                   jsonify, flash, send_file, send_from_directory, abort)
+from flask import (Flask, Response, render_template, request, redirect, url_for,
+                   jsonify, flash, send_file, send_from_directory, abort, g)
 from markupsafe import Markup, escape
 from werkzeug.utils import safe_join
 
@@ -23,6 +23,8 @@ import tex_installer
 import desktop_product
 import qrender
 import import_defaults
+import import_bundle
+import prompt_store
 import dedup
 import converter
 import blocksplit
@@ -42,6 +44,14 @@ import pdf_collection
 import update_client
 import library_pdf_tools
 import document_converter
+import agent_core
+import agent_tools
+import agent_actions
+import agent_orchestrator
+import agent_provider
+import agent_upload as agent_upload_store
+import agent_approvals as agent_approval_module
+import agent_catalog
 
 import os
 import hmac
@@ -51,8 +61,11 @@ import secrets
 import time
 import uuid
 import logging
+import queue
 import threading
 import zipfile
+import shutil
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -97,6 +110,10 @@ app.secret_key = "quizbank-local-dev"  # 本地会话用，非安全敏感
 # 带图的卷子会一路读进内存；设了则超限直接 413，由下面的 errorhandler 转成 JSON。
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_REQUEST_BYTES
 
+# Skill、导出模板和 Agent 偏好使用独立存储；Blueprint 只注册接口，不改变题库
+# Markdown 路由。写请求仍会统一经过下方的本机 CSRF 令牌检查。
+agent_catalog.register_agent_catalog(app)
+
 # 任意网页都能尝试向 127.0.0.1 发写请求，因此本机监听仍需不可猜的写令牌。
 # 令牌随进程生成；后端重启后刷新旧页面即可拿到新令牌。
 _WRITE_TOKEN = secrets.token_urlsafe(32)
@@ -118,6 +135,663 @@ def protect_local_writes():
     return None
 
 filestore.init_store()
+agent_runtime = agent_core.AgentRuntime(
+    config.BANK_DIR, config.AGENT_SESSIONS_PATH)
+agent_approval_store = agent_approval_module.ApprovalStore()
+_agent_danger_lock = threading.Lock()
+_agent_danger_grants: dict[str, str] = {}
+
+
+def _agent_danger_token(payload: dict | None = None) -> str:
+    body = payload if isinstance(payload, dict) else {}
+    return str(request.headers.get("X-Agent-Danger-Token") or
+               body.get("danger_token") or "").strip()
+
+
+def _agent_danger_armed(sid: str, payload: dict | None = None) -> bool:
+    token = _agent_danger_token(payload)
+    if not token:
+        return False
+    with _agent_danger_lock:
+        expected = _agent_danger_grants.get(str(sid))
+    return bool(expected and hmac.compare_digest(expected, token))
+
+
+def _agent_effective_session(sid: str, payload: dict | None = None) -> dict:
+    """返回带短期权限的副本，绝不把 danger 写回持久化会话。"""
+    session = dict(agent_runtime.get_session(str(sid)))
+    token = _agent_danger_token(payload)
+    if token and not _agent_danger_armed(str(sid), payload):
+        raise agent_core.AgentError("危险模式授权已失效，请重新确认")
+    session["mode"] = "danger" if token else "standard"
+    return session
+
+
+def _agent_revoke_danger(sid: str, token: str | None = None) -> bool:
+    with _agent_danger_lock:
+        current = _agent_danger_grants.get(str(sid))
+        if current is None:
+            return False
+        if token and not hmac.compare_digest(current, str(token)):
+            return False
+        _agent_danger_grants.pop(str(sid), None)
+        return True
+
+
+@app.route("/api/agent/sessions", methods=["GET", "POST"])
+def agent_sessions():
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(ok=True, session=agent_runtime.new_session(
+                payload.get("workdir"), payload.get("scope", "bank"),
+                payload.get("output_dir"), payload.get("input_dir")))
+        except agent_core.AgentError as exc:
+            return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, sessions=agent_runtime.list_sessions())
+
+
+@app.route("/api/agent/sessions/<sid>", methods=["GET", "PATCH", "DELETE"])
+def agent_session(sid):
+    try:
+        if request.method == "DELETE":
+            _agent_revoke_danger(sid)
+            agent_runtime.delete_session(sid)
+            return jsonify(ok=True)
+        if request.method == "PATCH":
+            payload = request.get_json(silent=True) or {}
+            if payload.get("mode") not in {None, "standard"}:
+                return jsonify(
+                    ok=False,
+                    error="危险模式必须在当前页面确认后临时开启",
+                ), 400
+            if payload.get("mode") == "standard":
+                _agent_revoke_danger(sid)
+            # 先确认会话存在，再把本次 PATCH 的所有字段交给运行时一次性校验；
+            # 不能按 mode/provider/workdir 逐项调用，否则最后一个字段失败时前面
+            # 的修改已经落地，前端会看到难以恢复的半状态。
+            agent_runtime.get_session(sid)
+            changes = {key: payload[key] for key in
+                       ("mode", "provider_id", "workdir", "output_dir", "input_dir", "scope")
+                       if key in payload}
+            session = agent_runtime.update_session(
+                sid, **changes,
+                provider_validator=lambda provider_id: any(
+                    str(row.get("id")) == str(provider_id)
+                    and bool(row.get("enabled", True))
+                    for row in agent_provider.list_public()))
+            return jsonify(ok=True, session=session)
+        return jsonify(ok=True, session=agent_runtime.public_session(
+            agent_runtime.get_session(sid)))
+    except agent_core.AgentError as exc:
+        # 会话不存在是 404；参数/目录/Provider 校验失败属于客户端请求错误。
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify(ok=False, error=str(exc)), status
+
+
+@app.route("/api/agent/sessions/<sid>/danger", methods=["POST", "DELETE"])
+def agent_session_danger(sid):
+    """武装当前页面的危险模式；授权只存内存且绑定一个会话。"""
+    try:
+        agent_runtime.get_session(sid)
+        if request.method == "DELETE":
+            _agent_revoke_danger(sid, _agent_danger_token())
+            return jsonify(ok=True, armed=False)
+        payload = request.get_json(silent=True) or {}
+        if payload.get("acknowledged") is not True:
+            return jsonify(ok=False, error="必须明确确认危险模式警告"), 400
+        token = secrets.token_urlsafe(32)
+        with _agent_danger_lock:
+            # 单机版同一进程只允许一个危险会话，武装新会话会撤销旧授权。
+            _agent_danger_grants.clear()
+            _agent_danger_grants[str(sid)] = token
+        return jsonify(ok=True, armed=True, danger_token=token)
+    except agent_core.AgentError as exc:
+        status = 409 if "危险模式授权已失效" in str(exc) else 404
+        return jsonify(ok=False, error=str(exc)), status
+
+
+@app.route("/api/agent/providers", methods=["GET", "POST"])
+def agent_providers():
+    """Agent 对话模型的独立 Provider 列表与新增接口。"""
+    if request.method == "GET":
+        return jsonify(ok=True, providers=agent_provider.list_public(),
+                       active=agent_provider.describe_active(),
+                       # 预设只包含公开的地址和模型建议，不含任何密钥；
+                       # 放在同一个响应里可让侧栏离线打开时一次完成初始化。
+                       presets=agent_provider.list_presets())
+    payload = request.get_json(silent=True) or {}
+    try:
+        provider_id = agent_provider.create(
+            name=payload.get("name"), base_url=payload.get("base_url"),
+            api_key=payload.get("api_key"), model=payload.get("model"),
+            max_tokens=payload.get("max_tokens", 8192),
+            enabled=payload.get("enabled", True),
+            supports_tools=payload.get("supports_tools", True),
+            supports_vision=payload.get("supports_vision", False),
+            wire_api=payload.get("wire_api", "chat"),
+            reasoning_effort=payload.get("reasoning_effort"),
+            service_tier=payload.get("service_tier"),
+            store_responses=payload.get("store_responses", False),
+        )
+        return jsonify(ok=True, provider_id=provider_id,
+                       providers=agent_provider.list_public()), 201
+    except agent_provider.AgentProviderError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/agent/providers/<pid>", methods=["PATCH", "DELETE"])
+def agent_provider_detail(pid):
+    try:
+        if request.method == "DELETE":
+            if not agent_provider.remove(pid):
+                return jsonify(ok=False, error="Agent Provider 不存在"), 404
+            return jsonify(ok=True, providers=agent_provider.list_public())
+        payload = request.get_json(silent=True) or {}
+        if not agent_provider.update(
+                pid, name=payload.get("name"), base_url=payload.get("base_url"),
+                model=payload.get("model"),
+                # PATCH 未携带 max_tokens 时必须传 None，让 Provider 层保留原值；
+                # 传固定默认值会在只改模型名时悄悄重置用户的输出上限。
+                max_tokens=payload.get("max_tokens"),
+                api_key=payload.get("api_key"),
+                enabled=payload.get("enabled"),
+                supports_tools=payload.get("supports_tools"),
+                supports_vision=payload.get("supports_vision"),
+                wire_api=payload.get("wire_api"),
+                reasoning_effort=payload.get("reasoning_effort"),
+                service_tier=payload.get("service_tier"),
+                store_responses=payload.get("store_responses")):
+            return jsonify(ok=False, error="Agent Provider 不存在"), 404
+        return jsonify(ok=True, providers=agent_provider.list_public())
+    except agent_provider.AgentProviderError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/agent/providers/import-cc", methods=["POST"])
+def agent_provider_import_cc():
+    payload = request.get_json(silent=True) or {}
+    try:
+        provider_id = agent_provider.import_cc_switch(
+            config_text=payload.get("config_text", ""),
+            auth_text=payload.get("auth_text", ""),
+            name=payload.get("name"),
+        )
+        return jsonify(ok=True, provider_id=provider_id,
+                       providers=agent_provider.list_public()), 201
+    except agent_provider.AgentProviderError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/agent/providers/<pid>/activate", methods=["POST"])
+def agent_provider_activate(pid):
+    if not agent_provider.set_active(pid):
+        return jsonify(ok=False, error="Agent Provider 不存在或已停用"), 404
+    return jsonify(ok=True, providers=agent_provider.list_public(),
+                   active=agent_provider.describe_active())
+
+
+@app.route("/api/agent/providers/<pid>/test", methods=["POST"])
+def agent_provider_test(pid):
+    try:
+        provider = agent_provider.get(pid)
+        if provider is None:
+            return jsonify(ok=False, error="Agent Provider 不存在或已停用"), 404
+        reply = agent_orchestrator.test_provider(provider)
+        return jsonify(ok=True, reply=reply)
+    except (agent_provider.AgentProviderError,
+            agent_orchestrator.AgentTurnError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/agent/tree")
+def agent_tree():
+    """为 Agent 工作目录选择器提供当前题库的安全目录树。"""
+    # ``list_navigation_tree`` 为首页侧栏优化成了浅树（深层节点按需加载），
+    # 但 Agent 工作目录选择器没有第二个 children 请求，直接使用它会让用户
+    # 最多选到两层目录。这里复用 filestore 的“目录树模式”构建完整树；传入
+    # 空 records 明确表示只扫目录、不读取题目正文，且仍跳过隐藏/保留目录。
+    return jsonify(ok=True, folders=filestore.list_collections_tree(records=[]))
+
+
+@app.route("/api/agent/tool", methods=["POST"])
+def agent_tool():
+    payload = request.get_json(silent=True) or {}
+    sid = payload.get("session_id")
+    control = None
+    turn_status = "error"
+    try:
+        if not sid:
+            return jsonify(ok=False, error="缺少 Agent 会话"), 400
+        session = _agent_effective_session(str(sid), payload)
+        control = agent_runtime.start_turn(str(sid))
+        result = agent_tools.dispatch(
+            str(payload.get("name", "")), payload.get("arguments") or {},
+            session=session, approval_store=agent_approval_store)
+        turn_status = "complete"
+        return jsonify(ok=True, result=result)
+    except agent_core.AgentBusyError as exc:
+        return jsonify(ok=False, error=str(exc)), 409
+    except (agent_core.AgentError, agent_tools.ToolError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    finally:
+        if control is not None:
+            agent_runtime.finish_turn(control, turn_status)
+
+
+@app.route("/api/agent/message", methods=["POST"])
+def agent_message():
+    payload = request.get_json(silent=True) or {}
+    sid, content = payload.get("session_id"), str(payload.get("content", "")).strip()
+    if not sid or not content:
+        return jsonify(ok=False, error="缺少会话或消息内容"), 400
+    control = None
+    turn_status = "error"
+    try:
+        session = _agent_effective_session(str(sid), payload)
+        control = agent_runtime.start_turn(str(sid))
+        reply, events = agent_orchestrator.run_turn(
+            agent_runtime, str(sid), content,
+            provider_id=payload.get("provider_id") or session.get("provider_id"),
+            approval_store=agent_approval_store,
+            turn_control=control, session_override=session)
+        turn_status = "complete"
+        snapshot = agent_runtime.public_session(agent_runtime.get_session(str(sid)))
+        return jsonify(ok=True, reply=reply, events=events, session=snapshot,
+                       turn_id=control.id, status=turn_status)
+    except agent_core.AgentBusyError as exc:
+        return jsonify(ok=False, error=str(exc)), 409
+    except agent_core.AgentError as exc:
+        status = 409 if "危险模式授权已失效" in str(exc) else 404
+        return jsonify(ok=False, error=str(exc)), status
+    except (agent_tools.ToolError, agent_orchestrator.AgentTurnError) as exc:
+        # 工具失败也写入会话，刷新或切换回来时不会丢掉失败上下文。
+        # 同时把最新快照返回给前端，前端可用它替换异步请求期间的乐观状态。
+        try:
+            failure = f"处理失败：{exc}"
+            agent_runtime.append(sid, "assistant", failure, status="error",
+                                 turn_id=control.id if control else None)
+            current = agent_runtime.public_session(agent_runtime.get_session(sid))
+            return jsonify(ok=False, error=str(exc), session=current), 400
+        except agent_core.AgentError:
+            return jsonify(ok=False, error=str(exc)), 400
+    finally:
+        if control is not None:
+            agent_runtime.finish_turn(control, turn_status)
+
+
+def _agent_sse(event: dict) -> str:
+    event_type = str(event.get("type") or "message")
+    return (f"event: {event_type}\n" +
+            f"data: {json.dumps(event, ensure_ascii=False, separators=(',', ':'))}\n\n")
+
+
+@app.route("/api/agent/message/stream", methods=["POST"])
+def agent_message_stream():
+    """以 SSE 输出真实模型流；断开连接会同步取消上游请求。"""
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    content = str(payload.get("content") or "").strip()
+    if not sid or not content:
+        return jsonify(ok=False, error="缺少会话或消息内容"), 400
+    try:
+        session = _agent_effective_session(sid, payload)
+        control = agent_runtime.start_turn(sid)
+    except agent_core.AgentBusyError as exc:
+        return jsonify(ok=False, error=str(exc)), 409
+    except agent_core.AgentError as exc:
+        status = 409 if "危险模式授权已失效" in str(exc) else 404
+        return jsonify(ok=False, error=str(exc)), status
+
+    events: queue.Queue[dict] = queue.Queue()
+    finished = threading.Event()
+    sequence = 0
+    sequence_lock = threading.Lock()
+
+    def publish(event_type: str, **fields) -> None:
+        nonlocal sequence
+        with sequence_lock:
+            sequence += 1
+            seq = sequence
+        events.put({"type": event_type, "turn_id": control.id,
+                    "seq": seq, **fields})
+
+    def relay(event: dict) -> None:
+        row = dict(event or {})
+        event_type = str(row.pop("type", "") or "")
+        if event_type == "tool":
+            event_type = "tool_state"
+        if event_type not in {"assistant_delta", "tool_state", "approval"}:
+            return
+        publish(event_type, **row)
+
+    def worker() -> None:
+        status = "error"
+        reply = ""
+        publish("turn_started", session_id=sid)
+        try:
+            reply, _ = agent_orchestrator.run_turn(
+                agent_runtime, sid, content,
+                provider_id=payload.get("provider_id") or session.get("provider_id"),
+                approval_store=agent_approval_store,
+                on_event=relay, turn_control=control, stream=True,
+                session_override=session)
+            status = "complete"
+        except agent_orchestrator.AgentTurnCancelled as exc:
+            status = "stopped"
+            reply = exc.partial
+        except (agent_core.AgentError, agent_tools.ToolError,
+                agent_orchestrator.AgentTurnError) as exc:
+            status = "error"
+            failure = f"处理失败：{exc}"
+            try:
+                agent_runtime.append(sid, "assistant", failure, status="error",
+                                     turn_id=control.id)
+            except agent_core.AgentError:
+                pass
+            publish("error", error=str(exc))
+        except Exception:
+            status = "error"
+            logger.exception("Agent 流式回合发生未预期错误")
+            failure = "处理失败：Agent 内部错误"
+            try:
+                agent_runtime.append(sid, "assistant", failure, status="error",
+                                     turn_id=control.id)
+            except agent_core.AgentError:
+                pass
+            publish("error", error="Agent 内部错误")
+        finally:
+            agent_runtime.finish_turn(control, status)
+            try:
+                snapshot = agent_runtime.public_session(agent_runtime.get_session(sid))
+            except agent_core.AgentError:
+                snapshot = None
+            publish("turn_finished", status=status, reply=reply, session=snapshot)
+            finished.set()
+
+    thread = threading.Thread(target=worker, name=f"agent-turn-{control.id[:8]}",
+                              daemon=True)
+    thread.start()
+
+    def generate():
+        last_keepalive = time.monotonic()
+        try:
+            while not finished.is_set() or not events.empty():
+                try:
+                    event = events.get(timeout=0.5)
+                except queue.Empty:
+                    if time.monotonic() - last_keepalive >= 15:
+                        last_keepalive = time.monotonic()
+                        yield ": keepalive\n\n"
+                    continue
+                yield _agent_sse(event)
+        finally:
+            if not finished.is_set():
+                control.cancel()
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@app.route("/api/agent/turns/<turn_id>/cancel", methods=["POST"])
+def agent_turn_cancel(turn_id):
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip() or None
+    try:
+        state = agent_runtime.cancel_turn(turn_id, sid)
+        return jsonify(ok=True, turn=state)
+    except agent_core.AgentError as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify(ok=False, error=str(exc)), status
+
+
+@app.route("/api/agent/upload", methods=["POST"])
+def agent_upload():
+    """把 Agent 附件交给现有转换链路；ZIP 先安全暂存并返回 manifest。"""
+    sid = request.form.get("session_id", "").strip()
+    try:
+        session = agent_runtime.get_session(sid)
+        if session.get("scope") == "chat":
+            raise agent_core.AgentError("仅聊天会话不能上传或解析文件")
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            raise agent_core.AgentError("请选择 PDF、DOCX 或 ZIP 文件")
+        # 所有文件类型统一先进入隔离暂存区。识别后端、是否使用 LLM、题干/解析
+        # 选择和目标题库目录都必须在下一步明确，上传本身不产生 OCR 任务。
+        if Path(uploaded.filename).suffix.lower() == ".zip":
+            manifest = agent_upload_store.stage_zip(uploaded)
+        else:
+            manifest = agent_upload_store.stage_file(uploaded)
+        manifest = agent_upload_store.bind_stage(manifest["id"], sid)
+        agent_runtime.append(
+            sid, "system",
+            f"已安全暂存文件：{manifest['original_name']}（{len(manifest['files'])} 个可识别文件），请先选择识别方案")
+        return jsonify(
+            ok=True, staged=manifest, job_id=None,
+            filename=manifest["original_name"],
+            session=agent_runtime.public_session(
+                agent_runtime.get_session(sid)))
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    except agent_upload_store.AgentUploadError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
+
+@app.route("/api/agent/uploads/<stage_id>")
+def agent_upload_stage(stage_id):
+    """读取 ZIP 暂存 manifest；绝不把服务端绝对路径回传给前端。"""
+    try:
+        sid = (request.args.get("session_id") or "").strip()
+        if not sid:
+            return jsonify(ok=False, error="缺少 Agent 会话"), 400
+        session = agent_runtime.get_session(sid)
+        if session.get("scope") == "chat":
+            return jsonify(ok=False, error="仅聊天会话不能读取上传暂存"), 400
+        manifest = agent_upload_store.get_stage(stage_id, sid)
+        return jsonify(ok=True, staged=manifest)
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    except agent_upload_store.AgentUploadError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
+
+@app.route("/api/agent/uploads/<stage_id>/discard", methods=["POST"])
+def agent_upload_stage_discard(stage_id):
+    """丢弃尚未进入转换任务的 ZIP 暂存；只删除 Agent 临时目录。"""
+    sid = (request.get_json(silent=True) or {}).get("session_id", "")
+    try:
+        sid = str(sid).strip()
+        if not sid:
+            return jsonify(ok=False, error="缺少 Agent 会话"), 400
+        session = agent_runtime.get_session(sid)
+        if session.get("scope") == "chat":
+            return jsonify(ok=False, error="仅聊天会话不能管理上传暂存"), 400
+        removed = agent_upload_store.discard_stage(stage_id, sid)
+        return jsonify(ok=True, removed=removed)
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    except agent_upload_store.AgentUploadError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
+
+@app.route("/api/agent/uploads/<stage_id>/start", methods=["POST"])
+def agent_upload_stage_start(stage_id):
+    """从已暂存 ZIP 选择题干/解析并启动 OCR 转换。"""
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    try:
+        session = _agent_effective_session(sid, payload)
+        if session.get("scope") == "chat":
+            return jsonify(ok=False, error="仅聊天会话不能启动识别任务"), 400
+        args = dict(payload)
+        args["stage_id"] = stage_id
+        result = _agent_start_conversion(args, session)
+        result = dict(result or {})
+        result.pop("ok", None)
+        return jsonify(ok=True, **result,
+                       session=agent_runtime.public_session(session))
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    except (agent_tools.ToolError, agent_upload_store.AgentUploadError) as exc:
+        status = getattr(exc, "status", 400)
+        return jsonify(ok=False, error=str(exc),
+                       **({"code": exc.code} if hasattr(exc, "code") else {})), status
+
+
+@app.route("/api/agent/approvals", methods=["GET"])
+def agent_approvals():
+    """查询由服务端工具规划器创建的审批；客户端不能自行构造审批。"""
+    sid = (request.args.get("session_id") or "").strip()
+    if not sid:
+        return jsonify(ok=False, error="缺少 Agent 会话"), 400
+    try:
+        agent_runtime.get_session(sid)
+        return jsonify(ok=True, approvals=agent_approval_store.list(sid))
+    except (agent_core.AgentError, agent_approval_module.ApprovalError) as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+
+
+_AGENT_SERVICE_ACTIONS = frozenset({
+    "inspect_conversion", "start_conversion", "import_conversion",
+    "export_questions", "execute_command",
+})
+
+
+def _execute_agent_approval(session: dict, approval_id: str):
+    """执行一个已确认的 Agent 计划，并以原子领取保证不会重复写入。"""
+    claimed = agent_approval_store.claim_execution(session, approval_id)
+    if claimed is None:
+        # 另一条请求已经领取/完成；返回当前公开状态即可，调用方不要重试写入。
+        row = agent_approval_store.get(session["id"], approval_id)
+        return row, row.get("status") == "executed", row.get("result")
+    action, arguments = claimed
+    try:
+        if agent_actions.is_write_action(action):
+            result = agent_actions.execute_action(
+                action, arguments, session=session)
+        elif action in _AGENT_SERVICE_ACTIONS:
+            result = agent_tools.execute_service(
+                action, arguments, session=session, approved_execute=True)
+        else:
+            raise agent_tools.ToolError(f"未注册的 Agent 确认操作：{action}")
+        row = agent_approval_store.mark_executed(
+            session, approval_id, result=result)
+        agent_runtime.append(session["id"], "system",
+                             f"已完成 Agent 操作：{action}")
+        return row, True, result
+    except Exception as exc:
+        detail = " ".join(str(exc).split())[:500]
+        try:
+            row = agent_approval_store.mark_failed(
+                session, approval_id, detail or "执行失败")
+        except agent_approval_module.ApprovalError:
+            row = agent_approval_store.get(session["id"], approval_id)
+        agent_runtime.append(session["id"], "system",
+                             f"Agent 操作失败：{detail or '执行失败'}")
+        return row, False, detail or "执行失败"
+
+
+def _agent_approval_transition(target: str):
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or "").strip()
+    approval_id = str(payload.get("approval_id") or "").strip()
+    try:
+        session = agent_runtime.get_session(sid)
+        if target == "approved":
+            agent_approval_store.approve(session, approval_id)
+            row, executed, result = _execute_agent_approval(session, approval_id)
+            status = 200 if executed or row.get("status") in {"executed", "approved"} else 400
+            return jsonify(ok=executed or row.get("status") == "executed",
+                           approval=row, executed=executed,
+                           result=result), status
+        else:
+            row = agent_approval_store.cancel(
+                session, approval_id, str(payload.get("reason") or ""))
+            message = f"已取消 Agent 操作：{row['action']}"
+        agent_runtime.append(sid, "system", message)
+        return jsonify(ok=True, approval=row, executed=False)
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    except agent_approval_module.ApprovalError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
+
+@app.route("/api/agent/approve", methods=["POST"])
+def agent_approve():
+    return _agent_approval_transition("approved")
+
+
+@app.route("/api/agent/cancel", methods=["POST"])
+def agent_cancel():
+    return _agent_approval_transition("cancelled")
+
+
+@app.route("/api/agent/approvals/<approval_id>/approve", methods=["POST"])
+def agent_approval_approve(approval_id):
+    payload = request.get_json(silent=True) or {}
+    payload["approval_id"] = approval_id
+    # 让通用实现复用同一套上下文校验；Flask request 本身不可替换，这个别名
+    # 只接受 query 中的 session_id，避免在这里伪造第二份状态机。
+    sid = str(payload.get("session_id") or request.args.get("session_id") or "")
+    try:
+        session = agent_runtime.get_session(sid)
+        agent_approval_store.approve(session, approval_id)
+        row, executed, result = _execute_agent_approval(session, approval_id)
+        status = 200 if executed or row.get("status") == "executed" else 400
+        return jsonify(ok=executed or row.get("status") == "executed",
+                       approval=row, executed=executed, result=result), status
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    except agent_approval_module.ApprovalError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
+
+@app.route("/api/agent/approvals/<approval_id>/cancel", methods=["POST"])
+def agent_approval_cancel(approval_id):
+    payload = request.get_json(silent=True) or {}
+    sid = str(payload.get("session_id") or request.args.get("session_id") or "")
+    try:
+        session = agent_runtime.get_session(sid)
+        row = agent_approval_store.cancel(session, approval_id,
+                                           str(payload.get("reason") or ""))
+        return jsonify(ok=True, approval=row, executed=False)
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    except agent_approval_module.ApprovalError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
+
+@app.route("/api/agent/tasks/<job_id>")
+def agent_task(job_id):
+    """Agent 侧栏使用的转换任务只读状态。"""
+    sid = (request.args.get("session_id") or "").strip()
+    if not sid:
+        return jsonify(ok=False, error="缺少 Agent 会话"), 400
+    try:
+        session = agent_runtime.get_session(sid)
+    except agent_core.AgentError as exc:
+        return jsonify(ok=False, error=str(exc)), 404
+    if session.get("scope") != "bank":
+        return jsonify(ok=False, error="仅聊天会话不能读取题库任务"), 400
+    with _jobs_lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return jsonify(ok=False, error="任务不存在"), 404
+        if str(job.get("agent_session_id") or "") != sid:
+            return jsonify(ok=False, error="任务不属于当前 Agent 会话"), 403
+        return jsonify(ok=True, job_id=job_id, status=job.get("status"),
+                       filename=job.get("filename"), error=job.get("error"),
+                       has_result=bool(job.get("md")))
+
+
+def _agent_folder_lines(nodes: list[dict], prefix: str = "") -> list[str]:
+    lines = []
+    for node in nodes:
+        lines.append(f"{prefix}{node.get('name', node.get('id', ''))}")
+        lines.extend(_agent_folder_lines(node.get("children") or [], prefix + "  "))
+    return lines or ["（暂无子目录）"]
 
 
 @app.errorhandler(413)
@@ -312,6 +986,8 @@ def _upload_limits() -> dict:
         "max_md_files": config.MAX_MD_FILES,
         "max_md_file_bytes": config.MAX_MD_FILE_BYTES,
         "max_md_batch_bytes": config.MAX_MD_BATCH_BYTES,
+        "max_import_bundle_bytes": config.MAX_IMPORT_BUNDLE_BYTES,
+        "max_import_bundle_batch_bytes": config.MAX_IMPORT_BUNDLE_BATCH_BYTES,
         "exam_exts": sorted(config.EXAM_EXTS),
         "image_exts": sorted(config.EXAM_IMAGE_EXTS),
         "md_exts": sorted(config.MD_EXTS),
@@ -324,7 +1000,16 @@ def _inject_ui_prefs():
     <html> 和 <body> 标签上，各视图逐个传参必然漏——漏掉的那一页会静默变回
     浅色，很难发现。"""
     prefs = ui_prefs.load()
+    effective_color = ui_prefs.effective_theme_color(
+        prefs["theme_mode"], prefs["theme_color"])
     return {"ui": {**prefs,
+                   "theme_color": effective_color,
+                   "theme_color_custom": ui_prefs.is_custom_theme_color(
+                       prefs["theme_mode"], prefs["theme_color"]),
+                   "accent_foreground": ui_prefs.accent_foreground(
+                       effective_color),
+                   "accent_text_color": ui_prefs.accent_text_color(
+                       effective_color, prefs["theme_mode"]),
                    "wallpaper_is_video": ui_prefs.is_video_wallpaper(
                        prefs["wallpaper"])}}
 
@@ -1863,6 +2548,14 @@ def index():
         scope_pairs,
         remove={"tag", "tags", "match", "type", "difficulty", "starred"})
 
+    # 导出面板只展示已经完成预览确认的 Agent 模板；草稿仍由模板管理接口
+    # 单独处理，避免用户在普通导出时误选到尚未检查的版本。
+    try:
+        export_templates = agent_catalog.list_templates(include_disabled=False)
+        export_selected_template = agent_catalog.selected_template()
+    except agent_catalog.CatalogError:
+        export_templates, export_selected_template = [], None
+
     def folder_scope_url(target_collection):
         return _question_scope_url(
             scope_pairs, set_values={"collection": target_collection},
@@ -1890,6 +2583,9 @@ def index():
         all_collections=all_cols,
         folder_tree=folder_tree,
         active_collection=collection_id,
+        bank_tree_key=uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            os.path.normcase(str(config.BANK_DIR.resolve()))).hex[:12],
         collection_children=collection_children,
         collection_overview=collection_overview,
         blank=blank,
@@ -1902,6 +2598,8 @@ def index():
         filter_context_fields=filter_context_fields,
         filter_reset_url=filter_reset_url,
         folder_scope_url=folder_scope_url,
+        export_templates=export_templates,
+        export_selected_template=export_selected_template,
     )
 
 
@@ -3486,7 +4184,8 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
                     ocr_backend: str = _DEFAULT_OCR_BACKEND,
                     boundary_mode: str = _BOUNDARY_MODE_AUTO,
                     image_page_count: int = 0,
-                    solution_image_page_count: int = 0):
+                    solution_image_page_count: int = 0,
+                    block_mode: str = _BLOCK_MODE_ALL_AI):
     """后台线程：跑转换，结果写回 _jobs。
 
     solution_path 非空 → 走「题干+解析双文件」路径，按题号关联解析。
@@ -3500,7 +4199,36 @@ def _convert_worker(job_id: str, saved_path, orig_filename: str,
     solution_image_page_count = max(
         0, int(solution_image_page_count or 0))
     try:
-        if solution_path is not None:
+        block_mode = _parse_block_mode(block_mode)
+        if engine == converter.ENGINE_BLOCK and block_mode in {
+                _BLOCK_MODE_NO_AI, _BLOCK_MODE_MANUAL}:
+            if solution_path is not None:
+                pending = _convert_with_ocr_credentials(
+                    ocr_backend,
+                    lambda tok, doc2x_key: converter.convert_exam_and_solution_to_blocks(
+                        saved_path, solution_path, mineru_token=tok,
+                        num_template=num_template, boundary_mode=boundary_mode,
+                        only_numbers=only_numbers,
+                        exam_image_page_count=image_page_count,
+                        solution_image_page_count=solution_image_page_count,
+                        ocr_backend=ocr_backend, doc2x_api_key=doc2x_key))
+            else:
+                pending = _convert_with_ocr_credentials(
+                    ocr_backend,
+                    lambda tok, doc2x_key: converter.convert_file_to_blocks(
+                        saved_path, mineru_token=tok, num_template=num_template,
+                        boundary_mode=boundary_mode, image_page_count=image_page_count,
+                        only_numbers=only_numbers, ocr_backend=ocr_backend,
+                        doc2x_api_key=doc2x_key))
+            if block_mode == _BLOCK_MODE_MANUAL:
+                with _jobs_lock:
+                    _jobs[job_id].update(status="awaiting_block_review", pending=pending)
+                    _persist_job(job_id, _jobs[job_id])
+                return
+            md = converter.finish_block_review(
+                pending, action="skip", include_solution=include_solution,
+                provider=None, note_sink=notes.append)
+        elif solution_path is not None:
             md = _convert_with_ocr_credentials(
                 ocr_backend,
                 lambda tok, doc2x_key: converter.convert_exam_and_solution(
@@ -4267,7 +4995,15 @@ def convert_start():
                          "image_page_count": image_page_count,
                          "exam_image_page_count": image_page_count,
                          "solution_image_page_count": solution_image_page_count,
-                         "history_id": history_id}
+                         "history_id": history_id,
+                         # 仅 Agent 上传请求会设置 g 上的这两个字段；普通旧路由
+                         # 保持原数据结构，不向公开任务快照写入空归属。
+                         **({"agent_session_id": str(getattr(g, "agent_session_id", "")),
+                            "agent_workdir_id": str(getattr(g, "agent_workdir_id", "")),
+                            "agent_stage_id": None,
+                            "agent_imported_ids": [],
+                            "agent_import_folder": ""}
+                            if getattr(g, "agent_session_id", "") else {})}
         _persist_job(job_id, _jobs[job_id])
     threading.Thread(target=_convert_worker,
                      args=(job_id, saved_path, orig_filename, include_solution,
@@ -6153,6 +6889,8 @@ def settings_page():
     # 别在这里再算一遍——多一处判定就多一处能跟存储对不上的真相。
     enriched = providers.list_llm_providers()
     prefs = ui_prefs.load()
+    effective_color = ui_prefs.effective_theme_color(
+        prefs["theme_mode"], prefs["theme_color"])
     return render_template(
         "settings.html", providers=enriched,
         llm_presets=providers.LLM_PROVIDER_PRESETS,
@@ -6167,7 +6905,9 @@ def settings_page():
         github_repository_url=config.GITHUB_REPOSITORY_URL,
         github_releases_url=config.GITHUB_RELEASES_URL,
         tex_install=tex_installer.snapshot(),
-        theme_mode=prefs["theme_mode"], theme_color=prefs["theme_color"],
+        theme_mode=prefs["theme_mode"], theme_color=effective_color,
+        theme_color_custom=ui_prefs.is_custom_theme_color(
+            prefs["theme_mode"], prefs["theme_color"]),
         wallpaper=prefs["wallpaper"], swatches=ui_prefs.SWATCHES,
         wallpaper_is_video=ui_prefs.is_video_wallpaper(prefs["wallpaper"]))
 
@@ -6248,15 +6988,33 @@ def settings_doc2x_delete():
 @app.route("/settings/theme", methods=["POST"])
 def settings_theme():
     """存外观偏好：深浅色 / 主题色 / 壁纸（上传或移除）。"""
-    mode = request.form.get("theme_mode", "light")
+    prefs = ui_prefs.load()
+    mode = request.form.get("theme_mode", "dark")
     color = request.form.get("theme_color", "").strip()
-    patch = {"theme_mode": mode if mode in ("light", "dark") else "light"}
+    color_marked_custom = request.form.get("theme_color_custom") == "1"
+    next_mode = mode if mode in ("light", "dark") else "dark"
+    patch = {"theme_mode": next_mode}
     # 只认 #rrggbb：这个值会被直接拼进 <html style="--primary: ...">，
     # 不校验就是一个 CSS 注入点（`red;} ... {`）。
     if re.fullmatch(r"#[0-9a-fA-F]{6}", color):
-        patch["theme_color"] = color.lower()
+        normalized_color = color.lower()
+        # 旧页面或禁用脚本时，模式切换可能仍提交上一模式的默认色。
+        # 这不是用户自定义色，应切换到新模式的品牌默认；真正的自定义色继续保留。
+        if (not color_marked_custom
+                and next_mode != prefs["theme_mode"]
+                and not ui_prefs.is_custom_theme_color(
+                    prefs["theme_mode"], prefs["theme_color"])
+                and normalized_color == ui_prefs.default_theme_color(
+                    prefs["theme_mode"])):
+            normalized_color = ui_prefs.default_theme_color(next_mode)
+        patch["theme_color"] = normalized_color
+    elif (not color_marked_custom
+          and next_mode != prefs["theme_mode"]
+          and not ui_prefs.is_custom_theme_color(
+              prefs["theme_mode"], prefs["theme_color"])):
+        # 没有颜色字段时也让模式默认色随之切换，避免手工 POST 留下旧默认值。
+        patch["theme_color"] = ui_prefs.default_theme_color(next_mode)
 
-    prefs = ui_prefs.load()
     if request.form.get("remove_wallpaper") == "1":
         _delete_wallpaper_file(prefs["wallpaper"])
         patch["wallpaper"] = None
@@ -6412,8 +7170,68 @@ def settings_llm():
 
 
 # ---------------------------------------------------------------------------
+# 提示词库
+# ---------------------------------------------------------------------------
+
+
+@app.route("/prompts")
+def prompts_page():
+    return render_template("prompts.html")
+
+
+@app.route("/api/prompts", methods=["GET", "POST"])
+def prompts_api():
+    try:
+        if request.method == "POST":
+            item = prompt_store.create_prompt(
+                config.PROMPTS_PATH, request.get_json(silent=True) or {})
+            return jsonify(ok=True, prompt=item), 201
+        return jsonify(ok=True, prompts=prompt_store.list_prompts(
+            config.PROMPTS_PATH, config.OFFICIAL_PROMPTS_DIR))
+    except prompt_store.PromptStoreError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/prompts/<prompt_id>", methods=["PATCH", "DELETE"])
+def prompt_item_api(prompt_id):
+    try:
+        if request.method == "DELETE":
+            prompt_store.delete_prompt(config.PROMPTS_PATH, prompt_id)
+            return jsonify(ok=True)
+        item = prompt_store.update_prompt(
+            config.PROMPTS_PATH, prompt_id, request.get_json(silent=True) or {})
+        return jsonify(ok=True, prompt=item)
+    except KeyError:
+        return jsonify(ok=False, error="提示词不存在"), 404
+    except prompt_store.PromptStoreError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+# ---------------------------------------------------------------------------
 # 批量导入
 # ---------------------------------------------------------------------------
+
+
+_IMPORT_NOTE_HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s*备注\s*$")
+
+
+def _split_import_note(stem: str, solution: str | None) -> tuple[str, str | None, str]:
+    """从题干或解析末尾拆出 ``## 备注``，沿用题库独立 section 语义。"""
+    for field in ("solution", "stem"):
+        value = solution if field == "solution" else stem
+        if not value:
+            continue
+        match = _IMPORT_NOTE_HEADING_RE.search(value)
+        if not match:
+            continue
+        before = value[:match.start()].rstrip()
+        note = value[match.end():].strip()
+        if field == "solution":
+            solution = before or None
+        else:
+            stem = before
+        return stem, solution, note
+    return stem, solution, ""
 
 
 def _build_import_preview(raw: str, *, include_solution: bool = True,
@@ -6478,6 +7296,7 @@ def _build_import_preview(raw: str, *, include_solution: bool = True,
         stem, solution = importer.split_solution(b, scan_markers=paired is None)
         if pre_solutions[i]:
             solution = pre_solutions[i]
+        stem, solution, note = _split_import_note(stem, solution)
         # 「参考答案」大标题落在上一题块尾（它前面没有新题号），剥掉免得拖进题干
         stem = importer.strip_answer_head(stem)
         n = importer.block_number(b)
@@ -6504,6 +7323,9 @@ def _build_import_preview(raw: str, *, include_solution: bool = True,
             solution = mechfix.normalize_html_superscripts(solution)
             solution = mechfix.normalize_intrusive_column_text(solution)
             solution = mechfix.normalize_misplaced_constraints(solution)
+        if note:
+            note = mechfix.normalize_html_subscripts(note)
+            note = mechfix.normalize_html_superscripts(note)
         if qtype == "解答题":
             stem = mechfix.normalize_subquestion_layout(stem)
         stem = mechfix.ensure_fill_blank(stem, qtype)
@@ -6538,6 +7360,7 @@ def _build_import_preview(raw: str, *, include_solution: bool = True,
             final_solution)
         preview.append({"idx": i, "body": stem,
                         "solution": final_solution,
+                        "note": note,
                         "type": qtype, "dup": dup, "number": n,
                         "img_split": img_mode, "img_layouts": img_layouts,
                         "img_flow": img_flow, "image_count": image_count,
@@ -6605,8 +7428,22 @@ def _read_import_images(idx: int) -> list[tuple[bytes, str]]:
 def _save_import_images(images: list[tuple[bytes, str]]) -> list[str]:
     """把已校验图片落入题库资产目录，返回 Obsidian 引用。"""
     token = f"import_{uuid.uuid4().hex}"
-    return [filestore.save_image(token, i + 1, data, ext)
-            for i, (data, ext) in enumerate(images)]
+    refs: list[str] = []
+    saved_names: set[str] = set()
+    try:
+        for i, (data, ext) in enumerate(images):
+            normalized_ext = ext.lstrip(".").lower() or "png"
+            # save_image 的命名契约是稳定的；调用前登记，才能清掉写入中途失败的残片。
+            saved_names.add(f"{token}_{i + 1}.{normalized_ext}")
+            ref = filestore.save_image(token, i + 1, data, ext)
+            refs.append(ref)
+            saved_names.update(_QIMG_RE.findall(ref))
+    except Exception:
+        # 多图保存不是原子文件操作；任一张失败时清理此前已落盘且尚未入题的图片。
+        if saved_names:
+            filestore.purge_orphan_images(saved_names)
+        raise
+    return refs
 
 
 def _solution_display_name(exam_name: str, solution_path: str) -> str:
@@ -6731,6 +7568,7 @@ def _auto_import_items(chosen: list[dict], source: str) -> list[dict]:
         "type": item["type"],
         "source": source,
         "number": item.get("number"),
+        **({"note": item["note"]} if item.get("note") else {}),
         **({"img_split": item.get("img_split"),
             "img_layouts": item.get("img_layouts") or []}
            if item.get("img_split") else {}),
@@ -6912,9 +7750,37 @@ _md_queues: dict[str, dict] = {}
 _md_queues_lock = threading.Lock()
 
 
+def _discard_import_bundle_stages(stage_ids) -> None:
+    candidates: set[str] = set()
+    for stage_id in dict.fromkeys(str(value or "") for value in stage_ids):
+        if not stage_id:
+            continue
+        try:
+            candidates.update(import_bundle.discard_stage(
+                config.IMPORT_BUNDLE_STAGE_DIR, config.ASSETS_DIR, stage_id))
+        except import_bundle.ImportBundleError:
+            continue
+    if candidates:
+        filestore.purge_orphan_images(candidates)
+
+
+def _queue_bundle_stage(queue_id: str) -> str:
+    if not queue_id:
+        return ""
+    with _md_queues_lock:
+        queue = _md_queues.get(queue_id)
+        if not queue:
+            return ""
+        pos = int(queue.get("pos") or 0)
+        files = queue.get("files") or []
+        if not (0 <= pos < len(files)):
+            return ""
+        return str(files[pos].get("bundle_stage_id") or "")
+
+
 @app.route("/import/batch", methods=["POST"])
 def import_batch_start():
-    """接收多个 md 文件，建队列，重定向到第一个文件的校对页。"""
+    """接收多个 Markdown 或带图资源包，建队列后逐个进入校对页。"""
     files = [f for f in request.files.getlist("md_files") if f and f.filename]
     # 份数与体量上限，与服务器版 upload_guard 的 MAX_MD_* 对齐。整个队列连文本
     # 一起留在内存里（_md_queues），所以这里不设限的话几百份 md 就是几百份全文常驻。
@@ -6922,23 +7788,65 @@ def import_batch_start():
         flash(f"md 文件过多（{len(files)} 个，上限 {config.MAX_MD_FILES} 个）", "err")
         return redirect(url_for("import_md"))
     items = []
-    total = 0
-    for f in files:
-        if Path(f.filename).suffix.lower() not in config.MD_EXTS:
-            continue
-        data = f.read()
-        if len(data) > config.MAX_MD_FILE_BYTES:
-            flash(f"「{f.filename}」过大（单文件上限 "
-                  f"{config.MAX_MD_FILE_BYTES // (1024 * 1024)}MB）", "err")
-            return redirect(url_for("import_md"))
-        total += len(data)
-        if total > config.MAX_MD_BATCH_BYTES:
-            flash(f"md 文件总量超过上限（"
-                  f"{config.MAX_MD_BATCH_BYTES // (1024 * 1024)}MB）", "err")
-            return redirect(url_for("import_md"))
-        items.append({"name": f.filename, "text": data.decode("utf-8", errors="replace")})
+    md_total = 0
+    bundle_total = 0
+    staged_ids = []
+    try:
+        for storage in files:
+            name = str(storage.filename or "")
+            suffix = Path(name).suffix.lower()
+            if import_bundle.is_bundle_filename(name):
+                data = storage.stream.read(config.MAX_IMPORT_BUNDLE_BYTES + 1)
+                if len(data) > config.MAX_IMPORT_BUNDLE_BYTES:
+                    raise import_bundle.ImportBundleError(
+                        f"「{name}」过大（资源包上限 "
+                        f"{config.MAX_IMPORT_BUNDLE_BYTES // (1024 * 1024)}MB）")
+                bundle_total += len(data)
+                if bundle_total > config.MAX_IMPORT_BUNDLE_BATCH_BYTES:
+                    raise import_bundle.ImportBundleError(
+                        "本批资源包总量超过上限，请拆成多批导入")
+                staged = import_bundle.stage_bundle(
+                    data, name,
+                    stage_root=config.IMPORT_BUNDLE_STAGE_DIR,
+                    assets_dir=config.ASSETS_DIR,
+                    max_bundle_bytes=config.MAX_IMPORT_BUNDLE_BYTES,
+                    max_files=config.MAX_IMPORT_BUNDLE_FILES,
+                    max_uncompressed_bytes=config.MAX_IMPORT_BUNDLE_UNCOMPRESSED_BYTES,
+                    max_image_bytes=config.MAX_EXAM_IMAGE_BYTES,
+                    max_markdown_bytes=config.MAX_MD_FILE_BYTES,
+                    max_compression_ratio=config.MAX_IMPORT_BUNDLE_COMPRESSION_RATIO,
+                )
+                staged_ids.append(staged["id"])
+                items.append({
+                    "name": name,
+                    "text": staged["markdown"],
+                    "bundle_stage_id": staged["id"],
+                })
+                continue
+            if suffix not in config.MD_EXTS:
+                raise import_bundle.ImportBundleError(
+                    f"「{name}」不是 Markdown 或 QuizForge ZIP 资源包")
+            data = storage.stream.read(config.MAX_MD_FILE_BYTES + 1)
+            if len(data) > config.MAX_MD_FILE_BYTES:
+                raise import_bundle.ImportBundleError(
+                    f"「{name}」过大（Markdown 单文件上限 "
+                    f"{config.MAX_MD_FILE_BYTES // (1024 * 1024)}MB）")
+            md_total += len(data)
+            if md_total > config.MAX_MD_BATCH_BYTES:
+                raise import_bundle.ImportBundleError(
+                    "Markdown 文件总量超过上限，请拆成多批导入")
+            try:
+                text = data.decode("utf-8-sig")
+            except UnicodeError as exc:
+                raise import_bundle.ImportBundleError(
+                    f"「{name}」必须是 UTF-8 文本") from exc
+            items.append({"name": name, "text": text})
+    except (import_bundle.ImportBundleError, OSError) as exc:
+        _discard_import_bundle_stages(staged_ids)
+        flash(str(exc), "err")
+        return redirect(url_for("import_md"))
     if not items:
-        flash("未选择有效的 .md 文件", "err")
+        flash("未选择有效的 Markdown 或 ZIP 资源包", "err")
         return redirect(url_for("import_md"))
 
     queue_id = uuid.uuid4().hex
@@ -6951,6 +7859,7 @@ def import_batch_start():
 @app.route("/import/queue/<queue_id>")
 def import_queue_step(queue_id):
     """展示队列中当前文件的切分校对页（GET，供跳过后重定向进入）。"""
+    finished = None
     with _md_queues_lock:
         q = _md_queues.get(queue_id)
         if not q:
@@ -6961,13 +7870,37 @@ def import_queue_step(queue_id):
         total = len(files)
         batch_id = q.get("batch_id")
         if pos >= total:
-            _md_queues.pop(queue_id, None)
-            flash(f"批量导入完成，共处理 {total} 个文件", "ok")
-            # 方式四整批校对完：清该批上传文件与内存
-            if batch_id:
-                _clean_batch_uploads(batch_id)
-            return redirect(url_for("index"))
-        cur = files[pos]
+            finished = _md_queues.pop(queue_id, None)
+            cur = None
+        else:
+            cur = files[pos]
+
+    if finished is not None:
+        flash(f"批量导入完成，共处理 {total} 个文件", "ok")
+        # 方式四整批校对完：清该批上传文件与内存
+        if batch_id:
+            _clean_batch_uploads(batch_id)
+        _discard_import_bundle_stages(
+            item.get("bundle_stage_id") for item in finished.get("files", []))
+        return redirect(url_for("index"))
+
+    bundle_stage_id = str(cur.get("bundle_stage_id") or "")
+    if bundle_stage_id:
+        try:
+            stage = import_bundle.get_stage(
+                config.IMPORT_BUNDLE_STAGE_DIR, bundle_stage_id)
+            missing = [name for name in stage.get("created_names", [])
+                       if not (config.ASSETS_DIR / name).is_file()]
+            if missing:
+                raise import_bundle.ImportBundleError("资源包暂存图片已丢失")
+        except import_bundle.ImportBundleError as exc:
+            _discard_import_bundle_stages([bundle_stage_id])
+            with _md_queues_lock:
+                active = _md_queues.get(queue_id)
+                if active and int(active.get("pos") or 0) == pos:
+                    active["pos"] = pos + 1
+            flash(f"「{cur['name']}」无法继续校对：{exc}", "err")
+            return redirect(url_for("import_queue_step", queue_id=queue_id))
 
     # 队列里的 md 文件是用户手上唯一的一份文本，没有「丢弃解析」这个选项可言，
     # 一律按识别解析算——扔掉他没有第二次机会。
@@ -6982,16 +7915,22 @@ def import_queue_step(queue_id):
         job_id=cur.get("job_id", ""),
         queue_id=queue_id, queue_pos=pos + 1, queue_total=total,
         queue_filename=cur["name"], batch_source=batch_tag,
-        include_solution=True)
+        include_solution=True, bundle_stage_id=bundle_stage_id)
 
 
 @app.route("/import/queue/<queue_id>/skip", methods=["POST"])
 def import_queue_skip(queue_id):
     """跳过当前文件，推进到下一个。"""
+    stage_id = ""
     with _md_queues_lock:
         q = _md_queues.get(queue_id)
         if q:
+            pos = int(q.get("pos") or 0)
+            files = q.get("files") or []
+            if 0 <= pos < len(files):
+                stage_id = str(files[pos].get("bundle_stage_id") or "")
             q["pos"] += 1
+    _discard_import_bundle_stages([stage_id])
     return redirect(url_for("import_queue_step", queue_id=queue_id))
 
 
@@ -7066,6 +8005,12 @@ def import_md():
     job_id = request.form.get("job_id", "").strip()
     # 批量 md 队列：导入完当前文件后推进到下一个；空提交也推进（等于跳过）
     queue_id = request.form.get("queue_id", "").strip()
+    bundle_stage_id = _queue_bundle_stage(queue_id)
+    posted_bundle_stage = request.form.get("bundle_stage_id", "").strip()
+    if posted_bundle_stage != bundle_stage_id:
+        flash("资源包校对状态已经变化，请重新打开当前文件", "err")
+        return redirect(url_for("import_queue_step", queue_id=queue_id)
+                        if queue_id else url_for("import_md"))
     # 方式四：来自某组校对，导入后标记该组已审、回看板
     batch_id = request.form.get("batch_id", "").strip()
     batch_gid = request.form.get("batch_gid", "")
@@ -7094,6 +8039,7 @@ def import_md():
                 q = _md_queues.get(queue_id)
                 if q:
                     q["pos"] += 1
+            _discard_import_bundle_stages([bundle_stage_id])
             return redirect(url_for("import_queue_step", queue_id=queue_id))
         if job_id:
             # 单文件任务到这里已经完成审核。先取出路径再删快照；只允许删除
@@ -7119,6 +8065,7 @@ def import_md():
     for idx in keep:
         body = request.form.get(f"body_{idx}", "").strip()
         solution = request.form.get(f"solution_{idx}", "").strip() or ""
+        note = request.form.get(f"note_{idx}", "").strip()
         diff = request.form.get(f"diff_{idx}", "").strip()
         if diff not in ("1", "2", "3", "4", "5"):
             diff = ""
@@ -7132,8 +8079,9 @@ def import_md():
                 new_images = _read_import_images(idx)
             except _UploadRejected as exc:
                 flash(str(exc), "err")
-                return redirect(url_for("import_md"))
-            chosen.append((idx, body, solution, diff, starred, number,
+                return redirect(url_for("import_queue_step", queue_id=queue_id)
+                                if queue_id else url_for("import_md"))
+            chosen.append((idx, body, solution, note, diff, starred, number,
                            new_images))
     if not chosen:
         if batch_id or queue_id:
@@ -7173,7 +8121,7 @@ def import_md():
     pending_questions = []
     pending_starred = []
     saved_image_names: set[str] = set()
-    for idx, body, solution, diff, starred, number, new_images in chosen:
+    for idx, body, solution, note, diff, starred, number, new_images in chosen:
         per = [t.strip() for t in request.form.get(f"tag_{idx}", "").split(",") if t.strip()]
         tags = list(dict.fromkeys(batch_tags + per))
         # 题型优先取校对页逐题下拉（用户可手改），非法/缺失才回退正文特征猜测；
@@ -7183,7 +8131,14 @@ def import_md():
         if qtype not in config.QUESTION_TYPES:
             qtype = importer.guess_type(body)
         if new_images:
-            refs = _save_import_images(new_images)
+            try:
+                refs = _save_import_images(new_images)
+            except Exception:
+                # 当前题由 _save_import_images 清理；这里继续回滚本批此前题目的图片。
+                if saved_image_names:
+                    filestore.purge_orphan_images(saved_image_names)
+                _discard_import_bundle_stages([bundle_stage_id])
+                raise
             body = body.rstrip() + "\n\n" + "\n\n".join(refs)
             saved_image_names.update(
                 name for ref in refs for name in _QIMG_RE.findall(ref))
@@ -7196,6 +8151,7 @@ def import_md():
         sol_img_split, sol_img_layouts = _import_solution_image_defaults(solution)
         pending_questions.append({
             "body": body, "solution": solution, "type": qtype,
+            "note": note,
             "tags": tags, "difficulty": diff, "source": batch_source,
             "number": number, "img_split": img_mode,
             "img_layouts": img_layouts,
@@ -7203,14 +8159,33 @@ def import_md():
             "sol_img_layouts": sol_img_layouts,
         })
         pending_starred.append(starred)
+    bundle_finalize = (
+        import_bundle.finalize_stage(
+            config.IMPORT_BUNDLE_STAGE_DIR, config.ASSETS_DIR, bundle_stage_id)
+        if bundle_stage_id else nullcontext({"mapping": {}, "created_names": []})
+    )
     try:
-        new_ids = filestore.create_questions_batch(
-            pending_questions, final_col, temporary=temporary_import)
+        with bundle_finalize as finalized:
+            asset_mapping = finalized.get("mapping") or {}
+            if asset_mapping:
+                for item in pending_questions:
+                    for field in ("body", "solution", "note"):
+                        item[field] = import_bundle.rewrite_final_references(
+                            item.get(field, ""), asset_mapping)
+            new_ids = filestore.create_questions_batch(
+                pending_questions, final_col, temporary=temporary_import)
+    except import_bundle.ImportBundleError as exc:
+        if saved_image_names:
+            filestore.purge_orphan_images(saved_image_names)
+        _discard_import_bundle_stages([bundle_stage_id])
+        flash(f"资源包无法导入：{exc}", "err")
+        return _after_import(0)
     except Exception:
         # 资产先落盘是为了让 Markdown 一次原子写入；若建题失败，立即清掉本次尚未
         # 被任何题引用的图片，避免校对失败制造孤儿文件。
         if saved_image_names:
             filestore.purge_orphan_images(saved_image_names)
+        _discard_import_bundle_stages([bundle_stage_id])
         raise
     for qid, starred in zip(new_ids, pending_starred):
         if starred:
@@ -7325,6 +8300,9 @@ def _read_export_params():
         show_source=request.form.get("show_source", "") in ("1", "true", "on"),
         paper_tone=paper_tone,
         wimath_logo=request.form.get("wimath_logo", "") in ("1", "true", "on"),
+        # 只记录用户明确选择的已启用 Agent 模板；空值继续走内置
+        # exam_template.tex，保证旧表单和插件调用完全兼容。
+        template_id=request.form.get("template_id", "").strip(),
         fullpage_ids=[x for x in request.form.getlist("fullpage") if x],
         header_footer={
             "header_left": request.form.get("header_left", ""),
@@ -7353,6 +8331,27 @@ def _read_export_params():
         },
         bank_subject=config.BANK_SUBJECT,
     )
+
+
+def _export_template_path(template_id: str, *, fmt: str):
+    """解析普通导出所选模板，路径只在服务端内部流转。
+
+    Word 导出使用独立的 OOXML 链路，不能接收 TeX 模板；其它格式只允许
+    已完成预览确认的模板。返回模板元数据供响应或日志使用，绝不暴露源文件路径。
+    """
+    template_id = str(template_id or "").strip()
+    if not template_id:
+        return None, None
+    if fmt == "docx":
+        raise agent_catalog.CatalogError(
+            "Word 导出不支持 LaTeX 模板，请选择 PDF、TeX 或 ZIP 格式",
+            code="template_format_mismatch", status=400)
+    try:
+        info = agent_catalog.get_template(template_id)
+        path = agent_catalog.template_source_path(template_id, require_enabled=True)
+    except agent_catalog.CatalogError:
+        raise
+    return path, info
 
 
 # 导出/预览产物的取件号 -> 磁盘路径。
@@ -7471,6 +8470,11 @@ def preview():
         return jsonify(ok=True, url=url_for("out_file", token=out_token))
 
     try:
+        template_path, _template_info = _export_template_path(
+            p.get("template_id", ""), fmt="pdf")
+    except agent_catalog.CatalogError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+    try:
         out_path = service_ports.export_document(
             questions, title=p["title"], fmt="pdf", mode=p["mode"],
             keypoints=p["keypoints"], fullpage_ids=p["fullpage_ids"],
@@ -7478,7 +8482,8 @@ def preview():
             std_opts=p["std_opts"], paper_tone=p["paper_tone"],
             wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
             entitlement_feature="preview",
-            tex_backend=request.form.get("tex_backend", "local"))
+            tex_backend=request.form.get("tex_backend", "local"),
+            **({"template_path": str(template_path)} if template_path else {}))
     except exporter.ExportError as e:
         return jsonify(ok=False, error=f"预览生成失败：{e}"), 500
 
@@ -7499,6 +8504,12 @@ def export():
     if fmt not in {"pdf", "tex", "zip", "docx"}:
         return jsonify(ok=False, error="导出格式不支持"), 400
 
+    try:
+        template_path, _template_info = _export_template_path(
+            p.get("template_id", ""), fmt=fmt)
+    except agent_catalog.CatalogError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+
     questions = _collect_questions(p["scope"], show_source=p["show_source"])
     if not questions:
         return jsonify(ok=False, error="没有可导出的题目"), 400
@@ -7510,7 +8521,8 @@ def export():
             header_footer=p["header_footer"], solution_mode=p["solution_mode"],
             std_opts=p["std_opts"], paper_tone=p["paper_tone"],
             wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
-            tex_backend=request.form.get("tex_backend", "local"))
+            tex_backend=request.form.get("tex_backend", "local"),
+            **({"template_path": str(template_path)} if template_path else {}))
     except exporter.ExportError as e:
         return jsonify(ok=False, error=f"导出失败：{e}"), 500
 
@@ -7522,6 +8534,710 @@ def export():
                    filename=name)
 
 
+# ---------------------------------------------------------------------------
+# Agent 任务服务
+# ---------------------------------------------------------------------------
+# Agent 工具不能直接调用 Flask 路由或拿到任意文件路径；下面四个回调把现有
+# 转换、校对和导出链路收敛成受控服务。所有回调都再次校验会话、工作目录和
+# 参数，即使调用方绕过模型层直接提交工具请求也不会扩大权限。
+
+_AGENT_JOB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,100}$")
+_AGENT_MAX_EXPORT_QUESTIONS = 500
+_AGENT_EXPORT_MODES = frozenset({
+    "list", "note", "lecture", "slides", "practice", "exam",
+    "exam_std", "handout",
+})
+_AGENT_SOLUTION_MODES = frozenset({"none", "inline", "separate"})
+_AGENT_HF_KEYS = frozenset({
+    "header_left", "header_center", "header_right",
+    "footer_left", "footer_center", "footer_right",
+})
+_AGENT_IMPORT_LOCKS: dict[str, threading.Lock] = {}
+_AGENT_IMPORT_LOCKS_GUARD = threading.Lock()
+
+
+def _agent_import_lock(job_id: str) -> threading.Lock:
+    with _AGENT_IMPORT_LOCKS_GUARD:
+        return _AGENT_IMPORT_LOCKS.setdefault(job_id, threading.Lock())
+
+
+def _agent_require_bank(session: dict) -> str:
+    sid = str((session or {}).get("id") or "").strip()
+    if not sid:
+        raise agent_tools.ToolError("缺少 Agent 会话")
+    if str((session or {}).get("scope") or "bank") != "bank":
+        raise agent_tools.ToolError("当前会话为仅聊天模式，不能操作题库")
+    try:
+        agent_actions.normalize_folder(
+            str((session or {}).get("workdir_id") or ""),
+            session=session, must_exist=True)
+    except agent_actions.AgentActionError as exc:
+        raise agent_tools.ToolError(str(exc)) from exc
+    return sid
+
+
+def _agent_job_for_session(job_id: object, session: dict) -> dict:
+    """读取并校验 Agent 自己创建的任务，返回稳定快照。"""
+    sid = _agent_require_bank(session)
+    jid = str(job_id or "").strip()
+    if not _AGENT_JOB_ID_RE.fullmatch(jid):
+        raise agent_tools.ToolError("识别任务编号无效")
+    with _jobs_lock:
+        row = _jobs.get(jid)
+        if row is None:
+            raise agent_tools.ToolError("识别任务不存在或已过期")
+        if str(row.get("agent_session_id") or "") != sid:
+            raise agent_tools.ToolError("识别任务不属于当前 Agent 会话")
+        if str(row.get("agent_workdir_id") or "") != str(
+                (session or {}).get("workdir_id") or ""):
+            raise agent_tools.ToolError("识别任务的工作目录已变化，请重新上传")
+        return dict(row)
+
+
+def _agent_public_preview_item(item: dict) -> dict:
+    """截断单题预览，避免把整份识别稿塞进事件和会话历史。"""
+    def _clip(value, limit=1200):
+        text = str(value or "")
+        return text[:limit] + ("\n…（内容已截断）" if len(text) > limit else "")
+
+    return {
+        "idx": item.get("idx"), "number": item.get("number"),
+        "type": item.get("type") or "", "body": _clip(item.get("body")),
+        "solution": _clip(item.get("solution")), "dup": item.get("dup"),
+        "image_count": int(item.get("image_count") or 0),
+    }
+
+
+def _agent_raw_conversion_preview(job: dict, *, include_solution: bool,
+                                  existing_fps=None) -> tuple[list[dict], list[int] | None]:
+    raw = job.get("md")
+    if not isinstance(raw, str) or not raw.strip():
+        raise agent_tools.ToolError("识别任务没有可导入的文本结果")
+    try:
+        preview, _all_cols, missing = _build_import_preview(
+            raw,
+            include_solution=include_solution,
+            existing_fps=existing_fps,
+            only_numbers=job.get("only_numbers"),
+            boundary_mode=_parse_boundary_mode(job.get("boundary_mode", "")),
+        )
+    except Exception as exc:
+        raise agent_tools.ToolError(f"识别结果预览失败：{exc}") from exc
+    return preview, missing
+
+
+def _agent_existing_fingerprints(folder: str) -> set[str]:
+    """只在 Agent 当前工作目录内计算已有题目指纹，避免扫描整个大题库。"""
+    try:
+        records = filestore.collection_records_snapshot(folder)
+    except Exception as exc:
+        raise agent_tools.ToolError(f"读取目标目录失败：{exc}") from exc
+    result = set()
+    for row in records:
+        try:
+            result.add(dedup.fingerprint(str(row.get("body") or "")))
+        except Exception:
+            continue
+    return result
+
+
+def _agent_conversion_preview(job: dict, *, include_solution: bool,
+                              existing_fps=None) -> dict:
+    preview, missing = _agent_raw_conversion_preview(
+        job, include_solution=include_solution, existing_fps=existing_fps)
+    public = [_agent_public_preview_item(item) for item in preview[:100]]
+    duplicates = [item for item in public if item.get("dup")]
+    return {
+        "total": len(preview),
+        "shown": len(public),
+        "questions": public,
+        "duplicates": duplicates,
+        "duplicate_count": len([item for item in preview if item.get("dup")]),
+        "missing_numbers": missing or [],
+    }
+
+
+def _agent_inspect_conversion(args: dict, session: dict) -> dict:
+    job = _agent_job_for_session((args or {}).get("job_id"), session)
+    status = str(job.get("status") or "error")
+    result = {
+        "job_id": str((args or {}).get("job_id") or ""),
+        "status": status,
+        "filename": Path(str(job.get("filename") or "识别任务")).name,
+        "error": str(job.get("error") or ""),
+    }
+    if status == "done":
+        include_solution = bool(job.get("include_solution", True))
+        try:
+            inspect_folder = str(session.get("workdir_id") or "")
+            existing_fps = _agent_existing_fingerprints(inspect_folder)
+        except agent_tools.ToolError:
+            existing_fps = set()
+        result["preview"] = _agent_conversion_preview(
+            job, include_solution=include_solution, existing_fps=existing_fps)
+        result["imported_ids"] = list(job.get("agent_imported_ids") or [])
+        result["imported_count"] = len(result["imported_ids"])
+    return result
+
+
+def _agent_stage_selection(args: dict, session: dict):
+    """解析上传暂存 manifest 中的题干/解析成员，返回路径和页数。"""
+    sid = _agent_require_bank(session)
+    stage_id = str((args or {}).get("stage_id") or "").strip()
+    if not stage_id:
+        raise agent_tools.ToolError("缺少上传暂存编号")
+    try:
+        manifest = agent_upload_store.get_stage(stage_id, sid)
+    except agent_upload_store.AgentUploadError as exc:
+        raise agent_tools.ToolError(str(exc)) from exc
+    if not manifest.get("can_start"):
+        raise agent_tools.ToolError("该上传暂存已经启动过转换或没有可用文件")
+    entries = {str(item.get("path")): dict(item)
+               for item in manifest.get("files") or []
+               if item.get("path")}
+    if not entries:
+        raise agent_tools.ToolError("ZIP 中没有可识别文件")
+
+    def _as_paths(value, label):
+        if value is None or value == "":
+            return []
+        values = [value] if isinstance(value, str) else value
+        if not isinstance(values, (list, tuple)):
+            raise agent_tools.ToolError(f"{label}必须是文件名列表")
+        if len(values) > 100:
+            raise agent_tools.ToolError(f"{label}数量过多")
+        result = []
+        for raw in values:
+            rel = str(raw or "").replace("\\", "/").strip()
+            if rel not in entries:
+                raise agent_tools.ToolError(f"ZIP 中不存在成员：{rel}")
+            try:
+                path = agent_upload_store.resolve_stage_file(stage_id, rel, sid)
+            except agent_upload_store.AgentUploadError as exc:
+                raise agent_tools.ToolError(str(exc)) from exc
+            if path.is_symlink() or not path.is_file():
+                raise agent_tools.ToolError(f"ZIP 成员不可读取：{rel}")
+            result.append((rel, path, entries[rel]))
+        return result
+
+    selected = _as_paths((args or {}).get("files"), "题干文件")
+    if not selected:
+        selected = _as_paths(
+            [item["path"] for item in entries.values()
+             if item.get("role") == "exam"], "题干文件")
+    if not selected:
+        selected = _as_paths(
+            [item["path"] for item in entries.values()
+             if item.get("role") != "solution"], "题干文件")
+    if not selected:
+        raise agent_tools.ToolError("没有选到题干文件")
+    if any(item[2].get("role") == "solution" for item in selected):
+        raise agent_tools.ToolError("题干文件不能选择答案/解析成员")
+
+    solution_value = (args or {}).get("solution")
+    solutions = _as_paths(solution_value, "解析文件")
+    if solution_value in (None, "") and not solutions:
+        solutions = _as_paths(
+            [item["path"] for item in entries.values()
+             if item.get("role") == "solution"], "解析文件")
+
+    def _materialize(items, label):
+        if len(items) == 1:
+            rel, source, meta = items[0]
+            return source, Path(rel).name, (1 if meta.get("kind") == "image" else 0), []
+        if not all(item[2].get("kind") == "image" for item in items):
+            raise agent_tools.ToolError(
+                f"{label}有多个文档；多个文件时请全部选择图片，或只保留一份文档")
+        config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        copied = []
+        try:
+            for rel, source, _meta in items:
+                target = config.UPLOAD_DIR / f"agent-{uuid.uuid4().hex}{Path(rel).suffix.lower()}"
+                shutil.copyfile(source, target)
+                copied.append(target)
+            merged = config.UPLOAD_DIR / f"agent-{uuid.uuid4().hex}.pdf"
+            converter.images_to_pdf(copied, merged)
+            return merged, f"{Path(items[0][0]).stem} 等 {len(items)} 张.pdf", len(items), copied
+        except Exception:
+            for path in copied:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
+
+    # 单文档也复制出暂存目录，确保任务不依赖 24 小时后清理的 stage。
+    def _copy_single(path, rel):
+        config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        target = config.UPLOAD_DIR / f"agent-{uuid.uuid4().hex}{Path(rel).suffix.lower()}"
+        shutil.copyfile(path, target)
+        return target
+
+    try:
+        exam_path, exam_name, exam_pages, exam_extra = _materialize(selected, "题干文件")
+        if len(selected) == 1:
+            exam_path = _copy_single(exam_path, selected[0][0])
+            exam_extra = []
+        solution_path = None
+        solution_name = ""
+        solution_pages = 0
+        solution_extra = []
+        if solutions:
+            solution_path, solution_name, solution_pages, solution_extra = _materialize(
+                solutions, "解析文件")
+            if len(solutions) == 1:
+                solution_path = _copy_single(solution_path, solutions[0][0])
+                solution_extra = []
+    except agent_tools.ToolError:
+        raise
+    except Exception as exc:
+        raise agent_tools.ToolError(f"准备 ZIP 文件失败：{exc}") from exc
+    return (manifest, stage_id, exam_path, exam_name, exam_pages,
+            solution_path, solution_name, solution_pages,
+            list(exam_extra) + list(solution_extra))
+
+
+def _agent_start_conversion(args: dict, session: dict) -> dict:
+    args = dict(args or {})
+    sid = _agent_require_bank(session)
+    normalization_mode = str(args.get("normalization_mode") or "").strip().lower()
+    engine_value = str(args.get("engine") or "").strip().lower()
+    ocr_value = str(args.get("ocr_backend") or "").strip().lower()
+    # 上传后的第一步只是规划。缺少这些会改变结果或费用的参数时，返回结构化
+    # 选项，供 Agent/前端继续询问用户，绝不隐式调用 LLM 或 OCR 服务。
+    if not normalization_mode or not engine_value or not ocr_value:
+        return {
+            "choice_required": True,
+            "choices": [
+                {"id": "ocr_backend", "title": "请选择识别后端", "required": True,
+                 "options": [{"id": "mineru", "label": "MinerU"},
+                              {"id": "doc2x", "label": "Doc2X"}]},
+                {"id": "engine", "title": "请选择导入方式", "required": True,
+                 "options": [{"id": "block", "label": "逐题切分（推荐）"},
+                              {"id": "whole", "label": "整篇规范化"}]},
+                {"id": "normalization_mode", "title": "请选择规范化方式", "required": True,
+                 "options": [{"id": "mechanical", "label": "机械规范化，不调用 LLM"},
+                              {"id": "llm", "label": "LLM 规范化"},
+                              {"id": "review", "label": "识别后人工审核"}]},
+            ],
+            "message": "文件已暂存。请先确定识别后端、导入方式和规范化方式，确认后才会启动任务。",
+        }
+    if normalization_mode not in {"mechanical", "llm", "review"}:
+        raise agent_tools.ToolError("规范化方式必须是 mechanical、llm 或 review")
+    if engine_value not in {"block", "whole"}:
+        raise agent_tools.ToolError("导入方式必须是 block 或 whole")
+    if ocr_value not in {"mineru", "doc2x"}:
+        raise agent_tools.ToolError("识别后端必须是 mineru 或 doc2x")
+    stage_id = str(args.get("stage_id") or "").strip()
+    (manifest, stage_id, exam_path, exam_name, exam_pages,
+     solution_path, solution_name, solution_pages, extra_paths) = _agent_stage_selection(
+        args, session)
+    cleanup_paths = [Path(exam_path), *extra_paths]
+    if solution_path:
+        cleanup_paths.append(Path(solution_path))
+    try:
+        ocr_backend = _parse_ocr_backend(str(args.get("ocr_backend") or ""))
+        engine = _parse_engine(engine_value)
+        if normalization_mode in {"mechanical", "review"}:
+            # 机械/人工审核只有逐块链路能在代码层保证不调用 LLM；整篇模式必须
+            # 改为逐块，否则会在后台隐式构造 LLM 客户端。
+            engine = converter.ENGINE_BLOCK
+        boundary_mode = _parse_boundary_mode(str(args.get("boundary_mode") or ""))
+        if boundary_mode == _BOUNDARY_MODE_WHITELIST:
+            engine = converter.ENGINE_BLOCK
+        raw_numbers = args.get("only_numbers", "")
+        if isinstance(raw_numbers, (list, tuple, set)):
+            raw_numbers = ",".join(str(item) for item in raw_numbers)
+        only_numbers = _parse_number_spec(str(raw_numbers or ""))
+        try:
+            num_template = _parse_num_template(str(args.get("num_template") or ""))
+        except blocksplit.TemplateError as exc:
+            raise agent_tools.ToolError(f"题号模板写法不对：{exc}") from exc
+        include_solution = bool(solution_path) or bool(args.get("include_solution", True))
+        provider = providers.resolve_active() if normalization_mode == "llm" else None
+        if normalization_mode == "llm" and provider is None:
+            raise agent_tools.ToolError(
+                "当前没有启用规范化 LLM，请改选机械规范化/人工审核，或先在设置中配置 LLM")
+    except agent_tools.ToolError:
+        raise
+    except Exception as exc:
+        raise agent_tools.ToolError(f"识别参数或模型配置无效：{exc}") from exc
+
+    display_name = exam_name
+    if solution_path:
+        display_name = f"{Path(exam_name).stem} + {solution_name}（解析）"
+    try:
+        history_id = _history_record_for_sources(
+            display_name, exam_path, solution_path, ocr_backend=ocr_backend)
+    except Exception as exc:
+        for path in cleanup_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise agent_tools.ToolError(f"历史记录创建失败：{exc}") from exc
+
+    job_id = uuid.uuid4().hex
+    workdir_id = str(session.get("workdir_id") or "")
+    job = {
+        "status": "pending", "md": None, "error": None,
+        "filename": display_name, "path": str(exam_path),
+        "solution_path": str(solution_path) if solution_path else None,
+        "include_solution": include_solution, "only_numbers": only_numbers,
+        "note": "", "ocr_backend": ocr_backend,
+        "block_mode": {"mechanical": _BLOCK_MODE_NO_AI,
+                        "review": _BLOCK_MODE_MANUAL,
+                        "llm": _BLOCK_MODE_ALL_AI}[normalization_mode],
+        "normalization_mode": normalization_mode,
+        "boundary_mode": boundary_mode,
+        "image_page_count": exam_pages,
+        "exam_image_page_count": exam_pages,
+        "solution_image_page_count": solution_pages,
+        "history_id": history_id,
+        "agent_session_id": sid, "agent_workdir_id": workdir_id,
+        "agent_input_dir_id": str(session.get("input_dir_id") or workdir_id),
+        "agent_stage_id": stage_id, "agent_imported_ids": [],
+        "agent_import_folder": "", "cleanup_paths": [str(p) for p in cleanup_paths],
+    }
+    try:
+        # 先原子占用 stage，再登记任务；重复点击会在这里得到 409，而不会
+        # 创建第二条可能重复扣费的 OCR 线程。
+        agent_upload_store.mark_stage_started(stage_id, sid, job_id)
+        with _jobs_lock:
+            _jobs[job_id] = job
+            _persist_job(job_id, job)
+        threading.Thread(
+            target=_convert_worker,
+            args=(job_id, exam_path, display_name, include_solution,
+                  solution_path, only_numbers, provider, engine, num_template,
+                  ocr_backend, boundary_mode, exam_pages, solution_pages,
+                  {"mechanical": _BLOCK_MODE_NO_AI,
+                   "review": _BLOCK_MODE_MANUAL,
+                   "llm": _BLOCK_MODE_ALL_AI}[normalization_mode]),
+            daemon=True,
+        ).start()
+    except Exception as exc:
+        with _jobs_lock:
+            _jobs.pop(job_id, None)
+        task_store.delete("job", job_id)
+        try:
+            history_store.move_to_trash(history_id)
+            history_store.purge(history_id)
+        except Exception:
+            pass
+        for path in cleanup_paths:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise agent_tools.ToolError(f"启动识别任务失败：{exc}") from exc
+    agent_runtime.append(sid, "system", f"已启动暂存文件识别任务：{job_id}")
+    try:
+        task_url = url_for("agent_task", job_id=job_id)
+    except RuntimeError:
+        task_url = f"/api/agent/tasks/{job_id}"
+    return {
+        "ok": True, "executed": True, "job_id": job_id,
+        "status": "pending", "filename": display_name,
+        "stage_id": stage_id, "task_url": task_url,
+        "selected_files": [item.get("path") for item in manifest.get("files", [])
+                            if item.get("role") in {"exam", "solution"}],
+    }
+
+
+def _agent_import_conversion(args: dict, session: dict) -> dict:
+    args = dict(args or {})
+    approved = bool(args.pop("_approved_execute", False))
+    job_id = str(args.get("job_id") or "").strip()
+    job = _agent_job_for_session(job_id, session)
+    status = str(job.get("status") or "")
+    if status != "done":
+        if status == "error":
+            raise agent_tools.ToolError(f"识别任务失败：{job.get('error') or '未知错误'}")
+        raise agent_tools.ToolError(f"识别任务尚未完成（当前状态：{status or '未知'}）")
+    try:
+        folder, _folder_path = agent_actions.normalize_folder(
+            args.get("folder"), session=session, must_exist=True)
+    except agent_actions.AgentActionError as exc:
+        raise agent_tools.ToolError(str(exc)) from exc
+    include_solution = bool(args.get("include_solution", job.get("include_solution", True)))
+    allow_duplicates = bool(args.get("include_duplicates", False))
+    existing_fps = _agent_existing_fingerprints(folder)
+    raw_preview, _missing_numbers = _agent_raw_conversion_preview(
+        job, include_solution=include_solution, existing_fps=existing_fps)
+    public_questions = [_agent_public_preview_item(item)
+                        for item in raw_preview[:100]]
+    duplicates_public = [item for item in public_questions if item.get("dup")]
+    preview = {
+        "total": len(raw_preview), "shown": len(public_questions),
+        "questions": public_questions, "duplicates": duplicates_public,
+        "duplicate_count": len([item for item in raw_preview if item.get("dup")]),
+        "missing_numbers": _missing_numbers or [],
+    }
+    skipped = [_agent_public_preview_item(item) for item in raw_preview
+               if item.get("dup") and not allow_duplicates]
+    selected = [item for item in raw_preview
+                if str(item.get("body") or "").strip()
+                and (allow_duplicates or not item.get("dup"))]
+    if not selected:
+        return {"ok": True, "executed": True, "job_id": job_id,
+                "imported_ids": [], "count": 0, "skipped": skipped,
+                "preview": preview, "message": "没有可新增的题目"}
+
+    try:
+        tags_value = args.get("tags", [])
+        if isinstance(tags_value, str):
+            tags_value = tags_value.replace("，", ",").split(",")
+        if not isinstance(tags_value, (list, tuple, set)):
+            tags_value = []
+        tags = []
+        for value in tags_value:
+            tag = str(value or "").strip()
+            if tag and len(tag) <= 80 and "\n" not in tag and "\r" not in tag:
+                tags.append(tag)
+        tags = list(dict.fromkeys(tags))[:50]
+    except Exception:
+        tags = []
+    source = Path(str(job.get("filename") or "识别导入")).name
+    pending_questions = []
+    for item in selected:
+        pending_questions.append({
+            "body": str(item.get("body") or ""),
+            "solution": str(item.get("solution") or "") if include_solution else "",
+            "type": str(item.get("type") or ""), "source": source,
+            "difficulty": "", "tags": tags, "number": item.get("number"),
+            "img_split": item.get("img_split"),
+            "img_layouts": item.get("img_layouts") or [],
+            "sol_img_split": item.get("sol_img_split"),
+            "sol_img_layouts": item.get("sol_img_layouts") or [],
+        })
+
+    safe_args = {
+        "job_id": job_id, "folder": folder,
+        "include_solution": include_solution,
+        "include_duplicates": allow_duplicates,
+        "tags": tags,
+    }
+    if (not approved
+            and str(session.get("mode") or "standard") != "danger"):
+        approval = agent_approval_store.create(
+            session, "import_conversion",
+            f"将识别结果导入“{folder or '题库根目录'}”（{len(selected)} 道题）",
+            safe_args)
+        return {
+            "ok": True, "pending_confirmation": True,
+            "approval": approval, "job_id": job_id,
+            "preview": preview, "skipped": skipped,
+            "count": len(selected),
+            "message": "导入计划已生成，请确认后写入题库",
+        }
+
+    with _agent_import_lock(job_id):
+        # 重新读取而不是使用回调开始时的快照，防止两个审批请求同时通过
+        # 前置检查后各自写入一遍。
+        with _jobs_lock:
+            current_snapshot = dict(_jobs.get(job_id) or {})
+        imported_ids = list(current_snapshot.get("agent_imported_ids") or [])
+        previous_folder = str(current_snapshot.get("agent_import_folder") or "")
+        if imported_ids:
+            if previous_folder != folder:
+                raise agent_tools.ToolError("这份识别结果已经导入到其他目录，不能更换落点")
+            return {"ok": True, "executed": True, "job_id": job_id,
+                    "imported_ids": imported_ids, "count": len(imported_ids),
+                    "skipped": skipped, "preview": preview,
+                    "message": "这份识别结果已经导入过，未重复创建题目"}
+        try:
+            new_ids = filestore.create_questions_batch(
+                pending_questions, folder,
+                idempotency_scope=f"agent:{session.get('id')}:{job_id}:{folder}",
+            )
+        except Exception as exc:
+            raise agent_tools.ToolError(f"导入题库失败：{exc}") from exc
+        with _jobs_lock:
+            current = _jobs.get(job_id)
+            if current is not None:
+                current["agent_imported_ids"] = list(new_ids)
+                current["agent_import_folder"] = folder
+                current["agent_imported_at"] = time.time()
+                _persist_job(job_id, current)
+    return {
+        "ok": True, "executed": True, "job_id": job_id,
+        "imported_ids": list(new_ids), "count": len(new_ids),
+        "skipped": skipped, "preview": preview,
+        "folder": folder, "message": f"已导入 {len(new_ids)} 道题",
+    }
+
+
+def _agent_export_questions(args: dict, session: dict) -> dict:
+    args = dict(args or {})
+    _agent_require_bank(session)
+    try:
+        bound_folder = str(session.get("workdir_id") or "")
+        requested_folder = args.get("folder")
+        folder, _folder_path = agent_actions.normalize_folder(
+            requested_folder if requested_folder not in (None, "") else bound_folder,
+            session=session, must_exist=True)
+        output_value = args.get("output_dir")
+        if output_value in (None, ""):
+            output_value = session.get("output_dir_id") or bound_folder
+        output_folder, output_path = agent_actions.normalize_folder(
+            output_value if output_value not in (None, "") else bound_folder,
+            session=session, must_exist=True)
+    except agent_actions.AgentActionError as exc:
+        raise agent_tools.ToolError(str(exc)) from exc
+
+    ids_value = args.get("ids")
+    query = str(args.get("query") or "").strip()
+    try:
+        if ids_value:
+            values = [ids_value] if isinstance(ids_value, str) else ids_value
+            if not isinstance(values, (list, tuple)) or len(values) > _AGENT_MAX_EXPORT_QUESTIONS:
+                raise agent_tools.ToolError(
+                    f"导出题目数量必须不超过 {_AGENT_MAX_EXPORT_QUESTIONS} 道")
+            requested_ids = [str(value).strip() for value in values if str(value).strip()]
+            rows_by_id = {str(row.get("id")): row for row in
+                          filestore.records_from_ids(requested_ids)}
+            rows = []
+            for qid in requested_ids:
+                row = rows_by_id.get(qid)
+                if row is None:
+                    raise agent_tools.ToolError(f"未找到题目：{qid}")
+                row_folder = str(row.get("folder") or "").strip("/")
+                if folder and not (row_folder == folder or row_folder.startswith(folder + "/")):
+                    raise agent_tools.ToolError("所选题目不在当前 Agent 工作目录内")
+                rows.append(row)
+        else:
+            records = filestore.collection_records_snapshot(folder)
+            rows = filestore.list_questions(
+                records=records, search=query, qtype=str(args.get("type") or ""),
+                difficulty=str(args.get("difficulty") or ""), sort="custom")
+            if len(rows) > _AGENT_MAX_EXPORT_QUESTIONS:
+                rows = rows[:_AGENT_MAX_EXPORT_QUESTIONS]
+    except agent_tools.ToolError:
+        raise
+    except (SearchQueryError, ValueError) as exc:
+        raise agent_tools.ToolError(f"筛选题目失败：{exc}") from exc
+    if not rows:
+        raise agent_tools.ToolError("没有符合条件的题目可导出")
+
+    fmt = str(args.get("format", args.get("fmt", "pdf")) or "pdf").lower()
+    if fmt not in {"pdf", "tex", "zip"}:
+        raise agent_tools.ToolError("导出格式只支持 pdf、tex 或 zip")
+    mode = str(args.get("mode") or "list")
+    if mode not in _AGENT_EXPORT_MODES:
+        raise agent_tools.ToolError("导出模式无效")
+    solution_mode = str(args.get("solution_mode") or "none")
+    if solution_mode not in _AGENT_SOLUTION_MODES:
+        raise agent_tools.ToolError("解析输出模式无效")
+    title = str(args.get("title") or "试卷").strip()[:180] or "试卷"
+    keypoints = str(args.get("keypoints") or "")[:10000]
+    show_source = bool(args.get("show_source", False))
+    questions = [_question_export_payload(row) for row in rows]
+    if show_source:
+        for question, row in zip(questions, rows):
+            question["body"] = _source_prefixed_body(
+                question["body"], row.get("source", ""))
+
+    header_footer = {}
+    raw_hf = args.get("header_footer")
+    if isinstance(raw_hf, dict):
+        for key in _AGENT_HF_KEYS:
+            value = raw_hf.get(key)
+            if value is not None:
+                header_footer[key] = str(value)[:300]
+    std_opts = {}
+    raw_std = args.get("std_opts")
+    if isinstance(raw_std, dict):
+        for key in ("subject", "secret_notice", "exam_notes"):
+            if raw_std.get(key) is not None:
+                std_opts[key] = str(raw_std[key])[:1000]
+        if "info_bar" in raw_std:
+            std_opts["info_bar"] = bool(raw_std["info_bar"])
+        if isinstance(raw_std.get("section_points"), dict):
+            std_opts["section_points"] = {
+                str(k): str(v)[:30] for k, v in raw_std["section_points"].items()
+                if str(k) in {"single", "multi", "blank", "solve"}
+            }
+
+    template_id = str(args.get("template_id") or "").strip()
+    template_path = None
+    template_info = None
+    warning = ""
+    if template_id:
+        try:
+            template_info = agent_catalog.get_template(template_id)
+            template_path = agent_catalog.template_source_path(
+                template_id, require_enabled=True)
+        except agent_catalog.CatalogError as exc:
+            raise agent_tools.ToolError(str(exc)) from exc
+    else:
+        try:
+            selected_template = agent_catalog.selected_template()
+            if selected_template:
+                template_id = str(selected_template.get("id") or "")
+                template_info = selected_template
+                template_path = agent_catalog.template_source_path(
+                    template_id, require_enabled=True)
+        except agent_catalog.CatalogError:
+            template_id, template_path = "", None
+    try:
+        out_path = service_ports.export_document(
+            questions, title=title, fmt=fmt, mode=mode,
+            keypoints=keypoints,
+            fullpage_ids=[str(item) for item in (args.get("fullpage_ids") or [])][:500],
+            header_footer=header_footer, solution_mode=solution_mode,
+            std_opts=std_opts, paper_tone=("cream" if args.get("paper_tone") == "cream" else "white"),
+            wimath_logo=bool(args.get("wimath_logo", False)),
+            bank_subject=config.BANK_SUBJECT, tex_backend="local",
+            **({"template_path": str(template_path)} if template_path else {}),
+        )
+    except (exporter.ExportError, OSError) as exc:
+        raise agent_tools.ToolError(f"导出失败：{exc}") from exc
+
+    # exporter 的中间目录位于 OUTPUT_DIR；Agent 最终产物复制到当前工作目录，
+    # 文件名冲突时递增后缀，绝不静默覆盖用户已有文件。
+    suffix = Path(out_path).suffix.lower() or ("." + fmt)
+    stem = filestore.safe_folder_name(title) or "试卷"
+    destination = output_path / f"{stem}{suffix}"
+    counter = 2
+    while destination.exists() or destination.is_symlink():
+        destination = output_path / f"{stem}_{counter}{suffix}"
+        counter += 1
+    try:
+        shutil.copy2(out_path, destination)
+    except OSError as exc:
+        raise agent_tools.ToolError(f"导出文件写入工作目录失败：{exc}") from exc
+    token = _register_out_file(destination, destination.name)
+    try:
+        url = url_for("out_file", token=token, dl=1)
+    except RuntimeError:
+        url = f"/outfile/{token}?dl=1"
+    relative_output = (f"{output_folder}/{destination.name}"
+                       if output_folder else destination.name)
+    if template_info and template_info.get("format") == "pdf":
+        warning = "PDF 样例模板已使用生成的 TeX 草稿，复杂视觉效果仍需人工调整"
+    return {
+        "ok": True, "executed": True, "format": fmt,
+        "count": len(rows), "filename": destination.name,
+        "output_path": relative_output, "url": url,
+        "template_id": template_id or None,
+        "warning": warning,
+    }
+
+
+# 这些服务必须在 app 完成所有函数定义后注册，避免 agent_tools 在导入阶段依赖
+# Flask 全局任务表；重复注册只是模块重载时覆盖同名回调。
+agent_tools.register_service("inspect_conversion", _agent_inspect_conversion)
+agent_tools.register_service("start_conversion", _agent_start_conversion)
+agent_tools.register_service("import_conversion", _agent_import_conversion)
+agent_tools.register_service("export_questions", _agent_export_questions)
+
+
+_stale_bundle_assets = import_bundle.cleanup_stale_stages(
+    config.IMPORT_BUNDLE_STAGE_DIR, config.ASSETS_DIR,
+    max_age_seconds=24 * 60 * 60)
+if _stale_bundle_assets:
+    filestore.purge_orphan_images(_stale_bundle_assets)
 cleanup_output.run_cleanup()
 restore_persisted_tasks()
 

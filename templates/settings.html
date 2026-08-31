@@ -15,6 +15,7 @@
     <button type="button" data-settings-tab="local">{{ icon('cpu') }}<span>本地</span></button>
     <button type="button" data-settings-tab="ocr">{{ icon('scan') }}<span>OCR</span></button>
     <button type="button" data-settings-tab="export">{{ icon('file-output') }}<span>导出</span></button>
+    <button type="button" data-settings-tab="templates">{{ icon('file') }}<span>模板</span></button>
     <button type="button" data-settings-tab="models">{{ icon('bot') }}<span>模型</span></button>
     <button type="button" data-settings-tab="appearance">{{ icon('palette') }}<span>外观</span></button>
   </nav>
@@ -62,7 +63,7 @@
             <span class="token-label">{{ t['label'] or '未命名' }}</span>
             <span class="muted">（已设置{% if t['added'] %}，{{ t['added'][:10] }}{% endif %}）</span>
             <form method="post" action="{{ url_for('settings_mineru_delete') }}"
-                  style="display:inline" onsubmit="return confirm('删除这份 Token？')">
+                  class="settings-inline-form" onsubmit="return confirm('删除这份 Token？')">
               <input type="hidden" name="token_id" value="{{ t['id'] }}">
               <button type="submit" class="btn btn-sm btn-danger-text">删除</button>
             </form>
@@ -99,7 +100,7 @@
             {% if key['legacy'] %}
               <span class="muted">升级前配置</span>
             {% else %}
-            <form method="post" action="{{ url_for('settings_doc2x_delete') }}" style="display:inline" onsubmit="return confirm('删除这份 Doc2X Key？')">
+            <form method="post" action="{{ url_for('settings_doc2x_delete') }}" class="settings-inline-form" onsubmit="return confirm('删除这份 Doc2X Key？')">
               <input type="hidden" name="key_id" value="{{ key['id'] }}">
               <button type="submit" class="btn btn-sm btn-danger-text">删除</button>
             </form>
@@ -138,6 +139,37 @@
   <div class="settings-section">
     <h2>Overleaf</h2>
     <p class="settings-note">导出 tex.zip 后上传到 Overleaf 编译。</p>
+  </div>
+  </section>
+
+  <section class="settings-category" data-settings-panel="templates" hidden>
+  <div class="settings-section template-manager" id="template-manager">
+    <div class="settings-section-title">
+      <div>
+        <h2>导出模板</h2>
+        <p class="settings-note">可执行模板必须通过固定样例真实编译后才能启用。</p>
+      </div>
+    </div>
+    <form id="template-upload-form" class="template-upload-form" enctype="multipart/form-data">
+      <div class="field template-upload-file">
+        <label for="template-upload-file">模板文件</label>
+        <input id="template-upload-file" name="file" class="input" type="file"
+               accept=".tex,.tex.zip,.pdf,application/pdf" required>
+      </div>
+      <div class="field">
+        <label for="template-upload-name">名称</label>
+        <input id="template-upload-name" name="name" class="input" type="text"
+               maxlength="120" placeholder="默认使用文件名">
+      </div>
+      <div class="field template-upload-version">
+        <label for="template-upload-version">版本</label>
+        <input id="template-upload-version" name="version" class="input" type="text"
+               maxlength="40" value="1.0.0" required>
+      </div>
+      <button type="submit" class="btn btn-primary">上传</button>
+    </form>
+    <p id="template-manager-status" class="template-manager-status" role="status" aria-live="polite"></p>
+    <div id="template-manager-list" class="template-manager-list" aria-live="polite"></div>
   </div>
   </section>
 
@@ -184,7 +216,7 @@
                   class="btn {{ 'btn-primary' if p['active_redraw'] else '' }}"
                   aria-pressed="{{ 'true' if p['active_redraw'] else 'false' }}"
                   {% if p['active_redraw'] %}disabled{% endif %}>
-            {% if p['active_redraw'] %}✓ {% endif %}{{ p['model'] }}
+            {% if p['active_redraw'] %}{{ icon('check', 'status-inline-icon') }}{% endif %}{{ p['model'] }}
           </button>
         </form>
         {% endfor %}
@@ -207,7 +239,7 @@
           {% for purpose in ['md', 'redraw'] %}
           {% set on = p['active_redraw'] if purpose == 'redraw' else p['active_md'] %}
           <td>
-            <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline">
+            <form method="post" action="{{ url_for('settings_llm') }}" class="settings-inline-form">
               <input type="hidden" name="llm_id" value="{{ p['id'] }}">
               <input type="hidden" name="llm_purpose" value="{{ purpose }}">
               <input type="hidden" name="llm_action" value="{{ 'deactivate' if on else 'activate' }}">
@@ -218,8 +250,8 @@
           </td>
           {% endfor %}
           <td>
-            <details style="display:inline-block">
-              <summary class="btn btn-sm" style="list-style:none">编辑</summary>
+            <details class="settings-edit-details">
+              <summary class="btn btn-sm settings-edit-summary">编辑</summary>
               <form method="post" action="{{ url_for('settings_llm') }}" class="model-edit-form">
                 <input type="hidden" name="llm_action" value="edit">
                 <input type="hidden" name="llm_id" value="{{ p['id'] }}">
@@ -233,10 +265,10 @@
                          {% if p['supports_vision'] %}checked{% endif %}>
                   支持图片输入
                 </label>
-                <button type="submit" class="btn btn-sm btn-primary" style="margin-top:6px">保存</button>
+                <button type="submit" class="btn btn-sm btn-primary">保存</button>
               </form>
             </details>
-            <form method="post" action="{{ url_for('settings_llm') }}" style="display:inline"
+            <form method="post" action="{{ url_for('settings_llm') }}" class="settings-inline-form"
                   onsubmit="return confirm('删除「{{ p['name'] }}」？删掉后会回落到默认 DeepSeek。')">
               <input type="hidden" name="llm_action" value="remove">
               <input type="hidden" name="llm_id" value="{{ p['id'] }}">
@@ -321,43 +353,56 @@
   <div class="settings-section">
     <h2>外观</h2>
     <form method="post" action="{{ url_for('settings_theme') }}" enctype="multipart/form-data" id="theme-form">
-      <div class="field">
-        <label>模式</label>
+      <input type="hidden" name="theme_color_custom" id="theme-color-custom"
+             value="{{ 1 if theme_color_custom else 0 }}">
+      <div class="field settings-row">
+        <div class="settings-row-copy">
+          <label>模式</label>
+          <small>选择工作区的基础明暗色</small>
+        </div>
         <div class="theme-mode-pick">
           <label><input type="radio" name="theme_mode" value="light" {% if theme_mode != 'dark' %}checked{% endif %}> 浅色</label>
           <label><input type="radio" name="theme_mode" value="dark" {% if theme_mode == 'dark' %}checked{% endif %}> 深色</label>
         </div>
       </div>
 
-      <div class="field">
-        <label>主题色</label>
+      <div class="field settings-row">
+        <div class="settings-row-copy">
+          <label>主题色</label>
+          <small>仅用于按钮、链接和焦点强调</small>
+        </div>
         <div class="color-swatches" id="color-swatches">
           {% for c in swatches %}
-            <button type="button" class="swatch {% if theme_color|lower == c %}active{% endif %}"
-                    data-color="{{ c }}" style="background:{{ c }}" title="{{ c }}"></button>
+            <button type="button" class="swatch swatch-{{ loop.index }} {% if theme_color|lower == c %}active{% endif %}"
+                    data-color="{{ c }}" title="{{ c }}" aria-label="选择主题色 {{ c }}"><span aria-hidden="true"></span></button>
           {% endfor %}
           <input type="color" name="theme_color" id="theme-color-input" value="{{ theme_color }}"
                  title="自定义取色">
         </div>
       </div>
 
-      <div class="field">
-        <label>壁纸</label>
+      <div class="field settings-row settings-row-wallpaper">
+        <div class="settings-row-copy">
+          <label>壁纸</label>
+          <small>保留壁纸，但自动增加遮罩确保内容可读</small>
+        </div>
+        <div class="settings-row-control">
         {% if wallpaper %}
-        <div style="margin-bottom:8px">
+        <div class="theme-wallpaper-current">
           {% if wallpaper_is_video %}
           <video src="{{ url_for('wallpaper_serve', filename=wallpaper) }}" autoplay muted loop playsinline
-                 style="max-width:200px;border-radius:var(--radius-sm);border:1px solid var(--border)"></video>
+                 class="theme-wallpaper-preview"></video>
           {% else %}
           <img src="{{ url_for('wallpaper_serve', filename=wallpaper) }}" alt="当前壁纸"
-               style="max-width:200px;border-radius:var(--radius-sm);border:1px solid var(--border)">
+               class="theme-wallpaper-preview">
           {% endif %}
-          <label style="display:block;margin-top:6px;font-size:13px">
+          <label class="theme-wallpaper-remove">
             <input type="checkbox" name="remove_wallpaper" value="1"> 移除当前壁纸
           </label>
         </div>
         {% endif %}
         <input type="file" name="wallpaper" accept="image/*,video/*" class="input">
+        </div>
       </div>
 
       <button type="submit" class="btn btn-primary">保存外观</button>
@@ -373,5 +418,6 @@
 {% block scripts %}
 <script src="{{ static_v('js/settings-theme.js') }}" defer></script>
 <script src="{{ static_v('js/settings-page.js') }}" defer></script>
+<script src="{{ static_v('js/template-manager.js') }}" defer></script>
 <script src="{{ static_v('js/update-controls.js') }}" defer></script>
 {% endblock %}

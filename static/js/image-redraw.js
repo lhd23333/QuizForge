@@ -116,7 +116,13 @@
     var btn = bar.querySelector('.img-redraw-btn');
     if (!btn) return;
     btn.classList.toggle('busy', !!busy);
-    btn.textContent = busy ? (text || '重绘中…') : '✎ AI 重绘';
+    // 保留统一图标入口；状态文本走 text node，避免把服务端返回内容当 HTML 插入。
+    btn.replaceChildren();
+    if (!busy && window.QFIcon) {
+      var markup = window.QFIcon('edit');
+      if (markup) btn.insertAdjacentHTML('beforeend', markup);
+    }
+    btn.appendChild(document.createTextNode(busy ? (text || '重绘中…') : 'AI 重绘'));
   }
 
   function applyBodyHtml(bar, html) {

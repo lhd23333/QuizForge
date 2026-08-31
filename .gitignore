@@ -21,6 +21,10 @@ build/
 dist/
 /$out/
 /_pre_sync_backup/
+/tmp/
+/.tmp-*.log
+/qf-qa-*.log
+/agent-*.png
 
 # 任意 .env（真实密钥），只保留 .env.example
 .env

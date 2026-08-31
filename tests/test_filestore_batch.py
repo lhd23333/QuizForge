@@ -823,14 +823,14 @@ class FilestoreBatchCreateTests(unittest.TestCase):
         exam = tree[0]
         years = {row["name"]: row for row in exam["children"]}
         self.assertTrue(exam["children_loaded"])
-        self.assertTrue(years["2026"]["children_loaded"])
-        self.assertEqual([row["name"] for row in years["2026"]["children"]],
-                         ["全国卷"])
+        self.assertFalse(years["2026"]["children_loaded"])
+        self.assertEqual(years["2026"]["children"], [])
+        self.assertTrue(years["2026"]["has_children"])
         self.assertFalse(years["2025"]["children_loaded"])
         self.assertEqual(years["2025"]["children"], [])
         self.assertTrue(years["2025"]["has_children"])
 
-    def test_navigation_tree_preloads_one_visible_hierarchy_level(self):
+    def test_navigation_tree_keeps_unrelated_roots_collapsed(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(config, "BANK_DIR", Path(td)):
             (Path(td) / "高考卷" / "2026" / "全国卷").mkdir(parents=True)
@@ -840,10 +840,9 @@ class FilestoreBatchCreateTests(unittest.TestCase):
 
         self.assertEqual([row["name"] for row in tree], ["练习册", "高考卷"])
         for row in tree:
-            self.assertTrue(row["children_loaded"])
-            self.assertEqual(len(row["children"]), 1)
+            self.assertFalse(row["children_loaded"])
+            self.assertEqual(row["children"], [])
             self.assertTrue(row["has_children"])
-            self.assertFalse(row["children"][0]["children_loaded"])
 
     def test_loaded_question_updates_without_global_rescan(self):
         """题卡已经出现在页面后，单题按钮只能重读该题文件。"""

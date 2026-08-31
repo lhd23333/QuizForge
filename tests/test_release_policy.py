@@ -91,6 +91,19 @@ class ReleasePolicyTests(unittest.TestCase):
         )
         self.assertIn('"history_store.py"', script)
 
+    def test_release_verification_checks_expected_tag(self):
+        script = (ROOT / "tools" / "verify_release.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('[string]$ExpectedTag = ""', script)
+        self.assertIn("desktop_product.PRODUCT_VERSION", script)
+        self.assertIn("Release tag $ExpectedTag does not match", script)
+
+        workflow = (
+            ROOT / ".github" / "workflows" / "windows-release-candidate.yml"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(workflow.count("-ExpectedTag"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

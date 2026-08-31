@@ -1,6 +1,7 @@
+{% from "_icons.html" import icon %}
 <article class="card inline-question-draft" data-inline-draft="1" draggable="false">
   <div class="card-head inline-question-draft-head">
-    <span class="new-question-mark" aria-hidden="true">＋</span>
+    <span class="new-question-mark" aria-hidden="true">{{ icon('plus') }}</span>
     <strong>新题目</strong>
     <span class="muted">将添加到：{{ collection_name }}</span>
   </div>

@@ -34,7 +34,7 @@ Windows 代码签名证书是包含发布者身份和私钥控制证明的 Authe
 
 SignPath 路径使用 `.github/workflows/windows-release-candidate.yml` 证明公开源码到未签名候选的构建来源。该工作流只有 `contents: read` 权限，不读取仓库 Secret，不创建 tag 或 Release；Pandoc 从固定官方地址下载并逐文件校验 SHA-256。SignPath 审核通过前，它上传的 14 天候选只能用于构建验证，不得公开分发。审核通过后再按 SignPath 分配的组织、项目和 Artifact Configuration 接入官方签名步骤，不能预先虚构配置标识。
 
-正式版本使用三段式版本号，例如 `0.18.0`，不带 `beta` 后缀。版本选择遵循根级 `docs/VERSIONING.md`：新增用户能力提升 MINOR，只有修复与文案调整才提升 PATCH。
+正式版本使用三段式版本号，例如 `2.0.0`，不带 `beta` 后缀。版本选择遵循根级 `docs/VERSIONING.md`：新增用户能力提升 MINOR，只有修复与文案调整才提升 PATCH。
 
 ## 发布步骤
 
@@ -53,8 +53,10 @@ git log --oneline --decorate -10
 ### 2. 完整验证源码
 
 ```powershell
+$version = '2.0.0'
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File tools\verify_release.ps1 -SkipBundleScan
+  -File tools\verify_release.ps1 -SkipBundleScan `
+  -ExpectedTag "v$version"
 ```
 
 随后执行日常目录版覆盖，核对真实安装目录能启动，并确认题库登记、API 配置、界面设置、任务状态和历史兼容文件未变化：
@@ -72,7 +74,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 ```powershell
 $env:QUIZFORGE_SIGNING_CERT_THUMBPRINT = '<40 位证书指纹>'
-$version = '0.18.0'
+$version = '2.0.0'
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File build_installer.ps1 `
   -Version $version `
@@ -91,7 +93,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File tools\verify_release.ps1
+  -File tools\verify_release.ps1 `
+  -ExpectedTag "v$version"
 ```
 
 再确认安装包签名与摘要：
@@ -137,8 +140,8 @@ git push origin "v$version"
 
 ```json
 {
-  "latest_version": "0.18.0",
-  "download_url": "https://github.com/lhd23333/QuizForge/releases/download/v0.18.0/QuizForge-0.18.0-Setup.exe",
+  "latest_version": "2.0.0",
+  "download_url": "https://github.com/lhd23333/QuizForge/releases/download/v2.0.0/QuizForge-2.0.0-Setup.exe",
   "sha256": "<64 位 SHA-256>",
   "signer_thumbprint": "<40 位证书指纹>",
   "notes": "<简短更新说明>",

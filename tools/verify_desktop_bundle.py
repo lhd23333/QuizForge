@@ -20,6 +20,13 @@ FORBIDDEN_NAMES = {
     "service_ports.json",
     "conversion_tasks.json",
 }
+OBSOLETE_RELEASE_PATHS = (
+    "licenses/preview-license.txt",
+    "licenses/THIRD_PARTY_NOTICES-preview.md",
+    "_internal/assets/cloud_entitlement_public_key.pem",
+    "_internal/assets/license_public_key.pem",
+    "_internal/static/js/activation.js",
+)
 PRIVATE_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
     b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
@@ -31,6 +38,39 @@ REQUIRED_HANDOUT_RESOURCES = (
     "static/js/handout-editor.bundle.js",
     "static/js/katex/katex.min.css",
 )
+REQUIRED_BRAND_RESOURCES = (
+    "assets/brand/quizforge-app-icon.svg",
+    "assets/brand/quizforge-app-icon-1024.png",
+    "assets/brand/quizforge-app-icon.ico",
+    "assets/brand/wimath-mark-color.svg",
+    "assets/brand/wimath-mark.svg",
+    "assets/brand/quizforge-by-wimath.svg",
+    "assets/brand/wimath-mark-small-16.svg",
+    "static/brand/quizforge-app-icon.svg",
+    "static/brand/quizforge-app-icon.ico",
+    "static/brand/wimath-mark-color.svg",
+    "static/brand/wimath-mark.svg",
+    "static/brand/quizforge-by-wimath.svg",
+    "static/brand/wimath-mark-small-16.svg",
+)
+REQUIRED_PROMPT_IMPORT_RESOURCES = (
+    "prompts/questions_to_quizforge.md",
+    "prompts/template_to_quizforge_tex.md",
+    "templates/prompts.html",
+    "static/js/prompts.js",
+    "templates/import.html",
+    "templates/_import_preview.html",
+    "static/js/import-upload.js",
+    "static/js/import-preview-images.js",
+)
+REQUIRED_AGENT_TEMPLATE_UI_RESOURCES = (
+    "templates/base.html",
+    "templates/settings.html",
+    "static/js/agent.js",
+    "static/js/agent-markdown.bundle.js",
+    "static/js/custom-select.js",
+    "static/js/template-manager.js",
+)
 
 
 def scan(dist: Path, project_root: Path) -> list[str]:
@@ -40,9 +80,21 @@ def scan(dist: Path, project_root: Path) -> list[str]:
         return problems
 
     resource_root = dist / "_internal" if (dist / "_internal").is_dir() else dist
+    for relative in OBSOLETE_RELEASE_PATHS:
+        if dist.joinpath(*relative.split("/")).exists():
+            problems.append(f"包含废弃程序文件：{relative}")
     for relative in REQUIRED_HANDOUT_RESOURCES:
         if not (resource_root / relative).is_file():
             problems.append(f"缺少讲义工作台资源：{relative}")
+    for relative in REQUIRED_BRAND_RESOURCES:
+        if not (resource_root / relative).is_file():
+            problems.append(f"缺少品牌资源：{relative}")
+    for relative in REQUIRED_PROMPT_IMPORT_RESOURCES:
+        if not (resource_root / relative).is_file():
+            problems.append(f"缺少提示词或带图导入资源：{relative}")
+    for relative in REQUIRED_AGENT_TEMPLATE_UI_RESOURCES:
+        if not (resource_root / relative).is_file():
+            problems.append(f"缺少 Agent 或模板界面资源：{relative}")
 
     # 只拦截发行目录根部可能泄露的业务源码。第三方依赖内部也可能存在
     # app.py 等同名文件，按文件名全局匹配会误报 pywebview 之类的依赖。

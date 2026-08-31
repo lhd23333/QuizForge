@@ -1,61 +1,149 @@
-"""生成可重复构建的 QuizForge Windows 图标。"""
+"""生成并校验可重复构建的 QuizForge Windows 图标。
 
+图标源文件登记在 ``assets/brand``。历史构建接口仍然输出
+``assets/quizforge.png`` 与 ``assets/quizforge.ico``，但不再运行时重绘渐变，
+避免源码构建、桌面包和安装器之间出现不同图标。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
-SIZE = 1024
+BRAND_ASSETS = ASSETS / "brand"
+STATIC_BRAND = ROOT / "static" / "brand"
+
+SOURCE_SVG = BRAND_ASSETS / "quizforge-app-icon.svg"
+SOURCE_PNG = BRAND_ASSETS / "quizforge-app-icon-1024.png"
+SOURCE_ICO = BRAND_ASSETS / "quizforge-app-icon.ico"
+SOURCE_WIMATH_MARK = BRAND_ASSETS / "wimath-mark-color.svg"
+SOURCE_WIMATH_MARK_ALIAS = BRAND_ASSETS / "wimath-mark.svg"
+SOURCE_QUIZFORGE_BY_WIMATH = BRAND_ASSETS / "quizforge-by-wimath.svg"
+SOURCE_WIMATH_SMALL_MARK = BRAND_ASSETS / "wimath-mark-small-16.svg"
+
+RUNTIME_SVG = STATIC_BRAND / "quizforge-app-icon.svg"
+RUNTIME_ICO = STATIC_BRAND / "quizforge-app-icon.ico"
+RUNTIME_WIMATH_MARK = STATIC_BRAND / "wimath-mark-color.svg"
+RUNTIME_WIMATH_MARK_ALIAS = STATIC_BRAND / "wimath-mark.svg"
+RUNTIME_QUIZFORGE_BY_WIMATH = STATIC_BRAND / "quizforge-by-wimath.svg"
+RUNTIME_WIMATH_SMALL_MARK = STATIC_BRAND / "wimath-mark-small-16.svg"
+LEGACY_PNG = ASSETS / "quizforge.png"
+LEGACY_ICO = ASSETS / "quizforge.ico"
+
+ICON_SIZES = frozenset({
+    (16, 16), (24, 24), (32, 32), (48, 48),
+    (64, 64), (128, 128), (256, 256),
+})
+
+# 这些哈希对应已经审核过的 WIMath 1.1 交付资产。若要更新品牌文件，
+# 必须先获得授权、更新资产登记和哈希，再提交代码，不能静默替换二进制。
+EXPECTED_SHA256 = {
+    SOURCE_SVG: "8669569eca82aa4c117dc164f548728a140857542dd235c006394f60354491cd",
+    SOURCE_PNG: "e27855c602196f235e17340bd6164b8497a8dd8834e20862db86e9b97d8c73b8",
+    SOURCE_ICO: "87cea6cc26d3eb5f53706c6e50baf270df454a4cea944d88269f531daf58b414",
+    SOURCE_WIMATH_MARK: "8d37860ff6196fbe6a5a79b1c7008b9560aa057fb7a192572ed3379f1c4e64e4",
+    SOURCE_WIMATH_MARK_ALIAS: "8d37860ff6196fbe6a5a79b1c7008b9560aa057fb7a192572ed3379f1c4e64e4",
+    SOURCE_QUIZFORGE_BY_WIMATH: "6a916c0479b72bc479f2421c92503d3f5a7d58cf7ba9265f4a015af3dec7067b",
+    SOURCE_WIMATH_SMALL_MARK: "d01c854904ff06115cb5e85e1b4b9e036450803983b6f214b3075a9976819105",
+}
 
 
-def _gradient() -> Image.Image:
-    image = Image.new("RGBA", (SIZE, SIZE))
-    pixels = image.load()
-    top = (79, 70, 229)
-    bottom = (2, 132, 199)
-    for y in range(SIZE):
-        ratio = y / (SIZE - 1)
-        color = tuple(round(a + (b - a) * ratio) for a, b in zip(top, bottom)) + (255,)
-        for x in range(SIZE):
-            pixels[x, y] = color
-    return image
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_svg(path: Path, expected_view_box: str) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(f"无法读取品牌 SVG：{path}") from exc
+    if not text.lstrip().startswith("<svg"):
+        raise RuntimeError(f"品牌文件不是 SVG：{path}")
+    if f'viewBox="{expected_view_box}"' not in text:
+        raise RuntimeError(f"品牌 SVG viewBox 不符合约定：{path}")
+    if "<image" in text.lower() or "href=\"http" in text.lower():
+        raise RuntimeError(f"品牌 SVG 不得嵌入位图或远程资源：{path}")
+
+
+def _validate_sources() -> None:
+    for path, expected in EXPECTED_SHA256.items():
+        if not path.is_file():
+            raise RuntimeError(f"缺少受控品牌资产：{path}")
+        actual = _sha256(path)
+        if actual != expected:
+            raise RuntimeError(
+                f"受控品牌资产哈希不匹配：{path}（期望 {expected}，实际 {actual}）"
+            )
+
+    _validate_svg(SOURCE_SVG, "0 0 256 256")
+    _validate_svg(SOURCE_WIMATH_MARK, "0 0 256 256")
+    _validate_svg(SOURCE_WIMATH_MARK_ALIAS, "0 0 256 256")
+    _validate_svg(SOURCE_QUIZFORGE_BY_WIMATH, "0 0 1000 260")
+    _validate_svg(SOURCE_WIMATH_SMALL_MARK, "0 0 16 16")
+
+    try:
+        with Image.open(SOURCE_PNG) as image:
+            if image.format != "PNG" or image.size != (1024, 1024):
+                raise RuntimeError(f"产品图标 PNG 必须为 1024x1024：{SOURCE_PNG}")
+            if image.mode not in ("RGBA", "RGB"):
+                raise RuntimeError(f"产品图标 PNG 色彩模式不受支持：{image.mode}")
+            image.load()
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"无法读取产品图标 PNG：{SOURCE_PNG}") from exc
+
+    try:
+        with Image.open(SOURCE_ICO) as image:
+            sizes = set(image.info.get("sizes", ()))
+            if image.format != "ICO" or not ICON_SIZES.issubset(sizes):
+                raise RuntimeError(
+                    f"产品图标 ICO 必须包含尺寸 {sorted(ICON_SIZES)}：{SOURCE_ICO}"
+                )
+            image.seek(0)
+            image.load()
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"无法读取产品图标 ICO：{SOURCE_ICO}") from exc
+
+
+def _copy_exact(source: Path, target: Path) -> Path:
+    """以临时文件写入，避免构建中断时留下半个品牌文件。"""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+    return target
 
 
 def build() -> tuple[Path, Path]:
-    ASSETS.mkdir(parents=True, exist_ok=True)
-    image = _gradient()
-    draw = ImageDraw.Draw(image)
-
-    # 柔和内框让小尺寸图标仍有清楚轮廓。
-    draw.rounded_rectangle((38, 38, 986, 986), radius=220,
-                           outline=(255, 255, 255, 48), width=22)
-
-    # 打开的题册：两页分别略向外张开，中缝和页线在 16px 下仍可辨认。
-    left = [(182, 346), (492, 430), (492, 786), (183, 690)]
-    right = [(532, 430), (842, 346), (841, 690), (532, 786)]
-    draw.polygon(left, fill=(255, 255, 255, 245))
-    draw.polygon(right, fill=(240, 249, 255, 245))
-    draw.line((512, 426, 512, 805), fill=(183, 220, 244, 255), width=28)
-    for y, inset in ((492, 0), (562, 12), (632, 24)):
-        draw.line((244 + inset, y, 442, y + 54), fill=(74, 116, 180, 175), width=18)
-        draw.line((582, y + 54, 780 - inset, y), fill=(74, 116, 180, 175), width=18)
-
-    # 右上角的四向火花对应 Forge，也避免图标看起来只是普通阅读器。
-    spark = [(790, 156), (827, 242), (916, 278), (827, 314),
-             (790, 402), (753, 314), (665, 278), (753, 242)]
-    draw.polygon(spark, fill=(251, 191, 36, 255))
-    draw.ellipse((764, 252, 816, 304), fill=(255, 248, 220, 255))
-
-    png_path = ASSETS / "quizforge.png"
-    ico_path = ASSETS / "quizforge.ico"
-    image.save(png_path, optimize=True)
-    image.save(
-        ico_path, format="ICO",
-        sizes=[(16, 16), (24, 24), (32, 32), (48, 48),
-               (64, 64), (128, 128), (256, 256)],
-    )
+    _validate_sources()
+    png_path = _copy_exact(SOURCE_PNG, LEGACY_PNG)
+    ico_path = _copy_exact(SOURCE_ICO, LEGACY_ICO)
+    _copy_exact(SOURCE_SVG, RUNTIME_SVG)
+    _copy_exact(SOURCE_ICO, RUNTIME_ICO)
+    _copy_exact(SOURCE_WIMATH_MARK, RUNTIME_WIMATH_MARK)
+    _copy_exact(SOURCE_WIMATH_MARK_ALIAS, RUNTIME_WIMATH_MARK_ALIAS)
+    _copy_exact(SOURCE_QUIZFORGE_BY_WIMATH, RUNTIME_QUIZFORGE_BY_WIMATH)
+    _copy_exact(SOURCE_WIMATH_SMALL_MARK, RUNTIME_WIMATH_SMALL_MARK)
     return png_path, ico_path
 
 

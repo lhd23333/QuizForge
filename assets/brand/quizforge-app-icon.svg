@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-labelledby="title desc">
+  <title id="title">QuizForge 联动图标概念</title>
+  <desc id="desc">沿用 WIMath 深蓝容器和浅蓝强调，以打开的题库页面作为产品专属图形。</desc>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#081A33"/>
+  <path d="M58 65 H120 C135 65 145 74 145 89 V192 C137 184 128 180 116 180 H58 Z"
+        fill="#F7F5EF"/>
+  <path d="M198 65 H136 C121 65 111 74 111 89 V192 C119 184 128 180 140 180 H198 Z"
+        fill="#63B3FF" opacity=".95"/>
+  <path d="M128 83 V190" stroke="#2457D6" stroke-width="8"/>
+  <path d="M176 47 L185 65 L203 74 L185 83 L176 101 L167 83 L149 74 L167 65 Z"
+        fill="#63B3FF"/>
+  <circle cx="176" cy="74" r="5" fill="#081A33"/>
+</svg>

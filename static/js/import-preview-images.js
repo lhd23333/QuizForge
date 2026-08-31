@@ -17,7 +17,28 @@
     '解答题': subject === 'physics' ? 'after' : 'sub',
     '填空题': subject === 'physics' ? 'between' : 'full',
   };
+  const MAX_IMAGE_BYTES = Number(
+    document.getElementById('prev-cards')?.dataset.maxImageBytes || 25 * 1024 * 1024);
+  const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.bmp']);
+  const MIME_EXTS = {
+    'image/png': '.png', 'image/jpeg': '.jpg',
+    'image/webp': '.webp', 'image/bmp': '.bmp',
+  };
   const states = new WeakMap();
+
+  function extension(name) {
+    const match = String(name || '').toLowerCase().match(/\.[^.\\/]+$/);
+    return match ? match[0] : '';
+  }
+
+  function normalizedFile(file, index) {
+    const ext = extension(file.name);
+    if (IMAGE_EXTS.has(ext)) return file;
+    const inferred = MIME_EXTS[String(file.type || '').toLowerCase()];
+    if (!inferred) return null;
+    return new File([file], `clipboard-${Date.now()}-${index + 1}${inferred}`,
+      {type: file.type, lastModified: Date.now()});
+  }
 
   function looksPairable(card, total) {
     if (total !== 4) return false;
@@ -74,6 +95,31 @@
     select.disabled = !options.length;
   }
 
+  function addFiles(state, files) {
+    const accepted = [];
+    for (const [index, raw] of Array.from(files || []).entries()) {
+      const file = normalizedFile(raw, index);
+      if (!file) {
+        alert('只支持 PNG/JPG/WEBP/BMP 图片');
+        return false;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        alert(`「${file.name}」过大（单图上限 ${Math.round(MAX_IMAGE_BYTES / 1024 / 1024)}MB）`);
+        return false;
+      }
+      accepted.push(file);
+    }
+    if (!accepted.length) return false;
+    if (state.existing + state.items.length + accepted.length > 20) {
+      alert('每道题一次最多附加 20 张图片');
+      return false;
+    }
+    accepted.forEach(file => state.items.push({file, url: URL.createObjectURL(file)}));
+    syncInput(state);
+    render(state);
+    return true;
+  }
+
   function render(state) {
     // 首次绑定保留服务端按完整正文算出的值，尤其是四图一项一图；只有后续增删图
     // 或改题型时才在客户端按最终数量重算。前端不重复猜服务端已有结论。
@@ -95,7 +141,8 @@
       remove.type = 'button';
       remove.className = 'qcard-image-remove';
       remove.title = '移除这张图片';
-      remove.textContent = '×';
+      remove.setAttribute('aria-label', remove.title);
+      remove.innerHTML = window.QFIcon ? window.QFIcon('x') : '';
       remove.addEventListener('click', () => {
         URL.revokeObjectURL(item.url);
         state.items.splice(index, 1);
@@ -135,14 +182,7 @@
     box.querySelector('.qcard-image-pick').addEventListener('click', () => input.click());
     input.addEventListener('change', () => {
       const picked = Array.from(input.files || []);
-      if (state.items.length + picked.length > 20) {
-        alert('每道题一次最多附加 20 张图片');
-        input.value = '';
-        return;
-      }
-      picked.forEach(file => state.items.push({file, url: URL.createObjectURL(file)}));
-      syncInput(state);
-      render(state);
+      if (!addFiles(state, picked)) syncInput(state);
     });
     state.mode.addEventListener('change', () => { state.modeTouched.value = '1'; });
     state.flow.addEventListener('change', () => {
@@ -186,5 +226,22 @@
   }
 
   bind();
+  document.addEventListener('paste', event => {
+    const clipboardFiles = Array.from(event.clipboardData?.files || []);
+    const images = clipboardFiles.filter(file =>
+      String(file.type || '').toLowerCase().startsWith('image/')
+      || IMAGE_EXTS.has(extension(file.name)));
+    if (!images.length) return;
+    let card = document.activeElement?.closest?.('.qcard') || null;
+    if (!card) {
+      card = Array.from(document.querySelectorAll('.qcard')).find(
+        candidate => candidate.matches(':hover')) || null;
+    }
+    const box = card?.querySelector('.qcard-image-import');
+    const state = box ? states.get(box) : null;
+    if (!state) return;
+    event.preventDefault();
+    addFiles(state, images);
+  });
   window.QImportImages = {bind};
 })();

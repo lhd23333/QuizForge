@@ -5,7 +5,7 @@
 <p class="muted">转换在后台并发进行（同时最多 {{ batch_concurrency }} 组）。<strong>哪组转好了，那组就能点「审核入库」</strong>——不必等其它组。审核关一道不少，逐题确认才入库。可随时离开本页，稍后从导航栏「转换任务」回来继续。</p>
 
 <div class="batch-actions">
-  <a href="{{ url_for('batches_overview') }}" class="btn btn-ghost">← 全部转换任务</a>
+  <a href="{{ url_for('batches_overview') }}" class="btn btn-ghost">{{ icon('arrow-left') }}<span>全部转换任务</span></a>
   <a href="{{ url_for('import_md') }}" class="btn btn-ghost">回批量导入</a>
   <a href="{{ url_for('index') }}" class="btn btn-ghost">题库</a>
   {% if converting %}<button type="button" class="btn link-danger" id="bd-cancel">中止整批</button>{% endif %}
@@ -29,11 +29,11 @@
 
 {% if batch_nav and batch_nav['total'] > 1 %}
 <div class="bd-pager">
-  {% if batch_nav['prev'] %}<a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_nav['prev']) }}">← 上一批</a>
-  {% else %}<span class="btn btn-sm" aria-disabled="true" style="opacity:.45">← 上一批</span>{% endif %}
+  {% if batch_nav['prev'] %}<a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_nav['prev']) }}">{{ icon('arrow-left') }}<span>上一批</span></a>
+  {% else %}<span class="btn btn-sm" aria-disabled="true">{{ icon('arrow-left') }}<span>上一批</span></span>{% endif %}
   <a class="muted" href="{{ url_for('batches_overview', all=1) }}">第 {{ batch_nav['index'] }} / {{ batch_nav['total'] }} 批</a>
-  {% if batch_nav['next'] %}<a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_nav['next']) }}">下一批 →</a>
-  {% else %}<span class="btn btn-sm" aria-disabled="true" style="opacity:.45">下一批 →</span>{% endif %}
+  {% if batch_nav['next'] %}<a class="btn btn-sm" href="{{ url_for('batch_dashboard', batch_id=batch_nav['next']) }}"><span>下一批</span>{{ icon('arrow-right') }}</a>
+  {% else %}<span class="btn btn-sm" aria-disabled="true"><span>下一批</span>{{ icon('arrow-right') }}</span>{% endif %}
 </div>
 {% endif %}
 {% endblock %}
@@ -99,7 +99,9 @@
       if (g.reviewed === 'imported') {
         reviewed++;
         stateEl.innerHTML = '<span class="bp-st bp-done-st">已入库 ' + g.imported_count + ' 题</span>';
-        actEl.innerHTML = '<span class="muted">✓ 完成</span>';
+        actEl.innerHTML = '<span class="muted status-inline">' +
+          (window.QFIcon ? window.QFIcon('check-circle', 'status-inline-icon') : '') +
+          '完成</span>';
       } else if (g.reviewed === 'skipped') {
         reviewed++;
         stateEl.innerHTML = '<span class="bp-st">已跳过</span>';
@@ -109,12 +111,14 @@
         stateEl.innerHTML = g.requires_review
           ? '<span class="bp-st bp-err-st">质量异常，已暂停免审</span>'
           : '<span class="bp-st bp-ready">待审核</span>';
-        actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + reviewUrl(g.gid) + '">审核入库 →</a>';
+        actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + reviewUrl(g.gid) + '">' +
+          '<span>审核入库</span>' + (window.QFIcon ? window.QFIcon('arrow-right') : '') + '</a>';
       } else if (g.status === 'awaiting_block_review') {
         // 逐题识别 + 「先人工审拆题」：切块停在这里等人，还没送 AI
         blocks++;
         stateEl.innerHTML = '<span class="bp-st bp-ready">待拆题审核</span>';
-        actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + blocksUrl(g.gid) + '">审核拆题 →</a>';
+        actEl.innerHTML = '<a class="btn btn-primary btn-sm" href="' + blocksUrl(g.gid) + '">' +
+          '<span>审核拆题</span>' + (window.QFIcon ? window.QFIcon('arrow-right') : '') + '</a>';
       } else if (g.status === 'error') {
         failed++;
         stateEl.innerHTML = '<span class="bp-st bp-err-st">' +
@@ -134,7 +138,8 @@
           ? '<a class="btn btn-primary btn-sm" href="' + sourceUrl(g.gid) + '">调整 Markdown</a> '
           : '') +
           '<form method="post" style="display:inline" action="' + reconvertUrl(g.gid) + '">' +
-          '<button type="submit" class="btn btn-sm">重新转换</button></form> ' +
+          '<button type="submit" class="btn btn-sm">' +
+          (window.QFIcon ? window.QFIcon('refresh-cw') : '') + '<span>重新转换</span></button></form> ' +
           '<form method="post" style="display:inline" action="' + skipUrl(g.gid) + '">' +
           '<button type="submit" class="btn btn-sm">跳过</button></form>';
       } else {

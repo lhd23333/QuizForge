@@ -70,6 +70,22 @@ HANDOUTS_DIR = BANK_DIR / "_handouts"
 # LLM 识别模型配置（cc-switch 风格，多套可切换）；API Key 用 crypto_utils 加密存储。
 PROVIDERS_PATH = DATA_DIR / "providers.json"
 
+# Agent 对话模型单独存储。Agent 可以使用与 OCR 识别不同的服务商、模型和
+# 中转站；两份文件分开，避免切换对话模型时意外改变已有导入任务的配置。
+AGENT_PROVIDERS_PATH = DATA_DIR / "agent_providers.json"
+
+# Agent 的可复用资产单独存储，避免把 Skill、模板和偏好写进题库 Markdown。
+# 三类元数据各用一份 JSON，升级或损坏其中一类时不会影响另外两类；上传的
+# 声明文件和模板资源则放在对应目录，并由 agent_catalog.py 做原子写入与边界校验。
+AGENT_SKILLS_PATH = DATA_DIR / "agent_skills.json"
+AGENT_TEMPLATES_PATH = DATA_DIR / "agent_templates.json"
+AGENT_PREFERENCES_PATH = DATA_DIR / "agent_preferences.json"
+# Agent 会话单独保存轻量元数据；运行时会在记录中写入 bank_root，因而同一
+# 台机器切换题库时可以恢复各自会话而不会把上下文串到另一题库。
+AGENT_SESSIONS_PATH = DATA_DIR / "agent_sessions.json"
+AGENT_SKILLS_DIR = DATA_DIR / "agent_skills"
+AGENT_TEMPLATES_DIR = DATA_DIR / "agent_templates"
+
 # MinerU API Token（OCR）：同样只存 Fernet 密文，与 LLM 的 API Key 用同一把
 # ENC_KEY_PATH。单独一个文件而不是塞进 providers.json —— MinerU 只有一份 token、
 # 没有「多套切换」的概念，混进那份列表结构里会让 providers.py 的 active 语义变形。
@@ -87,6 +103,11 @@ ACTIVATION_PATH = DATA_DIR / "activation.json"
 # 服务器版存在 users 表的 theme_mode / theme_color / wallpaper 三列。
 UI_PREFS_PATH = DATA_DIR / "ui_prefs.json"
 
+# 用户自定义提示词是本机级偏好，与当前打开的题库无关；官方提示词始终从只读的
+# BASE_DIR/prompts 读取。覆盖更新必须保留这份 JSON。
+PROMPTS_PATH = DATA_DIR / "prompts.json"
+OFFICIAL_PROMPTS_DIR = BASE_DIR / "prompts"
+
 # 转换任务快照。插件退出会停止后端，已完成结果与待审核状态必须跨进程保留。
 TASKS_PATH = BANK_STATE_DIR / "conversion_tasks.json"
 
@@ -99,10 +120,6 @@ LICENSE_PUBLIC_KEY_PATH = BASE_DIR / "assets" / "license_public_key.pem"
 # Pandoc 的 Word 样式模板是只读发行资源，不存放任何用户内容。
 WORD_REFERENCE_DOCX = BASE_DIR / "assets" / "word-reference.docx"
 DEVICE_IDENTITY_PATH = DATA_DIR / "device_identity.dat"
-
-# 历史云端账号文件与公钥路径继续保留，防止覆盖升级误删用户原有文件。
-CLOUD_ACCOUNT_PATH = DATA_DIR / "cloud_account.json"
-CLOUD_ENTITLEMENT_PUBLIC_KEY_PATH = BASE_DIR / "assets" / "cloud_entitlement_public_key.pem"
 
 # 壁纸文件存放目录（用户上传的图片/视频）。放 BASE_DIR 而不是 BANK_DIR：
 # 它是应用外观配置，不是题库内容，落进 vault 会被 Obsidian 当成笔记附件。
@@ -203,6 +220,11 @@ UPLOAD_DIR = BANK_STATE_DIR / "uploads"
 # 每次转换前的 _clean_uploads 误删方式四正在校对中的在途文件。
 BATCH_UPLOAD_DIR = UPLOAD_DIR / "batch"
 
+# 带图 Markdown 资源包的短期校对状态。图片在校对页需要真实预览，因此会先以
+# qfimport_<stage>_<hash> 名写入共享资产目录；暂存清单负责在失败、跳过或过期时
+# 把候选交给全库引用检查回收。
+IMPORT_BUNDLE_STAGE_DIR = UPLOAD_DIR / "import_bundles"
+
 # 识别语料留档目录：OCR 中间产物（_raw.md / _blocks.json / _normalized.md）。
 # 刻意放在 BASE_DIR 而不是 BANK_DIR —— 题库根就是 Obsidian vault，几百份中间
 # 产物落进去会被 Obsidian 自己的搜索和图谱吃到（filestore 的 _skip_rel 只挡住
@@ -274,6 +296,14 @@ MAX_REQUEST_BYTES = 8192 * _MB
 MAX_MD_FILES = 50
 MAX_MD_FILE_BYTES = 5 * _MB
 MAX_MD_BATCH_BYTES = 20 * _MB
+
+# `.qfimport.zip` / `.zip`：压缩包本体、条目数、解压总量与压缩比各自设墙，不能只
+# 看上传体积。图片仍沿用普通图片 25MB 的单文件上限，Markdown 沿用 5MB 上限。
+MAX_IMPORT_BUNDLE_BYTES = 100 * _MB
+MAX_IMPORT_BUNDLE_BATCH_BYTES = 500 * _MB
+MAX_IMPORT_BUNDLE_FILES = 500
+MAX_IMPORT_BUNDLE_UNCOMPRESSED_BYTES = 250 * _MB
+MAX_IMPORT_BUNDLE_COMPRESSION_RATIO = 200
 
 # 允许的扩展名。EXAM_* 三条对应服务器版 upload_guard 的同名集合；`.doc` 刻意
 # **不在**里面——pandoc 读不了旧版二进制格式（见 converter._docx_to_pdf），收下它
