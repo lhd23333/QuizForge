@@ -5224,3 +5224,20 @@ details.agent-tool-event > summary::marker { color: var(--muted); }
   }
   .agent-composer { margin-inline: 9px; }
 }
+
+/* Agent 打开时，大屏主区必须在 compat 层让出右侧面板空间。
+   前面的兼容规则仍位于 legacy 层，无法覆盖 shell 层的主区宽度。 */
+@layer compat {
+  @media (min-width: 1181px) {
+    html.desktop-host body.agent-open > main,
+    body.agent-open > main {
+      width: calc(100% - var(--app-nav-width) - var(--agent-panel-width)) !important;
+      margin-right: var(--agent-panel-width) !important;
+    }
+    html.desktop-host body.agent-open > main:has(.workspace-shell),
+    body.agent-open > main:has(.workspace-shell) {
+      width: calc(100% - var(--app-nav-width) - var(--agent-panel-width)) !important;
+      margin-right: var(--agent-panel-width) !important;
+    }
+  }
+}

@@ -768,6 +768,26 @@ class DesktopFirstRunTests(unittest.TestCase):
         self.assertIn("html.desktop-host .legacy-card-controls", stylesheet)
         self.assertNotIn('class="desktop-host"', browser_html)
 
+    def test_agent_desktop_layout_override_has_higher_layer_than_shell(self):
+        stylesheet = (Path(__file__).resolve().parent.parent / "static" / "style.css").read_text(
+            encoding="utf-8"
+        )
+        compat_start = stylesheet.rfind("@layer compat")
+        self.assertGreater(compat_start, stylesheet.rfind("@layer legacy"))
+        compat_tail = stylesheet[compat_start:]
+        self.assertRegex(compat_tail, r"@media\s*\(min-width:\s*1181px\)")
+        self.assertIn("body.agent-open > main", compat_tail)
+        self.assertRegex(
+            compat_tail,
+            r"width:\s*calc\(100% - var\(--app-nav-width\) - "
+            r"var\(--agent-panel-width\)\)\s*(?:!important\s*)?;",
+        )
+        self.assertRegex(
+            stylesheet,
+            r"@media\s*\(max-width:\s*760px\).*?"
+            r"body\.agent-open\s*>\s*main[\s\S]*?display:\s*none\s*!important",
+        )
+
     def test_tool_page_header_does_not_inherit_sticky_navigation(self):
         root = Path(__file__).resolve().parent.parent
         stylesheet = (root / "static" / "style.css").read_text(encoding="utf-8")

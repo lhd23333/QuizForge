@@ -267,10 +267,14 @@ class PracticeExportTests(unittest.TestCase):
         template = exporter.config.TEX_TEMPLATE.read_text(encoding="utf-8")
         practice_block = template.split("$if(practice)$", 1)[1].split(
             "$endif$", 1)[0]
+        preamble = template.split(r"\usepackage{amsmath}", 1)[0]
 
         self.assertIn("$if(practice)$", template)
-        self.assertIn(r"\IfFontExistsTF{Noto Sans SC}", practice_block)
-        self.assertIn(r"\setCJKmainfont{Microsoft YaHei}", practice_block)
+        self.assertIn(r"\IfFontExistsTF{Noto Sans SC}", preamble)
+        self.assertIn(r"\setCJKmainfont{Microsoft YaHei}", preamble)
+        self.assertEqual(template.count(r"\IfFontExistsTF{Noto Sans SC}"), 1)
+        self.assertEqual(template.count(r"\xeCJKDeclareCharClass{CJK}"), 1)
+        self.assertNotIn(r"\IfFontExistsTF{Noto Sans SC}", practice_block)
         self.assertIn(r"\usepackage{multicol}", template)
         self.assertIn(r"\begin{multicols*}{2}\raggedcolumns", template)
         self.assertIn(r"\setlength{\columnseprule}{0.35pt}", template)

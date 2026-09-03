@@ -6,9 +6,8 @@
 % （config.py 里 PANDOC/XELATEX 路径注释已提到"部署到其他机器"），不锁字体的话
 % 换一台机器渲染出来的字宽、行高都会跟着系统字体变，PDF 效果不可控。
 \documentclass[11pt,fontset=fandol]{ctexart}
-$if(slides)$
 % Fandol 的 CJK 子集在 xdvipdfmx 产物里没有 /ToUnicode，PDFium 能画出来，
-% 但部分 Electron/PDF.js 阅读器会把中文渲染成空白。横版课件优先改用带完整
+% 但部分 Electron/PDF.js 阅读器会把中文渲染成空白。所有导出模式统一优先改用带完整
 % Unicode 映射的 Noto Sans SC；Windows 没装 Noto 时回落到系统自带的微软雅黑。
 % 两者都不存在时保留 ctex 已加载的 Fandol，至少不让导出直接失败。
 \IfFontExistsTF{Noto Sans SC}{%
@@ -22,36 +21,13 @@ $if(slides)$
 }
 % 罗马数字、圈号及部分 Unicode 数学符号默认会被 xeCJK 判给西文字体；Latin Modern
 % 不含这些字形，只报 Missing character 而继续出 PDF，结果是正文悄悄少字。明确归入
-% CJK 字符类，让**文本区**的这些字符走 Noto/微软雅黑；数学区另由 exporter 转成
+% CJK 字符类，让文本区的这些字符走 Noto/微软雅黑；数学区另由 exporter 转成
 % 标准 LaTeX 命令，仍使用数学字体。
 \xeCJKDeclareCharClass{CJK}{
   "03B1,"03B2,"03B3,"03B7,"03B8,"03BB,"03BE,"03C0,
   "2032,"2160 -> "217F,"2208,"2220,"2260,"2295,"2299,
   "2460 -> "2473,"25B3,"2A7D,"2A7E,"3001,"FF0E
 }
-$endif$
-$if(practice)$
-% 双栏 PDF 会直接交给 Codex、Obsidian 等 PDF.js 阅读器预览，不能沿用缺少
-% /ToUnicode 的 Fandol CJK 子集：它在系统阅读器里能画中文，但部分 PDF.js
-% 阅读器会显示为空白。字体选择与横版课件一致，优先使用带完整 Unicode 映射的
-% Noto Sans SC，Windows 未安装时回落到微软雅黑；两者都没有才保留 Fandol。
-\IfFontExistsTF{Noto Sans SC}{%
-  \setCJKmainfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
-  \setCJKsansfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
-}{%
-  \IfFontExistsTF{Microsoft YaHei}{%
-    \setCJKmainfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
-    \setCJKsansfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
-  }{}%
-}
-% 双栏刷题同样会遇到 OCR 留下的文本态希腊字母/罗马数字，也要先把这些字符
-% 判给中文字体；否则会落到 Latin Modern 并只警告后静默缺字。
-\xeCJKDeclareCharClass{CJK}{
-  "03B1,"03B2,"03B3,"03B7,"03B8,"03BB,"03BE,"03C0,
-  "2032,"2160 -> "217F,"2208,"2220,"2260,"2295,"2299,
-  "2460 -> "2473,"25B3,"2A7D,"2A7E,"3001,"FF0E
-}
-$endif$
 \usepackage{amsmath,amssymb,amsfonts}
 \usepackage{esint}      % \oiint 闭曲面积分（amssymb 不含）；此版本无 \oiiint，下面补
 % 该 TeX Live 的 esint 只给 \oiint，不含 \oiiint（闭合体三重积分）。
