@@ -200,6 +200,7 @@
       </div>
     </div>
 
+    <p class="settings-note">Qwen-VL 等视觉聊天模型重绘为 TikZ；模型名为 gpt-image-* 时自动使用 Images Edit，生成 PNG。</p>
     {% set vision_providers = providers | selectattr('supports_vision') | list %}
     {% if vision_providers %}
     <div class="llm-quick-switch" aria-label="配图重绘模型快速切换">

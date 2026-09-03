@@ -70,7 +70,7 @@
         {% if task['outputs'] %}<span class="muted bo-library-output">{{ task['outputs'] | join('、') }}</span>{% endif %}
       </span>
       <span class="bo-act">
-        <a class="btn btn-sm" href="{{ url_for('library_page') }}">打开资料库</a>
+        <a class="btn btn-sm" href="{{ url_for('index') }}">打开题库文件</a>
         {% if task['status'] in ('error', 'interrupted') %}
         <button type="button" class="btn btn-sm bo-library-retry">重试</button>
         {% endif %}

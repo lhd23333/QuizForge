@@ -97,11 +97,231 @@
     return out;
   }
 
-  // "还原原图"只在当前选中图确实有备份时才露出
+  // 版本列表按图片序号缓存；正文局部替换后控制条仍是同一个节点，可以继续复用。
+  var barVersions = new WeakMap();
+
+  function setVersions(bar, index, rows) {
+    var all = barVersions.get(bar) || {};
+    all[index] = Array.isArray(rows) ? rows : [];
+    barVersions.set(bar, all);
+  }
+
+  function versionsOf(bar, index) {
+    var all = barVersions.get(bar);
+    return all && Object.prototype.hasOwnProperty.call(all, index)
+      ? all[index] : null;
+  }
+
+  // "还原原图"只在当前选中图有原图版本且当前不是原图时露出。
   function syncRestore(bar) {
     var btn = bar.querySelector('.img-restore-btn');
     if (!btn) return;
-    btn.hidden = !originalsOf(bar)[pickedIndex(bar)];
+    var index = pickedIndex(bar);
+    var rows = versionsOf(bar, index);
+    if (rows) {
+      var hasOriginal = rows.some(function (row) { return row.kind === 'original'; });
+      var current = rows.find(function (row) { return row.current; });
+      btn.hidden = !hasOriginal || !current || current.kind === 'original';
+      return;
+    }
+    btn.hidden = !originalsOf(bar)[index];
+  }
+
+  function getJSON(url) {
+    return fetch(url).then(readJSON);
+  }
+
+  function addIcon(button, name) {
+    if (!window.QFIcon) return;
+    var markup = window.QFIcon(name);
+    if (markup) button.insertAdjacentHTML('afterbegin', markup);
+  }
+
+  function makeVersionAction(label, icon, className, handler) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = className || '';
+    button.appendChild(document.createTextNode(label));
+    if (icon) addIcon(button, icon);
+    button.addEventListener('click', handler);
+    return button;
+  }
+
+  function renderVersionList(dialog, bar, index, rows) {
+    setVersions(bar, index, rows);
+    var body = dialog.querySelector('.image-versions-body');
+    body.replaceChildren();
+    if (!rows.length) {
+      var empty = document.createElement('div');
+      empty.className = 'image-versions-empty';
+      empty.textContent = '还没有登记的图片版本。';
+      body.appendChild(empty);
+      syncRestore(bar);
+      return;
+    }
+
+    var list = document.createElement('div');
+    list.className = 'image-versions-list';
+    rows.forEach(function (row) {
+      var item = document.createElement('article');
+      item.className = 'image-version-item' + (row.current ? ' current' : '');
+
+      var preview = document.createElement('div');
+      preview.className = 'image-version-preview';
+      if (row.exists) {
+        var image = document.createElement('img');
+        image.src = row.src;
+        image.alt = row.kind === 'original' ? '原图' : 'AI 生成版本';
+        preview.appendChild(image);
+      } else {
+        var missing = document.createElement('span');
+        missing.className = 'image-version-missing';
+        missing.textContent = '文件不存在';
+        preview.appendChild(missing);
+      }
+      item.appendChild(preview);
+
+      var name = document.createElement('div');
+      name.className = 'image-version-name';
+      name.title = row.name || '';
+      name.textContent = row.name || '未命名版本';
+      item.appendChild(name);
+
+      var meta = document.createElement('div');
+      meta.className = 'image-version-meta';
+      var kind = document.createElement('span');
+      kind.textContent = row.kind === 'original' ? '原图' : 'AI 生成';
+      meta.appendChild(kind);
+      if (row.model) {
+        var model = document.createElement('span');
+        model.textContent = '模型：' + row.model;
+        model.title = model.textContent;
+        meta.appendChild(model);
+      }
+      if (row.created) {
+        var created = document.createElement('span');
+        created.textContent = '时间：' + row.created;
+        meta.appendChild(created);
+      }
+      if (row.prompt) {
+        var prompt = document.createElement('span');
+        prompt.className = 'image-version-prompt';
+        prompt.textContent = '附加要求：' + row.prompt;
+        meta.appendChild(prompt);
+      }
+      if (row.current) {
+        var state = document.createElement('span');
+        state.className = 'image-version-state';
+        state.textContent = '当前使用';
+        meta.appendChild(state);
+      }
+      item.appendChild(meta);
+
+      var actions = document.createElement('div');
+      actions.className = 'image-version-actions';
+      if (!row.current && row.exists) {
+        actions.appendChild(makeVersionAction('切换', 'check', '', function () {
+          switchVersion(dialog, bar, index, row.name);
+        }));
+      }
+      if (row.can_delete) {
+        actions.appendChild(makeVersionAction('删除', 'trash', 'danger', function () {
+          deleteVersion(dialog, bar, index, row);
+        }));
+      }
+      item.appendChild(actions);
+      list.appendChild(item);
+    });
+    body.appendChild(list);
+    syncRestore(bar);
+  }
+
+  function openVersions(bar, index) {
+    if (bar.dataset.versionBusy === '1') return;
+    bar.dataset.versionBusy = '1';
+    var dialog = document.createElement('dialog');
+    dialog.className = 'redraw-dialog image-versions-dialog';
+
+    var head = document.createElement('div');
+    head.className = 'redraw-head image-versions-head';
+    var title = document.createElement('span');
+    title.textContent = '图片版本历史';
+    head.appendChild(title);
+    var close = makeVersionAction('', 'x', 'image-versions-close', function () {
+      dialog.close();
+    });
+    close.setAttribute('aria-label', '关闭版本历史');
+    close.title = '关闭';
+    head.appendChild(close);
+    dialog.appendChild(head);
+
+    var body = document.createElement('div');
+    body.className = 'image-versions-body';
+    body.textContent = '正在读取版本历史…';
+    dialog.appendChild(body);
+    dialog.addEventListener('close', function () {
+      bar.dataset.versionBusy = '0';
+      dialog.remove();
+    });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+
+    getJSON('/question/' + encodeURIComponent(bar.dataset.id) +
+            '/redraw/versions?index=' + encodeURIComponent(index))
+      .then(function (data) {
+        if (!data.ok) {
+          dialog.close();
+          alert(data.error || '读取图片版本失败');
+          return;
+        }
+        renderVersionList(dialog, bar, index, data.versions || []);
+      })
+      .catch(function (err) {
+        dialog.close();
+        alert('读取图片版本失败：' + err);
+      });
+  }
+
+  function switchVersion(dialog, bar, index, name) {
+    var buttons = dialog.querySelectorAll('button');
+    buttons.forEach(function (button) { button.disabled = true; });
+    postJSON('/question/' + encodeURIComponent(bar.dataset.id) +
+             '/redraw/version/switch', {index: index, name: name})
+      .then(function (data) {
+        if (!data.ok) {
+          alert(data.error || '切换图片版本失败');
+          buttons.forEach(function (button) { button.disabled = false; });
+          return;
+        }
+        setVersions(bar, index, data.versions || []);
+        applyBodyHtml(bar, data.body_html);
+        syncRestore(bar);
+        dialog.close();
+      })
+      .catch(function (err) {
+        buttons.forEach(function (button) { button.disabled = false; });
+        alert('切换图片版本失败：' + err);
+      });
+  }
+
+  function deleteVersion(dialog, bar, index, row) {
+    if (!window.confirm('确定删除这个 AI 生成的图片版本吗？')) return;
+    var buttons = dialog.querySelectorAll('button');
+    buttons.forEach(function (button) { button.disabled = true; });
+    postJSON('/question/' + encodeURIComponent(bar.dataset.id) +
+             '/redraw/version/delete', {index: index, name: row.name})
+      .then(function (data) {
+        if (!data.ok) {
+          alert(data.error || '删除图片版本失败');
+          buttons.forEach(function (button) { button.disabled = false; });
+          return;
+        }
+        renderVersionList(dialog, bar, index, data.versions || []);
+      })
+      .catch(function (err) {
+        buttons.forEach(function (button) { button.disabled = false; });
+        alert('删除图片版本失败：' + err);
+      });
   }
 
   // 数正文里的图 —— 与后端 tikz_redraw.image_refs 的长度同源（都是正文图片引用
@@ -236,15 +456,17 @@
     });
     dlg.appendChild(cmp);
 
-    var det = document.createElement('details');
-    det.className = 'redraw-code';
-    var sum = document.createElement('summary');
-    sum.textContent = 'TikZ 源码';
-    var pre = document.createElement('pre');
-    pre.textContent = opts.code || '';        // 不是 innerHTML
-    det.appendChild(sum);
-    det.appendChild(pre);
-    dlg.appendChild(det);
+    if (opts.code) {
+      var det = document.createElement('details');
+      det.className = 'redraw-code';
+      var sum = document.createElement('summary');
+      sum.textContent = 'TikZ 源码';
+      var pre = document.createElement('pre');
+      pre.textContent = opts.code;             // 不是 innerHTML
+      det.appendChild(sum);
+      det.appendChild(pre);
+      dlg.appendChild(det);
+    }
 
     var bar = document.createElement('div');
     bar.className = 'redraw-actions';
@@ -364,6 +586,7 @@
       // 前端自己记上这张图现在有备份了（后端已写进 frontmatter），
       // 这样不刷新也能立刻点亮"还原原图"
       originalsOf(bar)[index] = data.old;
+      setVersions(bar, index, data.versions || []);
       applyBodyHtml(bar, data.body_html);
       syncRestore(bar);
     }).catch(function (err) { alert('应用失败：' + err); });
@@ -375,6 +598,7 @@
              {index: index}).then(function (data) {
       if (!data.ok) { alert(data.error || '还原失败'); return; }
       delete originalsOf(bar)[index];
+      setVersions(bar, index, data.versions || []);
       applyBodyHtml(bar, data.body_html);
       syncRestore(bar);
     }).catch(function (err) { alert('还原失败：' + err); });
@@ -392,6 +616,12 @@
       rb.addEventListener('click', function () {
         if (rb.classList.contains('busy')) return;
         start(bar, qid, pickedIndex(bar));
+      });
+    }
+    var vb = bar.querySelector('.img-version-btn');
+    if (vb) {
+      vb.addEventListener('click', function () {
+        openVersions(bar, pickedIndex(bar));
       });
     }
     var sb = bar.querySelector('.img-restore-btn');
@@ -421,6 +651,7 @@
     (scope || document).querySelectorAll('.img-layout-bar').forEach(bindBar);
   }
 
-  window.QImgRedraw = {bindAll: bindAll, syncRestore: syncRestore};
+  window.QImgRedraw = {bindAll: bindAll, syncRestore: syncRestore,
+    openVersions: openVersions};
   document.addEventListener('DOMContentLoaded', function () { bindAll(document); });
 })();

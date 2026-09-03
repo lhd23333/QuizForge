@@ -461,8 +461,10 @@ _HALF_CLOSE = "\n\n```{=latex}\n\\end{minipage}\\vss\\egroup\n```\n"
 _SLOT_QUARTER = 0.25
 _SLOT_HALF = 0.5
 
-# 空间受限、放不下 inline 解析的布局（solution_mode=inline 时自动退化为 separate）
-_NO_INLINE_LAYOUTS = {"half", "slot_half", "slot_quarter"}
+# inline 解析不能放进固定高度的作答槽位：槽位会把正文装进 lrbox/minipage，
+# 而解析（尤其是 wrapfigure）必须在题号列表和测量盒外紧跟题后渲染。遇到这些
+# 布局时，inline 模式改用自然高度题块；none/separate 仍使用原有槽位。
+_INLINE_NATURAL_LAYOUTS = {"half", "slot_half", "slot_quarter"}
 
 
 def _slot_open(frac: float) -> str:
@@ -1782,6 +1784,7 @@ def paginate(questions: list[dict], mode: str = "list", keypoints: str = "",
     inline/none 由 _render_block 逐题处理，不影响分页。
     std_opts: 标准试卷（exam_std）的分值说明等选项。
     """
+    _validate_export_options(mode=mode, solution_mode=solution_mode)
     fullpage_ids = set(fullpage_ids or [])
 
     if mode == "exam_std":
@@ -2177,6 +2180,24 @@ def _slot_block(num: int, body: str, frac: float, heading: str = "",
     return (_slot_open(frac) + inner + _SLOT_CLOSE)
 
 
+def _natural_question_block(num: int, body: str, heading: str = "",
+                            qtype: str = None, img_align: str = None,
+                            img_width=None, img_split=False,
+                            img_layouts=None,
+                            img_files: list[str] = None) -> str:
+    """渲染不带固定槽位的题块。
+
+    inline 解析必须紧跟题后；固定半页/槽位会把题干放进测量盒，无法安全插入
+    解析中的 wrapfigure。此分支只在 inline 且题目确有解析时使用，其他导出仍
+    保持原有作答槽位布局。
+    """
+    inner = _q_md(num, body, qtype, img_align, img_width, img_split,
+                  img_layouts, img_files)
+    if heading:
+        inner = _raw(_heading_latex(heading)).strip("\n") + "\n\n" + inner
+    return inner
+
+
 def _solution_body(text: str, files: list[str] = None,
                    sol_img_layouts=None, sol_img_split=None) -> str:
     """解析正文（含图）→ Markdown，支持原位图、题末图和图文混排。
@@ -2264,7 +2285,8 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
     layout = b.get("layout", "flow")
     body = b["body"]
     sol = b.get("solution")
-    # inline：题后紧接解析。半页块空间有限，inline 不进 half（改用 separate）
+    # inline：题后紧接解析。受限槽位由下面的自然题块分支处理，避免把解析放进
+    # qslot/half 的测量盒；其余布局直接在题块之后追加。
     img_align = b.get("img_align")
     img_width = b.get("img_width")
     img_split = b.get("img_split")   # 原样传字符串（opts/full/sub），_norm_split 归一化
@@ -2275,11 +2297,12 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
     # 页面就仍然是“上面全是文字、下面单独一张图”。题干先由 _q_md 完整收口，再接
     # 解析，wrapfigure 才能真正让文字沿图侧边环绕并在图下恢复整行。
     inline_solution = ""
-    # 半页块与自适应槽位空间都有限，inline 解析不进去（退化为 separate）
-    if solution_mode == "inline" and sol and layout not in _NO_INLINE_LAYOUTS:
+    if solution_mode == "inline" and sol:
         inline_solution = _solution_md(
             sol, b.get(_SOL_IMG_FILES_KEY), b.get("sol_img_layouts"),
             b.get("sol_img_split"))
+    natural_inline = bool(
+        inline_solution and layout in _INLINE_NATURAL_LAYOUTS)
 
     if layout == "slide":
         # 课件页的题号放进顶部色条，正文不再重复显示「1.」。_q_md 仍负责选择题
@@ -2291,18 +2314,36 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
             + ("\n\n" + inline_solution if inline_solution else "")
         )
     elif layout == "half":
-        md = _half_block(b["num"], body, heading=b.get("heading", ""),
-                         qtype=b.get("type"), img_align=img_align,
-                         img_width=img_width, img_split=img_split,
-                         img_layouts=img_layouts, img_files=img_files)
+        if natural_inline:
+            md = (_natural_question_block(
+                b["num"], body, heading=b.get("heading", ""),
+                qtype=b.get("type"), img_align=img_align,
+                img_width=img_width, img_split=img_split,
+                img_layouts=img_layouts, img_files=img_files)
+                  + "\n\n" + inline_solution)
+        else:
+            md = _half_block(
+                b["num"], body, heading=b.get("heading", ""),
+                qtype=b.get("type"), img_align=img_align,
+                img_width=img_width, img_split=img_split,
+                img_layouts=img_layouts, img_files=img_files)
     elif layout in ("slot_half", "slot_quarter"):
-        # 自适应槽位：目标高度放不下就升级（半页→整页 / 1/4→半页→整页），
-        # 断页由 TeX 按本页余量决定。inline 解析同 half 一样不进槽位（空间有限）。
-        frac = _SLOT_HALF if layout == "slot_half" else _SLOT_QUARTER
-        md = _slot_block(b["num"], body, frac, heading=b.get("heading", ""),
-                         qtype=b.get("type"), img_align=img_align,
-                         img_width=img_width, img_split=img_split,
-                         img_layouts=img_layouts, img_files=img_files)
+        if natural_inline:
+            md = (_natural_question_block(
+                b["num"], body, heading=b.get("heading", ""),
+                qtype=b.get("type"), img_align=img_align,
+                img_width=img_width, img_split=img_split,
+                img_layouts=img_layouts, img_files=img_files)
+                  + "\n\n" + inline_solution)
+        else:
+            # 自适应槽位：目标高度放不下就升级（半页→整页 / 1/4→半页→整页），
+            # 断页由 TeX 按本页余量决定。
+            frac = _SLOT_HALF if layout == "slot_half" else _SLOT_QUARTER
+            md = _slot_block(
+                b["num"], body, frac, heading=b.get("heading", ""),
+                qtype=b.get("type"), img_align=img_align,
+                img_width=img_width, img_split=img_split,
+                img_layouts=img_layouts, img_files=img_files)
     elif layout == "practice":
         practice_solve = bool(b.get("practice_solve"))
         md = _q_md(b["num"], body, b.get("type"), img_align, img_width,
@@ -2388,6 +2429,24 @@ _MODES = {
     "exam_std": "标准试卷模式",
     "handout": "讲义模式",
 }
+
+# PDF 导出入口与 Word 导出入口共用这组稳定枚举。未知值不能默默回落到清单模式，
+# 否则界面拼写错误会生成一份看似成功、实际版式完全不同的试卷。
+SUPPORTED_MODES = frozenset(_MODES)
+SUPPORTED_SOLUTION_MODES = frozenset({"none", "inline", "separate"})
+SUPPORTED_FORMATS = frozenset({"pdf", "tex", "zip"})
+
+
+def _validate_export_options(*, mode: str, solution_mode: str,
+                             fmt: str | None = None) -> None:
+    """校验导出公开枚举，避免未知参数静默走默认分支。"""
+    if not isinstance(mode, str) or mode not in SUPPORTED_MODES:
+        raise ExportError(f"不支持的导出模式：{mode}")
+    if (not isinstance(solution_mode, str)
+            or solution_mode not in SUPPORTED_SOLUTION_MODES):
+        raise ExportError(f"无效的解析位置：{solution_mode}")
+    if fmt is not None and (not isinstance(fmt, str) or fmt not in SUPPORTED_FORMATS):
+        raise ExportError(f"不支持的导出格式：{fmt}")
 
 # 标准试卷解答题：每题正文后预留的作答空白（连续紧凑排，非半页）。
 # 每多一个小问多留的高度，与基础高度（对应 1 问的题）——线性给，不做精细的
@@ -3367,6 +3426,7 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
            wimath_logo: bool = False, bank_subject: str = "math",
            template_path: str | Path | None = None) -> Path:
     """在有界编译槽内导出；公开签名保持不变。"""
+    _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
     with _EXPORT_SLOTS:
         return _export_unlocked(
             questions, title=title, fmt=fmt, mode=mode, keypoints=keypoints,
@@ -3398,6 +3458,7 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     """
     if not questions:
         raise ExportError("没有题目可导出")
+    _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
 
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # 每次导出使用独占目录。不能在这里清理共享 output/：两个用户同时导出时，

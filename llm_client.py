@@ -1,4 +1,4 @@
-"""OpenAI 兼容的对话客户端，用于 md 规范化那一步的 LLM 调用。
+"""OpenAI 兼容的 LLM 客户端，用于文本规范化和配图重绘。
 
 为什么不直接用 project-alpha 的 `src/deepseek_client.py`：
   1. 它的 BASE_URL 是硬编码的类属性，换不了服务商；
@@ -21,6 +21,7 @@ finish_reason="stop"。此时 normalize() 认定「正常结束」直接 break�
 合并草稿上只吐 11/19 题就 stop）。见 _looks_truncated()。
 """
 
+import base64
 import json
 import ipaddress
 import logging
@@ -41,6 +42,12 @@ logger = logging.getLogger(__name__)
 MAX_TOKENS_MIN = 256
 MAX_TOKENS_MAX = 200000
 MAX_TOKENS_DEFAULT = 8192
+
+
+def is_image_generation_model(model: str) -> bool:
+    """判断是否应使用 Images Edit，而不是 Chat Completions。"""
+    value = (model or "").strip().lower()
+    return bool(re.search(r"(?:^|[/_-])gpt-image(?:[/_-]|$)", value))
 
 # 草稿里的题号：行首（允许前置 markdown 标题记号/空格）的 1~2 位数字 + 中英文点号。
 # MinerU 有时把大题写成 "## 17. (15 分)"，所以 #* 必须允许。
@@ -333,6 +340,25 @@ class LLMClientError(Exception):
     所以 message 要写成用户看得懂、知道下一步该改什么的话。"""
 
 
+def _message_text(content) -> str:
+    """兼容字符串和部分中转站返回的内容片段数组。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for item in content:
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("text"), str):
+            parts.append(item["text"])
+        else:
+            text = getattr(item, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+    return "".join(parts)
+
+
 def clamp_max_tokens(value, default: int = MAX_TOKENS_DEFAULT) -> int:
     """表单里填的 max_tokens 归一化成合法整数（非数字/越界都回退到区间内）。"""
     try:
@@ -425,7 +451,7 @@ class LLMClient:
                 f"请检查 Base URL 与模型名是否匹配。"
             )
         choice = choices[0]
-        return self._finalize(choice.message.content, user_content,
+        return self._finalize(_message_text(choice.message.content), user_content,
                               choice.finish_reason, system_prompt, mt,
                               getattr(choice.message, "reasoning_content", None))
 
@@ -501,8 +527,67 @@ class LLMClient:
             raise LLMClientError(f"模型 {self.model} 的响应里没有 choices。")
         choice = choices[0]
         return self._finalize_plain(
-            choice.message.content, choice.finish_reason, mt,
+            _message_text(choice.message.content), choice.finish_reason, mt,
             getattr(choice.message, "reasoning_content", None))
+
+    def edit_image(self, prompt: str, image_path) -> bytes:
+        """通过 OpenAI Images Edit 生成一张重绘后的位图。"""
+        import mimetypes
+
+        p = Path(image_path)
+        if not p.is_file():
+            raise LLMClientError(f"找不到要重绘的图片：{p.name}")
+        mime = mimetypes.guess_type(p.name)[0] or "image/png"
+        if not mime.startswith("image/"):
+            mime = "image/png"
+        try:
+            image_data = p.read_bytes()
+        except OSError as e:
+            raise LLMClientError(f"读取图片失败：{e}") from e
+
+        try:
+            response = self._client.images.edit(
+                model=self.model,
+                image=(p.name, image_data, mime),
+                prompt=prompt,
+            )
+        except Exception as e:
+            detail = " ".join(str(e).split())
+            raise LLMClientError(
+                f"图像编辑调用失败（{self.model} @ {self.base_url}）："
+                f"{detail[:300]}。请确认 YAPI 已提供 Images Edit 接口，"
+                f"且模型名是支持图片编辑的 gpt-image-* 模型。"
+            ) from e
+
+        items = getattr(response, "data", None) or []
+        if not items:
+            raise LLMClientError(f"图像模型 {self.model} 的响应里没有图片数据。")
+        item = items[0]
+        encoded = getattr(item, "b64_json", None)
+        if encoded:
+            try:
+                if encoded.startswith("data:"):
+                    encoded = encoded.split(",", 1)[1]
+                return base64.b64decode(encoded, validate=True)
+            except (ValueError, UnicodeEncodeError) as e:
+                raise LLMClientError(
+                    f"图像模型 {self.model} 返回的 Base64 图片无效。"
+                ) from e
+
+        image_url = getattr(item, "url", None)
+        if image_url:
+            try:
+                with _safe_http_client() as client:
+                    downloaded = client.get(image_url)
+                    downloaded.raise_for_status()
+                    return downloaded.content
+            except Exception as e:
+                raise LLMClientError(
+                    f"图像模型 {self.model} 返回的图片地址无法下载：{e}"
+                ) from e
+        raise LLMClientError(
+            f"图像模型 {self.model} 的响应既没有 b64_json，也没有图片地址。"
+        )
 
     def _finalize_plain(self, content, finish: str, mt: int,
                         reasoning: str | None = None) -> tuple[str, str]:

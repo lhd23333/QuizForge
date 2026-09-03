@@ -23,8 +23,8 @@
           <a href="{{ url_for('folder_paper_view', id=p['id']) }}"
              class="paper-open-obsidian" data-path="{{ p['id'] }}"
              target="_blank" rel="noopener">{{ p['filename'] }}</a>
-          <button type="button" class="btn btn-ghost btn-sm paper-open-library"
-                  data-library-path="{{ p['id'] }}">在资料库中打开</button>
+          <button type="button" class="btn btn-ghost btn-sm paper-open-library paper-open-question"
+                  data-library-path="{{ p['id'] }}" data-question-file-path="{{ p['id'] }}">在题库中打开</button>
           {% if p['folder'] != active_collection %}
             <span class="papers-from">来自 {{ p['folder'].split('/')[-1] }}</span>
           {% endif %}
@@ -33,7 +33,7 @@
              class="btn btn-ghost btn-sm">下载</a>
           <form method="post" action="{{ url_for('folder_paper_delete') }}"
                 style="display:inline"
-                onsubmit="return confirm('彻底删除原卷「{{ p['filename'] }}」？不进回收站。')">
+                onsubmit="return confirm('将原卷「{{ p['filename'] }}」移入回收站？')">
             <input type="hidden" name="id" value="{{ p['id'] }}">
             <button type="submit" class="btn btn-sm btn-danger">删除</button>
           </form>
@@ -58,7 +58,10 @@
     <p class="muted" style="margin:0.6em 0 0">本文件夹还没有原卷。转换时勾上「一并保存原卷」会自动存进来，也可以在下面手动上传。</p>
   {% endif %}
 
+  <details class="paper-upload-details">
+    <summary>上传原卷</summary>
   <form method="post" class="papers-upload" enctype="multipart/form-data"
+        data-paper-upload-form
         action="{{ url_for('folder_paper_upload', cid=active_collection) }}">
     <input type="file" name="file" class="input" required
            accept=".pdf,.docx,.doc,.png,.jpg,.jpeg,.webp,.bmp">
@@ -68,4 +71,5 @@
     </select>
     <button type="submit" class="btn btn-ghost">上传原卷</button>
   </form>
+  </details>
 </details>

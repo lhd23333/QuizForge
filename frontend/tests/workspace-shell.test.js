@@ -70,30 +70,29 @@ test('隐藏业务页的迟到定位消息不会把用户从题库拉回讲义',
 });
 
 
-test('题库文件可切换到资料库并把定位请求交给常驻 iframe', async () => {
+test('题库文件留在题库 iframe 并把定位请求交给题库工作区', async () => {
   const dom = createShell();
   const document = dom.window.document;
   const question = document.getElementById('workspace-question-frame');
   const library = document.getElementById('workspace-library-frame');
   const calls = [];
 
+  Object.defineProperty(question.contentWindow, 'postMessage', {
+    configurable: true, value: message => calls.push(message),
+  });
+
   dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
     origin: 'http://localhost', source: question.contentWindow,
     data: {source: 'quizforge', type: 'open-library-file', path: '卷子/试卷.pdf'},
   }));
-  assert.equal(library.hidden, false);
+  assert.equal(question.hidden, false);
+  assert.equal(library.hidden, true);
 
+  question.dispatchEvent(new dom.window.Event('load'));
   await new Promise(resolve => setTimeout(resolve, 0));
-  Object.defineProperty(library.contentWindow, 'postMessage', {
-    configurable: true, value: message => calls.push(message),
-  });
-  dom.window.dispatchEvent(new dom.window.MessageEvent('message', {
-    origin: 'http://localhost', source: library.contentWindow,
-    data: {source: 'quizforge', type: 'library-ready'},
-  }));
-  assert.equal(calls[0].source, 'quizforge');
-  assert.equal(calls[0].type, 'open-library-file');
-  assert.equal(calls[0].path, '卷子/试卷.pdf');
+  const opened = calls.find(message => message.type === 'open-question-file');
+  assert.equal(opened.source, 'quizforge');
+  assert.equal(opened.path, '卷子/试卷.pdf');
 });
 
 

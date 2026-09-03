@@ -169,12 +169,16 @@ class LibraryRouteTests(unittest.TestCase):
                 self.assertFalse((config.BANK_DIR / parent / "不得创建.md").exists())
 
     def test_markdown_creation_ui_contract(self):
-        page = self.client.get("/library").get_data(as_text=True)
+        legacy_page = self.client.get("/library")
+        self.assertEqual(legacy_page.status_code, 302)
+        self.assertTrue(legacy_page.headers["Location"].endswith("/"))
+        page = self.client.get(
+            "/", query_string={"show_general_md": "1"}).get_data(as_text=True)
         script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
             encoding="utf-8")
 
-        self.assertIn('id="library-new-markdown"', page)
-        self.assertIn('aria-label="新建顶层 Markdown 文档"', page)
+        self.assertIn('name="show_general_md"', page)
+        self.assertIn('data-act="new-folder"', page)
         self.assertIn("function createLibraryMarkdown(parent = '')", script)
         self.assertIn("fetchJson('/api/library/markdown'", script)
         self.assertIn("['new-markdown', '新建 Markdown']", script)

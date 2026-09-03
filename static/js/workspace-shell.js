@@ -18,6 +18,8 @@
   let activeFrame = null;
   let libraryReady = false;
   let pendingLibraryPath = '';
+  let pendingQuestionFile = null;
+  let questionReady = false;
   const THEME_COLOR_RE = /^#[0-9a-f]{6}$/i;
 
   function normalizeThemeMode(value) {
@@ -159,6 +161,23 @@
     pendingLibraryPath = '';
   }
 
+  function sendQuestionFile(meta) {
+    const path = String(meta?.path || '').trim();
+    if (!path) return;
+    const payload = {source: 'quizforge', type: 'open-question-file', path,
+      kind: String(meta?.kind || '')};
+    if (!questionReady || !questionFrame.contentWindow) {
+      pendingQuestionFile = payload;
+      return;
+    }
+    try {
+      questionFrame.contentWindow.postMessage(payload, window.location.origin);
+      pendingQuestionFile = null;
+    } catch (_error) {
+      pendingQuestionFile = payload;
+    }
+  }
+
   function normalizeRoute(raw) {
     try {
       const url = new URL(raw || '/', window.location.origin);
@@ -280,6 +299,7 @@
       const current = trackedRoute(targetFrame);
       if (sourceFrame !== targetFrame && current !== normalized) {
         setTrackedRoute(targetFrame, normalized);
+        if (targetFrame === questionFrame) questionReady = false;
         targetFrame.src = embeddedRoute(normalized);
       } else if (!current) {
         setTrackedRoute(targetFrame, normalized);
@@ -367,13 +387,19 @@
       else if (event.data.fallbackUrl) window.open(String(event.data.fallbackUrl), '_blank', 'noopener');
       return;
     }
-    if (event.data.type === 'open-library-file') {
-      if (!sourceFrame || sourceFrame === libraryFrame) return;
+    if (event.data.type === 'open-question-file'
+        || event.data.type === 'open-library-file') {
+      if (!sourceFrame) return;
       const path = String(event.data.path || '').trim();
       if (!path) return;
-      pendingLibraryPath = path;
-      showRoute('/library');
-      sendLibraryOpen(path);
+      // 旧消息名只保留协议兼容，语义统一为题库内文件标签，不再切换资料库 iframe。
+      if (sourceFrame === questionFrame) sendQuestionFile({path, kind: event.data.kind});
+      else {
+        pendingQuestionFile = {source: 'quizforge', type: 'open-question-file', path,
+          kind: String(event.data.kind || '')};
+        showRoute('/', {force: true});
+        sendQuestionFile(pendingQuestionFile);
+      }
       return;
     }
     if (event.data.type === 'page-theme' && sourceFrame) {
@@ -414,8 +440,10 @@
   });
 
   questionFrame.addEventListener('load', () => {
+    questionReady = true;
     questionFrame.contentWindow?.postMessage({source: 'quizforge', type: 'shell-theme',
       mode: shellTheme.mode, color: shellTheme.color, textColor: shellTheme.textColor}, window.location.origin);
+    if (pendingQuestionFile) sendQuestionFile(pendingQuestionFile);
     if (activeFrame !== questionFrame) return;
     try {
       const title = questionFrame.contentDocument?.title;
@@ -450,7 +478,10 @@
     showRoute(route, {replace: true, force: true});
   });
 
-  window.addEventListener('pywebviewready', () => sendLibraryOpen(pendingLibraryPath));
+  window.addEventListener('pywebviewready', () => {
+    sendLibraryOpen(pendingLibraryPath);
+    if (pendingQuestionFile) sendQuestionFile(pendingQuestionFile);
+  });
 
   showRoute(activeRoute, {replace: true});
 })();

@@ -77,7 +77,8 @@ logger = logging.getLogger(__name__)
 
 _QUESTION_SCOPE_KEYS = (
     "tag", "tags", "match", "type", "difficulty", "starred", "sort",
-    "collection", "all", "recursive", "q",
+    "collection", "all", "recursive", "q", "show_cards", "show_pdf",
+    "show_general_md", "show_md",
 )
 
 
@@ -103,6 +104,17 @@ def _question_scope_url(pairs, *, set_values=None, remove=()):
         result.extend((key, str(item)) for item in values if str(item) != "")
     query = urlencode(result)
     return url_for("index") + (f"?{query}" if query else "")
+
+
+def _query_flag(args, name: str, *aliases: str, default: bool = False) -> bool:
+    """读取布尔查询参数；兼容重复值、旧 URL 别名和默认值。"""
+    for key in (name, *aliases):
+        if key in args:
+            values = args.getlist(key) if hasattr(args, "getlist") else [args.get(key)]
+            # 隐藏 input=0 与勾选 input=1 同名时，以任一真值为准。
+            return any(str(value).lower() in ("1", "true", "on", "yes")
+                       for value in values)
+    return bool(default)
 
 app = Flask(__name__)
 app.secret_key = "quizbank-local-dev"  # 本地会话用，非安全敏感
@@ -1300,7 +1312,13 @@ def _library_history_children(parts: tuple[str, ...], offset: int):
 
 @app.route("/library")
 def library_page():
-    return render_template("library.html")
+    # 资料库已经并入题库；保留旧 URL 仅用于书签和第三方集成的兼容跳转。
+    # 文件内容仍由 /library/raw、/api/library/* 提供，避免破坏已有任务接口。
+    target = url_for("index")
+    raw_path = (request.args.get("open") or "").strip()
+    if raw_path:
+        target = f"{target}?{urlencode({'file': raw_path, 'file_kind': request.args.get('kind', '')})}"
+    return redirect(target)
 
 
 @app.route("/api/library/children")
@@ -1330,10 +1348,19 @@ def library_children():
             continue
         kind = _library_entry_kind(child, child_rel)
         if kind:
-            entries.append({
+            entry = {
                 "name": child.name, "path": child_rel, "kind": kind,
                 "size": child.stat().st_size,
-            })
+            }
+            if kind == "markdown":
+                is_question, question_id = filestore._display_markdown_identity(child)
+                entry.update({
+                    "is_question": is_question,
+                    "markdown_kind": ("question" if is_question else "document"),
+                })
+                if question_id:
+                    entry["question_id"] = question_id
+            entries.append(entry)
     if not rel:
         entries.append({
             "name": "历史记录", "path": _LIBRARY_HISTORY_PREFIX,
@@ -1355,7 +1382,7 @@ def library_create_folder():
         _library_reject_history_operation(parent)
         result = library_ops.create_folder(
             config.BANK_DIR, parent, payload.get("name", ""))
-    except (library_ops.LibraryOperationError, OSError) as exc:
+    except (library_ops.LibraryOperationError, OSError, ValueError) as exc:
         return _library_operation_error_response(exc)
     return jsonify(ok=True, entry=result.as_dict()), 201
 
@@ -1383,9 +1410,12 @@ def library_rename():
         payload = _library_operation_payload()
         path = payload.get("path", "")
         _library_reject_history_operation(path)
+        # 先由统一路径入口做一次校验；题卡 Markdown 仍按普通文件改名，保留
+        # frontmatter id，让打开的题卡标签和题库索引继续指向同一道题。
+        _library_path(path)
         result = library_ops.rename_entry(
             config.BANK_DIR, path, payload.get("name", ""))
-    except (library_ops.LibraryOperationError, OSError) as exc:
+    except (library_ops.LibraryOperationError, OSError, ValueError) as exc:
         return _library_operation_error_response(exc)
     return jsonify(ok=True, entry=result.as_dict())
 
@@ -1411,6 +1441,46 @@ def library_transfer():
     return jsonify(ok=True, entry=result.as_dict())
 
 
+@app.route("/api/library/delete", methods=["POST"])
+def library_delete():
+    try:
+        payload = _library_operation_payload()
+        path = payload.get("path", "")
+        _library_reject_history_operation(path)
+        target, rel = _library_path(path)
+        kind = _library_entry_kind(target, rel)
+        if kind == "markdown":
+            # 题卡不能直接 unlink：delete_question 会写入原路径并清理选题篮，
+            # 恢复/图片引用逻辑也依赖这些字段。显式 document Markdown 才走普通
+            # 文件回收分支。
+            record = filestore._question_record_from_path(target)
+            if record is not None:
+                deleted = filestore.delete_question(str(record["id"]))
+                if deleted is None:
+                    raise library_ops.LibraryOperationError(
+                        "文件不存在", code="not_found", status=404)
+                entry = {
+                    "path": rel, "old_path": rel, "kind": "markdown",
+                    "copied": False, "trashed": True,
+                    "question_id": str(record["id"]),
+                }
+                return jsonify(ok=True, entry=entry)
+            trash = filestore.trash_file(target, kind="markdown")
+            entry = {"path": rel, "old_path": rel, "kind": "markdown",
+                     "copied": False, "trashed": True, **trash}
+            return jsonify(ok=True, entry=entry)
+        if kind in {"pdf", "word", "image"}:
+            trash = filestore.trash_file(target, kind=kind)
+            entry = {"path": rel, "old_path": rel, "kind": kind,
+                     "copied": False, "trashed": True, **trash}
+            return jsonify(ok=True, entry=entry)
+        # 保留 library_ops 对不支持扩展名、非空文件夹等旧错误码的处理。
+        result = library_ops.delete_entry(config.BANK_DIR, path)
+    except (library_ops.LibraryOperationError, OSError, ValueError) as exc:
+        return _library_operation_error_response(exc)
+    return jsonify(ok=True, entry=result.as_dict())
+
+
 @app.route("/api/library/read")
 def library_read():
     raw_path = request.args.get("path", "")
@@ -1431,8 +1501,12 @@ def library_read():
         return jsonify(ok=False, error=f"无法按 UTF-8 读取文件：{exc}"), 400
     # 纳秒时间戳通常是 19 位，超过 JavaScript 的安全整数上限。必须作为十进制
     # 字符串交给前端原样回传，否则 JSON.parse 取整后每次保存都会被误判为外部修改。
+    is_question, question_id = filestore._display_markdown_identity(target)
     return jsonify(ok=True, path=rel, name=display_name, text=text,
-                   mtime=str(target.stat().st_mtime_ns))
+                   mtime=str(target.stat().st_mtime_ns),
+                   is_question=is_question,
+                   markdown_kind=("question" if is_question else "document"),
+                   question_id=question_id or "")
 
 
 @app.route("/api/library/write", methods=["POST"])
@@ -1577,8 +1651,9 @@ def handouts_selected():
 
 @app.route("/api/selection")
 def selection_summaries():
-    """题库右栏使用的轻量选题篮；按 id 定向读取，不解析整座题库。"""
-    return jsonify(ok=True, questions=handouts.selected_question_summaries())
+    """题库选题抽屉数据；按 id 定向读取，不解析整座题库。"""
+    questions = handouts.selected_question_details()
+    return jsonify(ok=True, count=len(questions), questions=questions)
 
 
 @app.route("/api/handouts/question/<qid>")
@@ -2452,6 +2527,13 @@ def index():
     sort = request.args.get("sort", "custom")
     collection_id = request.args.get("collection") or ""
     search = request.args.get("q", "").strip()
+    # 文件树中的展示偏好跟随题集导航和筛选 URL 保留。三项独立：题卡 Markdown
+    # 只有 show_cards 才出现，一般资料 Markdown 只有 show_general_md 才出现。
+    # show_md/display_md 是旧 URL 别名，迁移为“一般资料”而不是再次混入题卡。
+    show_cards = _query_flag(request.args, "show_cards")
+    show_pdf = _query_flag(request.args, "show_pdf", "display_pdf")
+    show_general_md = _query_flag(
+        request.args, "show_general_md", "show_md", "display_md")
     search_query = None
     search_error = ""
     if search:
@@ -2470,8 +2552,16 @@ def index():
 
     # 父文件夹默认汇总所有后代题目和原卷。这里的“汇总”只递归建立轻量路径快照，
     # 首屏仍只读取 30 道题，后续随滚动按批加载，不能退回一次创建整年题卡的旧实现。
-    collection_children = (filestore.list_collection_children(collection_id)
-                           if collection_id else [])
+    if collection_id:
+        if show_pdf or show_cards or show_general_md:
+            collection_children = filestore.list_collection_children(
+                collection_id, show_pdf=show_pdf, show_cards=show_cards,
+                show_general_md=show_general_md)
+        else:
+            # 保持旧调用签名，便于插件和外部集成对默认视图做轻量 mock。
+            collection_children = filestore.list_collection_children(collection_id)
+    else:
+        collection_children = []
     collection_exists = bool(
         collection_id and filestore.get_collection(collection_id))
     explicit_recursive = (
@@ -2529,7 +2619,19 @@ def index():
                     source, "records", sort)
     # 首页侧栏只列顶层并默认折叠；深链接只预载当前路径。完整 642 目录树及移动
     # 目标改为用户点击控件时再加载，不能让一个低频下拉框拖慢每次试卷切换。
-    folder_tree = filestore.list_navigation_tree(collection_id)
+    if show_pdf or show_cards or show_general_md:
+        folder_tree = filestore.list_navigation_tree(
+            collection_id, show_pdf=show_pdf, show_cards=show_cards,
+            show_general_md=show_general_md)
+    else:
+        # 默认题库树保持原始单参数调用，资料展示只在用户显式勾选时启用。
+        folder_tree = filestore.list_navigation_tree(collection_id)
+    # 根目录也可以直接存放 PDF/Markdown；不伪造一个“根题集”节点，交给模板
+    # 直接挂在文件树下。未勾选展示开关时保持空列表，避免扫描无意义文件。
+    root_files = (filestore.list_collection_files(
+        "", show_pdf=show_pdf, show_cards=show_cards,
+        show_general_md=show_general_md)
+        if (show_pdf or show_cards or show_general_md) else [])
     all_cols = []
     cur_col = ({"name": collection_id.rsplit("/", 1)[-1]}
                if collection_id else None)
@@ -2543,7 +2645,8 @@ def index():
         request.args, exclude={"q"})
     filter_context_fields = _question_scope_pairs(
         request.args,
-        exclude={"tag", "tags", "match", "type", "difficulty", "starred"})
+        exclude={"tag", "tags", "match", "type", "difficulty", "starred",
+                 "show_cards", "show_pdf", "show_general_md", "show_md"})
     filter_reset_url = _question_scope_url(
         scope_pairs,
         remove={"tag", "tags", "match", "type", "difficulty", "starred"})
@@ -2582,6 +2685,7 @@ def index():
         sort=sort,
         all_collections=all_cols,
         folder_tree=folder_tree,
+        root_files=root_files,
         active_collection=collection_id,
         bank_tree_key=uuid.uuid5(
             uuid.NAMESPACE_URL,
@@ -2600,6 +2704,11 @@ def index():
         folder_scope_url=folder_scope_url,
         export_templates=export_templates,
         export_selected_template=export_selected_template,
+        show_cards=show_cards,
+        show_pdf=show_pdf,
+        show_general_md=show_general_md,
+        # 模板/旧插件仍可能读取 show_md；它代表一般资料展示状态。
+        show_md=show_general_md,
     )
 
 
@@ -3160,6 +3269,37 @@ def _redraw_body_html(rec: dict) -> str:
         img_align=rec["img_align"], img_split=rec["img_split"]))
 
 
+def _redraw_versions_payload(qid: str, index: int) -> list[dict]:
+    """把指定图片的版本记录转换成前端可直接展示的安全数据。"""
+    rec = filestore.get_question(qid)
+    if not rec:
+        raise filestore.ImageVersionError(f"题目不存在：{qid}")
+    refs = tikz_redraw.image_refs(rec["body"] or "")
+    if not (0 <= index < len(refs)):
+        raise filestore.ImageVersionError("图片序号越界")
+    versions = filestore.ensure_img_versions(qid)
+    out = []
+    for item in versions:
+        if not isinstance(item, dict) or item.get("i") != index:
+            continue
+        name = str(item.get("name") or "")
+        exists = bool(name) and (config.ASSETS_DIR / name).is_file()
+        row = {
+            "name": name,
+            "src": url_for("asset_serve", filename=name),
+            "kind": item.get("kind") or "original",
+            "created": item.get("created") or "",
+            "model": item.get("model") or "",
+            "prompt": item.get("prompt") or "",
+            "current": name == refs[index],
+            "exists": exists,
+            "can_delete": (item.get("kind") != "original"
+                            and name != refs[index]),
+        }
+        out.append(row)
+    return out
+
+
 def _redraw_worker(job_id: str, qid: str, index: int, extra: str):
     """后台线程：生成重绘图，结果塞进 _redraw_jobs。
 
@@ -3241,7 +3381,8 @@ def question_redraw_apply(qid):
         return jsonify(ok=False, error=str(e)), 400
     rec = filestore.get_question(qid)
     return jsonify(ok=True, old=old, index=index,
-                   body_html=_redraw_body_html(rec))
+                   body_html=_redraw_body_html(rec),
+                   versions=_redraw_versions_payload(qid, index))
 
 
 @app.route("/question/<qid>/redraw/restore", methods=["POST"])
@@ -3257,7 +3398,58 @@ def question_redraw_restore(qid):
         return jsonify(ok=False, error=str(e)), 400
     rec = filestore.get_question(qid)
     return jsonify(ok=True, orig=orig, index=index,
-                   body_html=_redraw_body_html(rec))
+                   body_html=_redraw_body_html(rec),
+                   versions=_redraw_versions_payload(qid, index))
+
+
+@app.route("/question/<qid>/redraw/versions")
+def question_redraw_versions(qid):
+    """返回题干某张图片的全部历史版本。"""
+    index = _img_index({"index": request.args.get("index", "0")})
+    if index is None:
+        return jsonify(ok=False, error="非法图片序号"), 400
+    try:
+        versions = _redraw_versions_payload(qid, index)
+    except filestore.ImageVersionError as e:
+        status = 404 if "题目不存在" in str(e) else 400
+        return jsonify(ok=False, error=str(e)), status
+    return jsonify(ok=True, index=index, versions=versions)
+
+
+@app.route("/question/<qid>/redraw/version/switch", methods=["POST"])
+def question_redraw_version_switch(qid):
+    """切换到该题该图片已登记的版本。"""
+    data = request.get_json(silent=True) or {}
+    index = _img_index(data)
+    name = str(data.get("name", "") or "").strip()
+    if index is None or not name:
+        return jsonify(ok=False, error="图片版本参数不合法"), 400
+    try:
+        new_name, old_name = tikz_redraw.switch_version(qid, index, name)
+        rec = filestore.get_question(qid)
+        versions = _redraw_versions_payload(qid, index)
+    except (tikz_redraw.RedrawError, filestore.ImageVersionError) as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True, index=index, name=new_name, old=old_name,
+                   body_html=_redraw_body_html(rec), versions=versions)
+
+
+@app.route("/question/<qid>/redraw/version/delete", methods=["POST"])
+def question_redraw_version_delete(qid):
+    """删除一个历史生成版本；共享文件只在全库无引用时物理删除。"""
+    data = request.get_json(silent=True) or {}
+    index = _img_index(data)
+    name = str(data.get("name", "") or "").strip()
+    if index is None or not name:
+        return jsonify(ok=False, error="图片版本参数不合法"), 400
+    try:
+        deletion = filestore.delete_img_version(qid, index, name)
+        versions = _redraw_versions_payload(qid, index)
+    except filestore.ImageVersionError as e:
+        status = 404 if "题目不存在" in str(e) else 400
+        return jsonify(ok=False, error=str(e)), status
+    return jsonify(ok=True, index=index, name=name, deletion=deletion,
+                   versions=versions)
 
 
 @app.route("/clear", methods=["POST"])
@@ -3510,12 +3702,27 @@ def collection_create():
 @app.route("/collections/children")
 def collection_children():
     """文件夹树按需展开：只返回某一级，不触发整库题目扫描。"""
+    show_cards = _query_flag(request.args, "show_cards")
+    show_pdf = _query_flag(request.args, "show_pdf", "display_pdf")
+    show_general_md = _query_flag(
+        request.args, "show_general_md", "show_md", "display_md")
     try:
-        children = filestore.list_collection_children(
-            (request.args.get("parent") or "").strip("/"))
+        parent = (request.args.get("parent") or "").strip("/")
+        if show_pdf or show_cards or show_general_md:
+            children = filestore.list_collection_children(
+                parent, show_pdf=show_pdf, show_cards=show_cards,
+                show_general_md=show_general_md)
+        else:
+            children = filestore.list_collection_children(parent)
+        files = filestore.list_collection_files(
+            parent, show_pdf=show_pdf, show_cards=show_cards,
+            show_general_md=show_general_md)
     except ValueError as exc:
         return jsonify(ok=False, error=str(exc)), 400
-    return jsonify(ok=True, children=children)
+    # ``children`` 是旧前端协议；新文件树额外消费同级直属 ``files``，这样根目录
+    # 文件也能展示，不需要伪造一个根文件夹节点。
+    return jsonify(ok=True, children=children, files=files,
+                   folders=children)
 
 
 @app.route("/collections/options")
@@ -3686,55 +3893,76 @@ _PAPER_MAX_BYTES = config.MAX_EXAM_DOCUMENT_BYTES
 
 
 @app.route("/collections/<path:cid>/papers/upload", methods=["POST"])
-def folder_paper_upload(cid):
-    """往文件夹里手动补一份原卷。"""
-    if not filestore.get_collection(cid):
-        flash("题集不存在", "err")
-        return redirect(url_for("index"))
-    file = request.files.get("file")
-    if not file or not file.filename:
-        flash("未选择文件", "err")
+@app.route("/papers/upload", methods=["POST"])
+def folder_paper_upload(cid=""):
+    """往文件夹里补原卷；外部拖入 PDF 只落盘，不自动触发识别。"""
+    wants_json = (request.accept_mimetypes.best == "application/json"
+                  or request.headers.get("X-Requested-With") == "XMLHttpRequest")
+
+    def failure(message: str, status: int = 400):
+        if wants_json:
+            return jsonify(ok=False, error=message), status
+        flash(message, "err")
         return redirect(request.referrer or url_for("index"))
-    if Path(file.filename).suffix.lower() not in _PAPER_UPLOAD_EXTS:
-        flash("不支持的文件格式", "err")
-        return redirect(request.referrer or url_for("index"))
-    ext = Path(file.filename).suffix.lower()
-    try:
-        if ext == ".doc":
-            pos = file.stream.tell()
-            file.stream.seek(0)
-            head = file.stream.read(8)
-            file.stream.seek(pos)
-            if head != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
-                raise _UploadRejected("扩展名是 .doc，但内容不是旧版 Word 文档")
-            if _file_size(file) > _PAPER_MAX_BYTES:
-                raise _UploadRejected(
-                    f"文件过大（上限 {_PAPER_MAX_BYTES // (1024 * 1024)}MB）")
-        else:
-            _check_exam_file(file)
-    except _UploadRejected as exc:
-        flash(str(exc), "err")
-        return redirect(request.referrer or url_for("index"))
+
+    # 空 cid 表示题库根目录。它不是侧栏题集，但根目录文件同样可以在文件树中
+    # 展示，因此拖放上传也走同一条受限路径。
+    cid = str(cid or "").strip("/")
+    if cid and not filestore.get_collection(cid):
+        return failure("题集不存在", 404)
+    files = [item for item in request.files.getlist("file")
+             if item and item.filename]
+    if not files:
+        return failure("未选择文件")
     kind = "solution" if request.form.get("kind") == "solution" else "exam"
-    # 先落到临时目录再走 store_paper：那个函数是本地唯一的「原卷落盘」出口，
-    # 撞名加后缀、文件名清洗都在里面，绕过它就得再抄一份同样的逻辑。
+    saved: list[dict] = []
     config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = config.UPLOAD_DIR / f"{uuid.uuid4().hex}{Path(file.filename).suffix}"
-    try:
-        file.save(str(tmp))
-        if tmp.stat().st_size > _PAPER_MAX_BYTES:
-            flash(f"文件过大（上限 "
-                  f"{_PAPER_MAX_BYTES // (1024 * 1024)}MB）", "err")
-            return redirect(request.referrer or url_for("index"))
-        filestore.store_paper(str(tmp), cid, file.filename, kind)
-        flash(f"已保存原卷「{file.filename}」", "ok")
-    except (OSError, ValueError) as e:
-        flash(f"原卷保存失败：{e}", "err")
-    finally:
+    for file in files:
+        filename = str(file.filename or "")
+        ext = Path(filename).suffix.lower()
+        if ext not in _PAPER_UPLOAD_EXTS:
+            return failure(f"「{filename}」不支持的文件格式")
         try:
-            tmp.unlink()
-        except OSError:
-            pass
+            if ext == ".doc":
+                pos = file.stream.tell()
+                file.stream.seek(0)
+                head = file.stream.read(8)
+                file.stream.seek(pos)
+                if head != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                    raise _UploadRejected(
+                        "扩展名是 .doc，但内容不是旧版 Word 文档")
+                if _file_size(file) > _PAPER_MAX_BYTES:
+                    raise _UploadRejected(
+                        f"文件过大（上限 {_PAPER_MAX_BYTES // (1024 * 1024)}MB）")
+            else:
+                _check_exam_file(file)
+        except _UploadRejected as exc:
+            return failure(str(exc))
+
+        tmp = config.UPLOAD_DIR / f"{uuid.uuid4().hex}{ext}"
+        try:
+            file.save(str(tmp))
+            if tmp.stat().st_size > _PAPER_MAX_BYTES:
+                return failure(
+                    f"文件过大（上限 {_PAPER_MAX_BYTES // (1024 * 1024)}MB）")
+            stored_name = filestore.store_paper(str(tmp), cid, filename, kind)
+            saved.append({
+                "name": stored_name,
+                "filename": filename,
+                "path": (PurePosixPath(cid) / stored_name).as_posix(),
+                "kind": kind,
+            })
+        except (OSError, ValueError) as exc:
+            return failure(f"原卷保存失败：{exc}")
+        finally:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+    if wants_json:
+        return jsonify(ok=True, files=saved, count=len(saved),
+                       message=f"已保存 {len(saved)} 份原卷")
+    flash(f"已保存 {len(saved)} 份原卷", "ok")
     return redirect(request.referrer or url_for("index"))
 
 
@@ -3756,37 +3984,75 @@ def folder_paper_view():
 
 @app.route("/papers/delete", methods=["POST"])
 def folder_paper_delete():
-    """彻底删除一份原卷（不进回收站，面板上的按钮已写明）。"""
+    """把一份原卷移入题库回收站。"""
     paper_id = request.form.get("id", "")
     name = Path(paper_id.replace("\\", "/")).name or "原卷"
     if filestore.remove_paper(paper_id):
-        flash(f"已删除原卷「{name}」", "ok")
+        if request.accept_mimetypes.best == "application/json":
+            return jsonify(ok=True, id=paper_id, trashed=True,
+                           message=f"已将原卷「{name}」移入回收站")
+        flash(f"已将原卷「{name}」移入回收站", "ok")
     else:
+        if request.accept_mimetypes.best == "application/json":
+            return jsonify(ok=False, error="原卷不存在"), 404
         flash("原卷不存在", "err")
     return redirect(request.referrer or url_for("index"))
 
 
 @app.route("/collections/<path:cid>/papers/reconvert", methods=["POST"])
-def folder_paper_reconvert(cid):
+@app.route("/papers/reconvert", methods=["POST"])
+def folder_paper_reconvert(cid=""):
     """拿文件夹里已存的原卷再跑一遍识别，题目自动落回**这个**文件夹。
 
     与批量上传的唯一区别是 `target_folder_id`：它让 `_auto_import_folder` 短路到
     本文件夹（不新建、不看 pack/per_task 开关），也让两处清理点放过这两个文件
     ——它们是题库里的原卷，不是临时上传件（见 `_maybe_finish_batch`）。
     """
-    if not filestore.get_collection(cid):
-        flash("题集不存在", "err")
-        return redirect(url_for("index"))
+    # 根目录不是一个可在侧栏选择的题集，但“显示 PDF”会把根目录文件列出来。
+    # 因此根目录也必须能走同一套重新转换流程；空字符串由单独的兼容路由传入。
+    wants_json = (request.accept_mimetypes.best == "application/json"
+                  or request.headers.get("X-Requested-With") == "XMLHttpRequest")
+
+    def failure(message: str, status: int = 400):
+        if wants_json:
+            return jsonify(ok=False, error=message), status
+        flash(message, "err")
+        return redirect(request.referrer or url_for("index"))
+
+    cid = str(cid or "").strip("/")
+    if cid and not filestore.get_collection(cid):
+        return failure("题集不存在", 404)
     exam = filestore.paper_abspath(request.form.get("exam_paper_id", ""))
     if exam is None:
-        flash("请先勾选一份「题干」原卷", "err")
-        return redirect(request.referrer or url_for("index"))
+        return failure("请先勾选一份「题干」原卷")
     sol_id = request.form.get("solution_paper_id", "")
     sol = filestore.paper_abspath(sol_id) if sol_id else None
     if sol_id and sol is None:
-        flash("勾选的解析卷不存在", "err")
-        return redirect(request.referrer or url_for("index"))
+        return failure("勾选的解析卷不存在")
+    # 原卷面板的落点必须就是原卷所在的直属题集；否则恶意/过期表单可能把
+    # 另一题集的 PDF 送入当前目录，增量匹配也会误认题号。
+    target_dir = filestore._checked_folder_path(cid, allow_root=True)
+    for paper in (exam, sol):
+        if paper is not None and paper.parent.resolve() != target_dir.resolve():
+            return failure("原卷不在当前题集，已取消重新转换")
     ocr_backend = _parse_ocr_backend(request.form.get("ocr_backend", ""))
+    incremental = request.form.get("incremental") in ("1", "true", "on")
+    # 原卷面板复用批量转换选项；旧表单只提交 OCR 后端时仍沿用原来的默认值。
+    include_solution = (request.form.get("include_solution") in
+                        ("1", "true", "on")) if "include_solution" in request.form \
+        else sol is not None
+    only_numbers = _parse_number_spec(request.form.get("only_numbers", ""))
+    boundary_mode = _parse_boundary_mode(request.form.get("boundary_mode", ""))
+    block_mode = _parse_block_mode(request.form.get("block_mode", ""))
+    engine = _parse_engine(request.form.get("engine", ""))
+    if boundary_mode == _BOUNDARY_MODE_WHITELIST:
+        engine = converter.ENGINE_BLOCK
+    try:
+        num_template = _parse_num_template(request.form.get("num_template", ""))
+    except blocksplit.TemplateError as exc:
+        return failure(f"题号模板写法有误：{exc}")
+    incremental_baseline = (
+        _incremental_baseline_snapshot(cid) if incremental else [])
 
     disp_name = exam.name
     if sol is not None:
@@ -3795,13 +4061,18 @@ def folder_paper_reconvert(cid):
         history_id = _history_record_for_sources(
             disp_name, exam, sol, ocr_backend=ocr_backend)
     except (OSError, history_store.HistoryError) as exc:
-        flash(f"历史记录创建失败：{exc}", "err")
-        return redirect(request.referrer or url_for("index"))
+        return failure(f"历史记录创建失败：{exc}")
     job_id = uuid.uuid4().hex
     with _jobs_lock:
         _jobs[job_id] = {"status": "pending", "md": None, "error": None,
                          "filename": exam.name, "path": str(exam),
-                         "boundary_mode": _BOUNDARY_MODE_AUTO,
+                         "solution_path": str(sol) if sol is not None else None,
+                         "include_solution": include_solution,
+                         "only_numbers": only_numbers,
+                         "engine": engine, "block_mode": block_mode,
+                         "num_template": num_template,
+                         "boundary_mode": boundary_mode,
+                         "ocr_backend": ocr_backend,
                          "image_page_count": 0,
                          "exam_image_page_count": 0,
                          "solution_image_page_count": 0,
@@ -3810,11 +4081,11 @@ def folder_paper_reconvert(cid):
     grp = {
         "gid": 0, "job_id": job_id, "file_path": str(exam),
         "solution_path": str(sol) if sol is not None else None,
-        "include_solution": sol is not None,
-        "only_numbers": None, "filename": disp_name,
-        "engine": _DEFAULT_ENGINE, "ocr_backend": ocr_backend,
-        "block_mode": _parse_block_mode(""),
-        "num_template": "", "boundary_mode": _BOUNDARY_MODE_AUTO,
+        "include_solution": include_solution,
+        "only_numbers": only_numbers, "filename": disp_name,
+        "engine": engine, "ocr_backend": ocr_backend,
+        "block_mode": block_mode,
+        "num_template": num_template, "boundary_mode": boundary_mode,
         "image_page_count": 0, "exam_image_page_count": 0,
         "solution_image_page_count": 0,
         "cleanup_paths": [],    # 不删原卷文件——它们在题库目录里，不是临时上传件
@@ -3822,23 +4093,40 @@ def folder_paper_reconvert(cid):
         "pending": None, "note": "",
         "reviewed": None, "imported_count": 0,
         "history_id": history_id,
+        "incremental": incremental,
+        "incremental_baseline": incremental_baseline,
+        "incremental_scope": "",
     }
     batch_id = uuid.uuid4().hex
+    if incremental:
+        # 作用域只需在本批次内稳定；题号/指纹匹配负责跨批保留旧 qid。使用批次
+        # id 可避免两次对同一 PDF 的重转换互相认领临时追加题。
+        grp["incremental_scope"] = f"paper:{batch_id}:folder:{cid}"
     with _batch_jobs_lock:
         _batch_jobs[batch_id] = {
             "status": "converting", "groups": [grp], "current_idx": 0,
             "files_cleaned": False, "created_at": time.time(),
             "running": 0, "cancelled": False,
-            "pack_folder_name": "", "auto_import": False,
+            "pack_folder_name": "", "auto_import": incremental,
             "per_task_folder": False, "auto_keep_original": False,
+            "incremental": incremental,
             # 直指当前文件夹——这是原卷面板重新转换与普通批量上传的唯一区别
             "target_folder_id": cid,
         }
         _persist_batch(batch_id, _batch_jobs[batch_id])
     threading.Thread(target=_convert_batch_worker, args=(batch_id,),
                      daemon=True).start()
-    flash("已开始安全重跑。识别结果只进入审核页，不会自动覆盖或追加到现有题目；"
-          "可从导航栏「转换中」查看进度", "ok")
+    message = (
+        "已开始增量重新转换。无冲突结果会自动更新，冲突项会保留识别结果并转人工审核；"
+        "可从导航栏「转换中」查看进度"
+        if incremental else
+        "已开始安全重跑。识别结果只进入审核页，不会自动覆盖或追加到现有题目；"
+        "可从导航栏「转换中」查看进度"
+    )
+    if wants_json:
+        return jsonify(ok=True, batch_id=batch_id, incremental=incremental,
+                       message=message), 202
+    flash(message, "ok")
     return redirect(request.referrer or url_for("index"))
 
 
@@ -4317,6 +4605,7 @@ def _convert_one_group(batch_id: str, g: dict):
     with _batch_jobs_lock:
         batch = _batch_jobs.get(batch_id)
         auto_import = bool(batch and batch.get("auto_import"))
+    incremental_import = bool(g.get("incremental"))
     # 勾了「整批免审」就是要求全自动，不能停下来等人；no_ai 只是不送 LLM，与免审
     # 不冲突（照样能自动入库），所以只有 manual 被免审否决。
     if auto_import and block_mode == _BLOCK_MODE_MANUAL:
@@ -4442,7 +4731,7 @@ def _convert_one_group(batch_id: str, g: dict):
         # 不审核直接入库：转换成功即刻按默认值落库，不等人工点开这一组。**在批次锁
         # 之外**调用——入库要扫题库查重、写一堆 md 文件，占着锁会拖住同批其它并发组
         # 的状态更新（见 _convert_batch_worker 的并发说明）。
-        if auto_import:
+        if auto_import or incremental_import:
             _auto_import_after_convert(
                 batch_id, g, attempt=attempt, md_snapshot=md)
     except Exception as e:
@@ -4828,6 +5117,8 @@ def _convert_batch_worker(batch_id: str):
 def _group_terminal(g) -> bool:
     """只有明确导入或跳过才算最终态；普通失败还要保留原文件供重转。"""
     return (not g.get("refresh_in_progress")
+            and not g.get("incremental_conflicts")
+            and not (g.get("incremental") and g.get("status") == "error")
             and g.get("reviewed") in ("imported", "skipped"))
 
 
@@ -4868,7 +5159,9 @@ def _maybe_finish_batch(batch_id: str):
             return
         batch["files_cleaned"] = True
         groups = list(batch["groups"])
-        keep_files = bool(batch.get("target_folder_id"))
+        # 键存在即表示文件来自题库原卷面板；空字符串是题库根目录，也必须保留，
+        # 不能再用 truthiness 把根目录原卷误删。
+        keep_files = "target_folder_id" in batch
         _persist_batch(batch_id, batch)
     for g in groups:
         # 文件夹原卷面板发起的「重新转换」（target_folder_id 非空）：那两个文件是
@@ -4894,7 +5187,7 @@ def _clean_batch_uploads(batch_id: str):
         batch = _batch_jobs.pop(batch_id, None)
     if not batch:
         return
-    keep_files = bool(batch.get("target_folder_id"))   # 理由同 _maybe_finish_batch
+    keep_files = "target_folder_id" in batch   # 理由同 _maybe_finish_batch
     for g in batch["groups"]:
         if not keep_files:
             for p in _group_files(g):
@@ -5716,6 +6009,12 @@ def batch_group_reconvert(batch_id, gid):
     boundary_raw = request.form.get("boundary_mode")
     refresh_imported = request.form.get("refresh_imported") in (
         "1", "true", "on")
+    incremental_refresh = request.form.get("incremental") in (
+        "1", "true", "on")
+    # 两个动作语义互斥；旧客户端或手工请求同时带上时，严格刷新优先，
+    # 避免后面的增量分支覆盖 refresh_previous_items 的安全快照。
+    if refresh_imported:
+        incremental_refresh = False
     try:
         num_template = _parse_num_template(tpl_raw)
     except blocksplit.TemplateError as e:
@@ -5735,7 +6034,10 @@ def batch_group_reconvert(batch_id, gid):
         # 文件不存在，不如在这里说清楚。
         is_imported_refresh = (
             refresh_imported and g.get("reviewed") == "imported")
-        if g.get("reviewed") == "imported" and not is_imported_refresh:
+        is_incremental_refresh = (
+            incremental_refresh and g.get("reviewed") == "imported")
+        if (g.get("reviewed") == "imported"
+                and not (is_imported_refresh or is_incremental_refresh)):
             flash("该组已完成审核，无法重新转换", "err")
             return redirect(url_for("batch_dashboard", batch_id=batch_id))
         if is_imported_refresh and not (
@@ -5764,6 +6066,9 @@ def batch_group_reconvert(batch_id, gid):
             flash("无书签合集的内容结构展开依赖连续题号，不能使用强制白名单", "err")
             return redirect(url_for(
                 "batch_dashboard", batch_id=batch_id))
+        if is_incremental_refresh and g.get("refresh_in_progress"):
+            flash("该组已有安全刷新在进行，请等待当前结果处理完", "err")
+            return redirect(url_for("batch_dashboard", batch_id=batch_id))
         g["boundary_mode"] = boundary_mode
         if only_numbers_raw.strip():
             g["only_numbers"] = _parse_number_spec(only_numbers_raw)
@@ -5798,6 +6103,28 @@ def batch_group_reconvert(batch_id, gid):
             source = Path(g.get("filename") or "").stem or ""
             refresh_previous_items = _auto_import_items(
                 previous_chosen, source)
+        incremental_baseline = None
+        incremental_folder = None
+        if is_incremental_refresh:
+            # 增量重转换以题集直属题卡为候选；优先使用原批次明确的落点，旧
+            # 批次没有该字段时再从已有题卡的路径推断，推断失败则保守落在根目录。
+            incremental_folder = batch.get("target_folder_id")
+            if incremental_folder is None:
+                incremental_folder = g.get("incremental_target_folder")
+            if incremental_folder is None:
+                baseline_ids = [
+                    str(item.get("id") or "")
+                    for item in (g.get("incremental_baseline") or [])
+                    if isinstance(item, dict) and item.get("id")
+                ]
+                if baseline_ids:
+                    rows = filestore.records_from_ids(baseline_ids)
+                    folders = {str(row.get("folder") or "") for row in rows}
+                    incremental_folder = folders.pop() if len(folders) == 1 else ""
+                else:
+                    incremental_folder = ""
+            incremental_baseline = _incremental_baseline_snapshot(
+                incremental_folder)
         try:
             history_id = _history_record_for_retry(g)
         except (OSError, history_store.HistoryError) as exc:
@@ -5805,8 +6132,26 @@ def batch_group_reconvert(batch_id, gid):
             return redirect(url_for(
                 "batch_dashboard", batch_id=batch_id))
         if refresh_previous_items is not None:
+            # 严格刷新与增量刷新互斥；清掉上一轮可能留下的增量标记，避免
+            # `_auto_import_after_convert` 按错误分支处理本轮结果。
+            g.pop("incremental", None)
+            g.pop("incremental_baseline", None)
+            g.pop("incremental_target_folder", None)
+            g.pop("incremental_scope", None)
             g["refresh_previous_items"] = refresh_previous_items
             g["refresh_in_progress"] = True
+        if is_incremental_refresh:
+            g.pop("refresh_in_progress", None)
+            g.pop("refresh_previous_items", None)
+            g["incremental"] = True
+            g["incremental_target_folder"] = incremental_folder or ""
+            g["incremental_baseline"] = incremental_baseline or []
+            g["incremental_scope"] = (
+                g.get("incremental_scope")
+                or f"batch:{batch_id}:group:{gid}:incremental")
+            # 让校对确认和重启恢复使用同一个直属题集；显式空串代表题库根目录，
+            # 不能用 `or` 丢失这个语义。只写组级字段，避免普通上传批次的收尾
+            # 误把临时原卷当成题库原卷而永久保留。
         g["history_id"] = history_id
         g["history_skip_archive"] = history_id is None
         # 每次重转都换代。旧调用即使在“中止→立刻重转”后才返回，也只能
@@ -5821,7 +6166,7 @@ def batch_group_reconvert(batch_id, gid):
         # 两个标志都得清：cancelled 留着的话 _convert_one_group 转完不写 md，
         # reviewed 留着的话 _maybe_finish_batch 会把原文件当垃圾清掉。
         g["cancelled"] = False
-        if not is_imported_refresh:
+        if not (is_imported_refresh or is_incremental_refresh):
             g["reviewed"] = None
         job_id = g["job_id"]
     with _jobs_lock:
@@ -5832,7 +6177,9 @@ def batch_group_reconvert(batch_id, gid):
                 boundary_mode=g["boundary_mode"],
                 engine=g.get("engine"),
                 num_template=g.get("num_template") or "",
-                only_numbers=g.get("only_numbers"))
+                only_numbers=g.get("only_numbers"),
+                incremental=bool(g.get("incremental")),
+                incremental_scope=g.get("incremental_scope") or "")
             _persist_job(job_id, _jobs[job_id])
     with _batch_jobs_lock:
         batch = _batch_jobs.get(batch_id)
@@ -6257,6 +6604,15 @@ def _group_view(g) -> dict:
         "source_editable": source_editable,
         "requires_review": qualcheck.requires_manual_review(g.get("note") or ""),
         "imported_count": g.get("imported_count", 0),
+        "incremental": bool(g.get("incremental")),
+        "incremental_updated_count": int(
+            g.get("incremental_updated_count") or 0),
+        "incremental_added_count": int(
+            g.get("incremental_added_count") or 0),
+        "incremental_preserved_count": int(
+            g.get("incremental_preserved_count") or 0),
+        "incremental_conflict_count": len(
+            g.get("incremental_conflicts") or []),
     }
 
 
@@ -7539,8 +7895,17 @@ def _auto_import_folder(batch: dict, grp: dict) -> str:
     # target_folder_id 优先级最高：直接从文件夹原卷面板发起的「重新转换」，题目
     # 应该落回那个文件夹，不新建也不复用别的开关。与服务器版同名逻辑一致。
     target_id = batch.get("target_folder_id")
-    if target_id:
-        return target_id
+    # 普通上传批次对已入库组做增量重转时只在组上记录落点。批次级
+    # target_folder_id 专门表示“原卷本来就在题库里”，会决定收尾时是否删除
+    # 临时上传文件，不能为了选落点把两种来源混在一起。
+    if target_id is None and "incremental_target_folder" in grp:
+        target_id = grp.get("incremental_target_folder")
+    # 显式保存空字符串代表题库根目录；旧批次没有该键时仍继续走原有
+    # pack/per-task 规则。
+    if target_id is not None:
+        if target_id and not filestore.get_collection(target_id):
+            raise ValueError("目标父文件夹已不存在")
+        return target_id or ""
     batch_col = batch.get("target_parent_id") or ""
     if batch_col and not filestore.get_collection(batch_col):
         raise ValueError("目标父文件夹已不存在")
@@ -7576,6 +7941,38 @@ def _auto_import_items(chosen: list[dict], source: str) -> list[dict]:
             "sol_img_layouts": item.get("sol_img_layouts") or []}
            if item.get("sol_img_split") else {}),
     } for item in chosen]
+
+
+def _incremental_baseline_snapshot(folder: str) -> list[dict]:
+    """保存原卷重转换所需的轻量题卡基线。
+
+    任务快照会长期留在 ``task_store``，不能把完整 ``_meta``（其中可能有图片
+    版本提示词或用户自定义对象）原样塞进去。增量匹配只需要稳定 id/路径和导入
+    字段；frontmatter 中已有的基线摘要仍由 filestore 优先使用。
+    """
+    fields = tuple(getattr(filestore, "_IMPORT_OWNED_FIELDS", ()))
+    digest_key = getattr(
+        filestore, "_IMPORT_BASELINE_DIGEST_KEY",
+        "_quizforge_import_baseline_digest")
+    rows = []
+    for record in filestore.collection_records_snapshot(
+            folder, recursive=False):
+        row = {"id": str(record.get("id") or ""),
+               "path": str(record.get("path") or "")}
+        for field in fields:
+            value = record.get(field)
+            # JSON 快照不接受 ruamel 的 CommentedSeq；布局表只包含基础字典，
+            # 这里复制一层即可，避免任务状态与题库缓存共享可变对象。
+            if isinstance(value, list):
+                row[field] = [dict(item) if isinstance(item, dict) else item
+                              for item in value]
+            else:
+                row[field] = value
+        meta = record.get("_meta") or {}
+        if hasattr(meta, "get") and meta.get(digest_key):
+            row[digest_key] = str(meta[digest_key])
+        rows.append(row)
+    return rows
 
 
 def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
@@ -7696,7 +8093,38 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
                 # 必须整组调用批量接口。逐题 create_question 会为每道题重新递归遍历
                 # 整座 vault 计算最大 order；1.3 万题下一卷 20 题会白扫 20 遍。
                 scope = f"batch:{batch_id}:group:{grp['gid']}"
-                if grp.get("refresh_in_progress"):
+                if grp.get("incremental"):
+                    incremental_result = filestore.refresh_questions_batch_incremental(
+                        import_items,
+                        grp.get("incremental_baseline"),
+                        folder,
+                        idempotency_scope=(
+                            grp.get("incremental_scope") or scope),
+                    )
+                    # 冲突时不把结果标成“已入库”：看板仍能进入校对页，用户可
+                    # 逐题决定如何处理；旧题和新识别 Markdown 都原样保留。
+                    if incremental_result.get("conflicts"):
+                        conflict_count = len(
+                            incremental_result["conflicts"])
+                        grp["incremental_result"] = incremental_result
+                        grp["incremental_conflicts"] = incremental_result[
+                            "conflicts"]
+                        grp["auto_review_blocked"] = True
+                        grp["note"] = " ".join(dict.fromkeys(filter(
+                            None, [grp.get("note") or "",
+                                   f"增量更新发现 {conflict_count} 项冲突，已转人工审核"])))
+                        _persist_batch(batch_id, current)
+                        return
+                    created = (list(incremental_result.get("updated") or [])
+                               + list(incremental_result.get("added") or []))
+                    grp["incremental_result"] = incremental_result
+                    grp["incremental_updated_count"] = len(
+                        incremental_result.get("updated") or [])
+                    grp["incremental_added_count"] = len(
+                        incremental_result.get("added") or [])
+                    grp["incremental_preserved_count"] = len(
+                        incremental_result.get("preserved") or [])
+                elif grp.get("refresh_in_progress"):
                     previous_items = grp.get("refresh_previous_items") or []
                     created = filestore.refresh_questions_batch(
                         import_items, previous_items, folder,
@@ -7725,7 +8153,8 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
             grp["imported_count"] = imported_count
             grp.pop("refresh_in_progress", None)
             grp.pop("refresh_previous_items", None)
-            grp.pop("auto_review_blocked", None)
+            if not grp.get("incremental_result", {}).get("conflicts"):
+                grp.pop("auto_review_blocked", None)
             _persist_batch(batch_id, current)
     except Exception as exc:
         with _batch_jobs_lock:
@@ -7737,6 +8166,9 @@ def _auto_import_after_convert(batch_id: str, grp: dict, *, attempt: int,
             if grp.get("refresh_in_progress"):
                 grp["error"] = (
                     f"安全刷新失败，旧题已保留且未覆盖：{exc}")
+            elif grp.get("incremental"):
+                grp["error"] = (
+                    f"增量更新失败，旧题已保留且未覆盖：{exc}")
             else:
                 grp["error"] = "自动入库失败，请点「重新转换」重试"
             _persist_batch(batch_id, current)
@@ -8016,6 +8448,29 @@ def import_md():
     batch_gid = request.form.get("batch_gid", "")
     batch_gid = int(batch_gid) if batch_gid.isdigit() else None
 
+    # 来自批量看板的确认必须绑定仍存活的任务组。若任务已过期、组已导入或被
+    # 跳过，继续走普通 create_questions_batch 会把同一结果悄悄追加成重复题。
+    # 这个校验放在读取上传图片之前，拒绝过期表单时不会留下孤儿资产。
+    confirmation_batch = None
+    confirmation_group = None
+    if batch_id:
+        with _batch_jobs_lock:
+            confirmation_batch = _batch_jobs.get(batch_id)
+            if confirmation_batch and batch_gid is not None:
+                confirmation_group = next(
+                    (x for x in confirmation_batch.get("groups", [])
+                     if x.get("gid") == batch_gid), None)
+        if (confirmation_batch is None or confirmation_group is None):
+            flash("批量任务或任务组已过期，请从转换看板重新打开", "err")
+            return redirect(url_for("import_md"))
+        if confirmation_group.get("reviewed") in ("imported", "skipped"):
+            flash("该任务组已经处理，请勿重复提交", "err")
+            return redirect(url_for("batch_dashboard", batch_id=batch_id))
+        if (confirmation_group.get("status") != "done"
+                or not confirmation_group.get("md")):
+            flash("该任务组尚未准备好审核，请稍候刷新看板", "err")
+            return redirect(url_for("batch_dashboard", batch_id=batch_id))
+
     def _mark_group_reviewed(imported_count):
         if not batch_id:
             return
@@ -8098,14 +8553,10 @@ def import_md():
     final_col = target_col
     folder_note = ""
     batch_folder = ""
-    if batch_id and batch_gid is not None:
-        with _batch_jobs_lock:
-            current_batch = _batch_jobs.get(batch_id)
-            current_group = next(
-                (x for x in current_batch["groups"] if x["gid"] == batch_gid),
-                None) if current_batch else None
-        if current_batch and current_group:
-            batch_folder = _auto_import_folder(current_batch, current_group)
+    current_batch = confirmation_batch
+    current_group = confirmation_group
+    if current_batch and current_group:
+        batch_folder = _auto_import_folder(current_batch, current_group)
     if batch_folder:
         final_col = batch_folder
         folder_note = f"并打包到文件夹「{batch_folder}」"
@@ -8152,7 +8603,8 @@ def import_md():
         pending_questions.append({
             "body": body, "solution": solution, "type": qtype,
             "note": note,
-            "tags": tags, "difficulty": diff, "source": batch_source,
+            "tags": tags, "difficulty": diff, "starred": starred,
+            "source": batch_source,
             "number": number, "img_split": img_mode,
             "img_layouts": img_layouts,
             "sol_img_split": sol_img_split,
@@ -8164,6 +8616,8 @@ def import_md():
             config.IMPORT_BUNDLE_STAGE_DIR, config.ASSETS_DIR, bundle_stage_id)
         if bundle_stage_id else nullcontext({"mapping": {}, "created_names": []})
     )
+    incremental_result = None
+    incremental_created_names: set[str] = set()
     try:
         with bundle_finalize as finalized:
             asset_mapping = finalized.get("mapping") or {}
@@ -8172,8 +8626,28 @@ def import_md():
                     for field in ("body", "solution", "note"):
                         item[field] = import_bundle.rewrite_final_references(
                             item.get(field, ""), asset_mapping)
-            new_ids = filestore.create_questions_batch(
-                pending_questions, final_col, temporary=temporary_import)
+            if current_group and current_group.get("incremental"):
+                incremental_result = filestore.refresh_questions_batch_incremental(
+                    pending_questions,
+                    current_group.get("incremental_baseline") or [],
+                    final_col,
+                    idempotency_scope=(
+                        current_group.get("incremental_scope")
+                        or f"batch:{batch_id}:group:{batch_gid}:incremental"),
+                )
+                if incremental_result.get("conflicts"):
+                    # finalize_stage 已把暂存图片固化为摘要名；在离开上下文后
+                    # 统一清理这些尚未被任何题卡引用的新资产，再转回审核状态。
+                    incremental_created_names.update(
+                        str(name) for name in
+                        (finalized.get("created_names") or []) if name)
+                    new_ids = []
+                else:
+                    new_ids = (list(incremental_result.get("updated") or [])
+                               + list(incremental_result.get("added") or []))
+            else:
+                new_ids = filestore.create_questions_batch(
+                    pending_questions, final_col, temporary=temporary_import)
     except import_bundle.ImportBundleError as exc:
         if saved_image_names:
             filestore.purge_orphan_images(saved_image_names)
@@ -8187,9 +8661,51 @@ def import_md():
             filestore.purge_orphan_images(saved_image_names)
         _discard_import_bundle_stages([bundle_stage_id])
         raise
-    for qid, starred in zip(new_ids, pending_starred):
-        if starred:
-            filestore.toggle_starred(qid)
+
+    if incremental_result and incremental_result.get("conflicts"):
+        # 增量冲突是可审核业务状态，不是普通导入失败：旧题完全保留，
+        # 当前识别结果不落盘，任务组仍保持 done + reviewed=None，用户可回到
+        # 同一校对页处理。清理顺序放在 bundle_finalize 成功退出之后，避免把
+        # 已固化但尚未引用的摘要图片留在共享资产目录。
+        cleanup_names = set(saved_image_names) | incremental_created_names
+        if cleanup_names:
+            filestore.purge_orphan_images(cleanup_names)
+        _discard_import_bundle_stages([bundle_stage_id])
+        conflict_count = len(incremental_result["conflicts"])
+        with _batch_jobs_lock:
+            active = _batch_jobs.get(batch_id)
+            group = next((x for x in (active or {}).get("groups", [])
+                          if x.get("gid") == batch_gid), None)
+            if active is not None and group is not None:
+                group["incremental_result"] = incremental_result
+                group["incremental_conflicts"] = list(
+                    incremental_result["conflicts"])
+                group["auto_review_blocked"] = True
+                group["reviewed"] = None
+                group["status"] = "done"
+                group["error"] = None
+                group["note"] = " ".join(dict.fromkeys(filter(
+                    None, [group.get("note") or "",
+                           f"增量合并仍有 {conflict_count} 项冲突，未写入题库"])))
+                _persist_batch(batch_id, active)
+        flash("增量合并存在冲突，旧题未被覆盖；请处理冲突后再次提交", "err")
+        return redirect(url_for("batch_group_review",
+                                batch_id=batch_id, gid=batch_gid))
+
+    if not incremental_result:
+        for qid, starred in zip(new_ids, pending_starred):
+            if starred:
+                filestore.toggle_starred(qid)
+    if incremental_result is not None:
+        with _batch_jobs_lock:
+            active = _batch_jobs.get(batch_id)
+            group = next((x for x in (active or {}).get("groups", [])
+                          if x.get("gid") == batch_gid), None)
+            if active is not None and group is not None:
+                group.pop("incremental_conflicts", None)
+                group.pop("auto_review_blocked", None)
+                group["incremental_result"] = incremental_result
+                _persist_batch(batch_id, active)
 
     # 「一并保存原卷」：原卷是**复制**进文件夹的，不是移动——批量审核期间那份
     # 临时文件还要供「重新转换」和左侧原文对照用。

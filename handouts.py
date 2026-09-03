@@ -393,34 +393,66 @@ def question_snapshot(qid: str) -> dict:
     return _snapshot_payload(record)
 
 
-def selected_question_summaries() -> list[dict]:
+def _selected_question_records() -> list[dict]:
     # 选题篮通常只有少量题：热缓存直接取，冷启动只扫 frontmatter 头部定位路径，
     # 不能为了十几道题解析上万份完整 Markdown。
     records = filestore.records_from_ids(filestore.selected_ids())
-    records = filestore.list_questions(
+    return filestore.list_questions(
         selected_only=True, sort="custom", records=records)
+
+
+def _selected_question_summary(record: dict) -> dict:
+    plain = re.sub(r"!\[\[[^\]]+\]\]", "[图片]", record.get("body") or "")
+    plain = re.sub(r"\s+", " ", plain).strip()
+    return {
+        "id": str(record.get("id") or ""),
+        "type": record.get("type") or "未分类",
+        "source": record.get("source") or "未记录题源",
+        "number": record.get("number"),
+        "folder": record.get("folder") or "题库根目录",
+        "excerpt": plain[:180],
+        "path": record.get("path") or "",
+        # qrender 与题库正式题卡、PDF 共用选项和图片布局规则；它会先转义外来
+        # 文本，再只放行自己生成的结构标签，因此可作为受信任 HTML 交给前端。
+        "body_html": str(qrender.render_body(
+            record.get("body") or "", record.get("type"),
+            img_layouts=record.get("img_layouts"),
+            img_width=record.get("img_width"),
+            img_align=record.get("img_align"),
+            img_split=record.get("img_split"),
+        )),
+    }
+
+
+def selected_question_summaries() -> list[dict]:
+    """讲义选择器使用的轻量摘要，不渲染解析或备注。"""
+    return [_selected_question_summary(record)
+            for record in _selected_question_records()]
+
+
+def selected_question_details() -> list[dict]:
+    """题库选题抽屉使用的完整只读题卡数据。"""
     rows = []
-    for record in records:
-        plain = re.sub(r"!\[\[[^\]]+\]\]", "[图片]", record.get("body") or "")
-        plain = re.sub(r"\s+", " ", plain).strip()
-        rows.append({
-            "id": str(record.get("id") or ""),
-            "type": record.get("type") or "未分类",
-            "source": record.get("source") or "未记录题源",
-            "number": record.get("number"),
-            "folder": record.get("folder") or "题库根目录",
-            "excerpt": plain[:180],
-            "path": record.get("path") or "",
-            # qrender 与题库正式题卡、PDF 共用选项和图片布局规则；它会先转义外来
-            # 文本，再只放行自己生成的结构标签，因此可作为受信任 HTML 交给前端。
-            "body_html": str(qrender.render_body(
-                record.get("body") or "", record.get("type"),
-                img_layouts=record.get("img_layouts"),
-                img_width=record.get("img_width"),
-                img_align=record.get("img_align"),
-                img_split=record.get("img_split"),
+    for record in _selected_question_records():
+        tags = record.get("tags")
+        collection = str(record.get("folder") or "")
+        row = _selected_question_summary(record)
+        row.update({
+            "title": str(record.get("title") or ""),
+            "difficulty": str(record.get("difficulty") or ""),
+            "starred": bool(record.get("starred")),
+            "tags": list(tags) if isinstance(tags, (list, tuple)) else [],
+            # folder 是人类可读的末级名称；collection 保留完整相对路径供定位。
+            "folder": PurePosixPath(collection).name if collection else "题库根目录",
+            "collection": collection,
+            "solution_html": str(qrender.render_solution(
+                record.get("solution") or "",
+                sol_img_layouts=record.get("sol_img_layouts"),
+                sol_img_split=record.get("sol_img_split"),
             )),
+            "note_html": str(qrender.render_body(record.get("note") or "")),
         })
+        rows.append(row)
     return rows
 
 

@@ -126,7 +126,7 @@ mineru_store.py     MinerU Token 加密存储（多份）
 ocr_pool.py         MinerU/Doc2X 统一请求池——多凭证轮转、跨窗口限流与退避
 tools/eval_doc2x.py Doc2X 真实 PDF 回归；按内容哈希复用付费结果，再跑最新本地逻辑
 tikz_render.py      TikZ 代码 → xelatex → PDF + dvisvgm → SVG（带沙箱三道闸）
-tikz_redraw.py      AI 重绘配图（多模态模型看图 → TikZ → 矢量图）
+tikz_redraw.py      AI 重绘配图（视觉聊天模型 → TikZ；图像模型 → PNG）
 template_pipeline.py
                     TeX 模板契约、schema v2 迁移、源码哈希和真实预览
 tex_sandbox.py      外部 TeX 资源检查与受限 XeLaTeX 进程执行

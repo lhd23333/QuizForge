@@ -34,6 +34,7 @@ from pathlib import Path, PurePosixPath
 from ruamel.yaml import YAML
 
 import config
+import dedup
 from search_query import SearchQuery, matches_search, parse_search_query
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,9 @@ _write_lock = threading.RLock()
 
 # 正文分区标题行：形如 "## 解析"、"## 备注"
 _SECTION_RE = re.compile(r"(?m)^##[ \t]+(.*?)[ \t]*$")
+_IMAGE_REF_RE = re.compile(r"!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]")
+_GENERATED_IMAGE_VERSION_RE = re.compile(
+    r"\A(?:redraw|tikz)_[0-9a-f]{16}\.(?:png|svg)\Z")
 
 # 内存索引：文件路径(str) -> 已解析记录（含 _path/_mtime）。按 mtime 判断是否需要重解析，
 # 使直接在 Obsidian 里改文件也能被下次请求感知到。
@@ -329,6 +333,9 @@ _KNOWN_DEFAULTS = {
     # AI 重绘的原图备份表：[{"i": 0, "orig": "q123_0.jpg"}]。
     # 有这一项就说明第 i 张图是重绘产物、可以退回原图（前端据此点亮"还原原图"）。
     "img_originals": [],
+    # AI 重绘的全部图片版本：[{"i": 0, "name": "...png", "kind": "generated"}]
+    # 旧题没有这一项时，由 _to_record 从正文和 img_originals 兼容补齐。
+    "img_versions": [],
     # 原卷题号（`importer.block_number` 的产物，无题号/手工新增时为 None）。
     # 以前这个数字在 `_build_import_preview` 里算完做漏题检测就被丢掉了，正文里的
     # 题号也被 `strip_leading_number` 剥掉——结果是入库之后再也无从得知这道题在原卷
@@ -451,6 +458,56 @@ def _write_raw(path: Path, meta: dict, body: str):
     invalidate_scan_cache(folder_structure=not parent_existed)
 
 
+def _image_version_kind(name: str, requested: str = "") -> str:
+    """把版本标成原图或 AI 生成物；未知 kind 只按文件名保守推断。"""
+    if requested in {"original", "generated"}:
+        return requested
+    return ("generated" if _GENERATED_IMAGE_VERSION_RE.fullmatch(name or "")
+            else "original")
+
+
+def _merge_img_versions(meta: Mapping, body: str) -> list[dict]:
+    """合并新版本表与旧的原图记录，兼容尚未迁移的题目。"""
+    versions: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+
+    def add(index, name, *, kind="", created="", model="", prompt=""):
+        try:
+            i = int(index)
+        except (TypeError, ValueError):
+            return
+        name = str(name or "").strip()
+        if i < 0 or not name or "/" in name or "\\" in name or name.startswith("."):
+            return
+        key = (i, name)
+        if key in seen:
+            return
+        seen.add(key)
+        row = {"i": i, "name": name,
+               "kind": _image_version_kind(name, str(kind or ""))}
+        if created:
+            row["created"] = str(created)[:40]
+        if model:
+            row["model"] = str(model)[:120]
+        if prompt:
+            row["prompt"] = str(prompt)[:2000]
+        versions.append(row)
+
+    for item in meta.get("img_versions", []) or []:
+        if isinstance(item, Mapping):
+            add(item.get("i"), item.get("name"), kind=item.get("kind", ""),
+                created=item.get("created", ""), model=item.get("model", ""),
+                prompt=item.get("prompt", ""))
+    for item in meta.get("img_originals", []) or []:
+        if isinstance(item, Mapping):
+            add(item.get("i"), item.get("orig"), kind="original",
+                created=meta.get("created", ""))
+    for i, match in enumerate(_IMAGE_REF_RE.finditer(body or "")):
+        name = match.group(1).strip()
+        add(i, name, created=meta.get("created", ""))
+    return versions
+
+
 def _to_record(path: Path, meta: dict, body: str) -> dict:
     stem, sections = _split_sections(body)
     solution = ""
@@ -497,6 +554,7 @@ def _to_record(path: Path, meta: dict, body: str) -> dict:
                           if meta.get("sol_img_split") not in (None, "") else None),
         "sol_img_layouts": list(meta.get("sol_img_layouts", []) or []),
         "img_originals": list(meta.get("img_originals", []) or []),
+        "img_versions": _merge_img_versions(meta, body),
         "number": _as_number(meta.get("number")),
         "created": meta.get("created", ""),
         "updated": meta.get("updated", ""),
@@ -1139,7 +1197,140 @@ def list_collections_tree(records: list[dict] | None = None) -> list[dict]:
         return tree
 
 
-def list_navigation_tree(active_id: str = "") -> list[dict]:
+def _display_file_flags(*, display_pdf: bool = False,
+                        display_md: bool = False,
+                        show_pdf: bool | None = None,
+                        show_md: bool | None = None,
+                        show_cards: bool | None = None,
+                        show_general_md: bool | None = None) -> tuple[bool, bool, bool]:
+    """统一解析文件树展示开关。
+
+    ``display_pdf``/``display_md`` 是早期调用方使用的参数，保留它们避免导入页和
+    外部插件失效；新页面使用三个彼此独立的开关：题卡、PDF、一般 Markdown。
+    旧的 ``display_md`` 只有在新开关完全未提供时才展开为两类 Markdown，兼容旧
+    页面同时避免新页面把题卡误并入一般资料。
+    """
+    pdf = bool(display_pdf)
+    if show_pdf is not None:
+        pdf = bool(show_pdf)
+    legacy_md = bool(display_md)
+    if show_md is not None:
+        legacy_md = bool(show_md)
+    if show_cards is None and show_general_md is None:
+        cards = legacy_md
+        general = legacy_md
+    else:
+        cards = bool(show_cards)
+        general = bool(show_general_md)
+        # ``show_md`` 是当前旧 URL 的“显示 Markdown”开关，迁移到新协议时按
+        # 一般资料解释；题卡必须显式勾选 show_cards，不能再次混入。
+        if show_cards is None and show_md is not None:
+            cards = False
+        if show_general_md is None and show_md is not None:
+            general = legacy_md
+    return pdf, cards, general
+
+
+def _display_markdown_identity(path: Path) -> tuple[bool, str | None]:
+    """返回文件树展示用的 Markdown 身份。
+
+    题库索引仍把无 frontmatter 的旧 Markdown 兼容为题卡，但文件树无法据此
+    区分普通资料。展示层因此先确认 frontmatter；没有 frontmatter 的文件归入
+    一般资料，带 frontmatter 的文件继续沿用题库的 kind 判定。
+    """
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            stat = os.fstat(handle.fileno())
+            first = handle.readline()
+            if first.rstrip("\r\n") != "---":
+                return False, None
+            handle.seek(0)
+            peeked = _peek_question_identity(path, handle)
+            raw_text = None
+            if not peeked[2]:
+                handle.seek(0)
+                raw_text = handle.read()
+        qid, is_question = _resolve_question_identity(
+            path, stat, peeked=peeked, raw_text=raw_text)
+    except (OSError, UnicodeError, ValueError):
+        return False, None
+    return bool(is_question), (str(qid) if is_question and qid else None)
+
+
+def list_display_files(folder_id: str = "", *, display_pdf: bool = False,
+                       display_md: bool = False, show_pdf: bool | None = None,
+                       show_md: bool | None = None,
+                       show_cards: bool | None = None,
+                       show_general_md: bool | None = None) -> list[dict]:
+    """列出指定文件夹下需要显示在题库树中的直属文件。
+
+    返回的 ``kind`` 保持 ``pdf``/``markdown`` 两种旧值；Markdown 另带
+    ``markdown_kind``、``is_question`` 和 ``question_id``，让前端可以在同一文件
+    树里区分题卡与一般资料，而不必再次猜测 frontmatter。
+    """
+    display_pdf, show_cards, show_general_md = _display_file_flags(
+        display_pdf=display_pdf, display_md=display_md, show_pdf=show_pdf,
+        show_md=show_md, show_cards=show_cards,
+        show_general_md=show_general_md)
+    if not (display_pdf or show_cards or show_general_md):
+        return []
+    root = _folder_abspath(folder_id).resolve()
+    bank_root = config.BANK_DIR.resolve()
+    if root != bank_root and not root.is_relative_to(bank_root):
+        return []
+    if not root.is_dir():
+        return []
+    result = []
+    try:
+        children = root.iterdir()
+        for path in children:
+            suffix = path.suffix.casefold()
+            if (not path.is_file() or path.name.startswith(".")
+                    or suffix == ".pdf" and not display_pdf
+                    or suffix in _MARKDOWN_SUFFIXES
+                    and not (show_cards or show_general_md)
+                    or suffix not in {".pdf", *_MARKDOWN_SUFFIXES}):
+                continue
+            rel = path.relative_to(bank_root).as_posix()
+            if _skip_rel(path.relative_to(bank_root)):
+                continue
+            is_question = False
+            question_id = None
+            if suffix in _MARKDOWN_SUFFIXES:
+                is_question, question_id = _display_markdown_identity(path)
+                if is_question and not show_cards:
+                    continue
+                if not is_question and not show_general_md:
+                    continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            result.append({
+                "name": path.name,
+                "path": rel,
+                "kind": "pdf" if suffix == ".pdf" else "markdown",
+                "size": size,
+                "is_question": is_question,
+            })
+            if suffix in _MARKDOWN_SUFFIXES:
+                result[-1]["markdown_kind"] = (
+                    "question" if is_question else "document")
+                if question_id:
+                    result[-1]["question_id"] = question_id
+    except OSError:
+        return []
+    result.sort(key=lambda item: tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", item["name"])))
+    return result
+
+
+def list_navigation_tree(active_id: str = "", *, display_pdf: bool = False,
+                         display_md: bool = False, show_pdf: bool | None = None,
+                         show_md: bool | None = None,
+                         show_cards: bool | None = None,
+                         show_general_md: bool | None = None) -> list[dict]:
     """返回侧栏所需的浅树，预载第一层和当前路径。
 
     完整树主要用于导入页和“移动到”选项；首页每次切换试卷都递归扫描 642 个
@@ -1147,6 +1338,10 @@ def list_navigation_tree(active_id: str = "") -> list[dict]:
     仍按需读取。深链接或刷新某个题集时继续预载当前路径，保证选中项可见。
     其余节点保留 ``has_children``，交给 ``/collections/children`` 点击后加载。
     """
+    display_pdf, show_cards, show_general_md = _display_file_flags(
+        display_pdf=display_pdf, display_md=display_md, show_pdf=show_pdf,
+        show_md=show_md, show_cards=show_cards,
+        show_general_md=show_general_md)
     root = config.BANK_DIR.resolve()
 
     def subdirs(path: Path) -> list[Path]:
@@ -1167,15 +1362,31 @@ def list_navigation_tree(active_id: str = "") -> list[dict]:
         except OSError:
             return False
 
+    def has_display_file(path: Path) -> bool:
+        if not (display_pdf or show_cards or show_general_md):
+            return False
+        try:
+            return bool(list_display_files(
+                path.relative_to(root).as_posix(), display_pdf=display_pdf,
+                show_cards=show_cards, show_general_md=show_general_md))
+        except OSError:
+            return False
+
     def build(path: Path, parent_id: str, depth: int) -> list[dict]:
         nodes = []
         for directory in subdirs(path):
             rel = directory.relative_to(root).as_posix()
             # 只预载当前题集的祖先。当前节点自身即使还有子目录也保持折叠，
             # 更不能因为它位于顶层就自动展开整支树。
+            # 当前节点自身保持折叠，只有祖先节点预展开；这样选中叶子题集时仍
+            # 需要点击箭头才加载直属文件，同时不会牺牲“有文件即显示箭头”。
             on_active_path = active_id.startswith(rel + "/")
             expanded = on_active_path
             children = build(directory, rel, depth + 1) if expanded else []
+            files = list_display_files(
+                rel, display_pdf=display_pdf, show_cards=show_cards,
+                show_general_md=show_general_md,
+            ) if expanded else []
             nodes.append({
                 "id": rel,
                 "name": directory.name,
@@ -1183,8 +1394,10 @@ def list_navigation_tree(active_id: str = "") -> list[dict]:
                 "cnt": 0,
                 "depth": depth,
                 "children": children,
+                "files": files,
                 "children_loaded": expanded,
-                "has_children": bool(children) if expanded else has_subdir(directory),
+                "has_children": (bool(children) or bool(files)) if expanded
+                else (has_subdir(directory) or has_display_file(directory)),
             })
         return nodes
 
@@ -1204,12 +1417,20 @@ def all_collections(tree: list[dict] | None = None) -> list[dict]:
     return flat
 
 
-def list_collection_children(parent_id: str = "") -> list[dict]:
+def list_collection_children(parent_id: str = "", *, display_pdf: bool = False,
+                             display_md: bool = False, show_pdf: bool | None = None,
+                             show_md: bool | None = None,
+                             show_cards: bool | None = None,
+                             show_general_md: bool | None = None) -> list[dict]:
     """只列一个目录的直接子文件夹，供前端展开树时按需读取。
 
     这里不统计题数、不扫描 Markdown，因此即使题库已有上万道题也只做一次很小的
     ``iterdir``。路径仍必须约束在 BANK_DIR 内，不能让只读接口变成目录探测器。
     """
+    display_pdf, show_cards, show_general_md = _display_file_flags(
+        display_pdf=display_pdf, display_md=display_md, show_pdf=show_pdf,
+        show_md=show_md, show_cards=show_cards,
+        show_general_md=show_general_md)
     root = config.BANK_DIR.resolve()
     parent = _folder_abspath(parent_id).resolve()
     if parent != root and not parent.is_relative_to(root):
@@ -1222,6 +1443,9 @@ def list_collection_children(parent_id: str = "") -> list[dict]:
              if path.is_dir() and not path.name.startswith(".")
              and path.name not in _RESERVED_BANK_DIRS), key=lambda path: path.name):
         folder_id = child.relative_to(root).as_posix()
+        files = list_display_files(
+            folder_id, display_pdf=display_pdf, show_cards=show_cards,
+            show_general_md=show_general_md)
         try:
             has_children = any(
                 item.is_dir() and not item.name.startswith(".")
@@ -1229,8 +1453,25 @@ def list_collection_children(parent_id: str = "") -> list[dict]:
         except OSError:
             has_children = False
         out.append({"id": folder_id, "name": child.name,
-                    "has_children": has_children})
+                    "has_children": has_children or bool(files),
+                    "files": files})
     return out
+
+
+def list_collection_files(folder_id: str = "", *, display_pdf: bool = False,
+                          display_md: bool = False, show_pdf: bool | None = None,
+                          show_md: bool | None = None,
+                          show_cards: bool | None = None,
+                          show_general_md: bool | None = None) -> list[dict]:
+    """返回一个目录的直属展示文件（包括题库根目录）。
+
+    ``list_collection_children`` 为兼容旧前端继续返回文件夹列表；需要把根目录文件
+    交给新文件树时调用本函数即可，不必伪造一个“根文件夹”节点。
+    """
+    return list_display_files(
+        folder_id, display_pdf=display_pdf, display_md=display_md,
+        show_pdf=show_pdf, show_md=show_md, show_cards=show_cards,
+        show_general_md=show_general_md)
 
 
 def get_collection(folder_id: str,
@@ -1670,6 +1911,11 @@ def create_questions_batch(items: list[dict], folder: str = "", *,
                 full_body = _join_sections(
                     str(item.get("body") or ""),
                     str(item.get("solution") or ""), extra)
+                if scope:
+                    # 只记录识别链拥有的字段；备注等额外分区属于用户内容，后续
+                    # 增量刷新会原样保留，不把它们误判成识别结果。
+                    meta[_IMPORT_BASELINE_DIGEST_KEY] = _import_owned_digest(
+                        _import_item_record(item))
 
                 existing = existing_by_id.get(qid)
                 if existing is not None:
@@ -1750,6 +1996,21 @@ _IMPORT_OWNED_FIELDS = (
     "body", "solution", "type", "source", "number",
     "img_split", "img_layouts", "sol_img_split", "sol_img_layouts",
 )
+
+# 自动导入拥有的字段只占题卡元数据的一小部分。把它们的规范化摘要写进
+# frontmatter，增量重转换即可识别“入库后用户改过正文/解析/题号”的题卡；标签、
+# 难度、星标和其它自定义字段不在摘要内，因此这些用户元数据仍可安全保留。
+_IMPORT_BASELINE_DIGEST_KEY = "_quizforge_import_baseline_digest"
+
+
+def _import_owned_digest(row: Mapping) -> str:
+    """返回自动导入字段的稳定摘要，供增量匹配的外部编辑检测使用。"""
+    payload = {key: row.get(key) for key in _IMPORT_OWNED_FIELDS}
+    # JSON 比 repr 更稳定：列表顺序有意义，ensure_ascii 让中文在不同默认编码下
+    # 得到同一摘要；default=str 只作为旧/手写 frontmatter 异常值的保守兜底。
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _import_item_record(item: dict) -> dict:
@@ -1848,6 +2109,7 @@ def refresh_questions_batch(items: list[dict], previous_items: list[dict],
                 "img_layouts": new["img_layouts"],
                 "sol_img_split": new["sol_img_split"],
                 "sol_img_layouts": new["sol_img_layouts"],
+                _IMPORT_BASELINE_DIGEST_KEY: _import_owned_digest(new),
                 "updated": _now_iso(),
             })
             next_body = _join_sections(
@@ -1885,6 +2147,609 @@ def refresh_questions_batch(items: list[dict], previous_items: list[dict],
                 _cache.pop(str(path), None)
             invalidate_scan_cache()
     return expected_ids
+
+
+def refresh_questions_batch_incremental(
+        items: list[dict], previous_items: list[dict] | None = None,
+        folder: str = "", *, idempotency_scope: str = "",
+        candidate_ids: list[str] | None = None,
+        baseline: list[dict] | None = None) -> dict:
+    """按题号/正文指纹把新识别结果增量合并到一个题集。
+
+    这是给“原卷重新转换”使用的独立路径，故意不改变
+    :func:`refresh_questions_batch` 的严格等长语义。题号唯一时优先按题号匹配；
+    题号缺失、重复或找不到时再尝试唯一正文指纹。任何一对多、多对一、题号与
+    指纹指向不同题卡，或检测到用户改动，都会返回 ``conflicts`` 并且整批不写盘。
+    没有冲突时，匹配题只更新识别链拥有的字段，未匹配旧题保留，未匹配新题追加。
+
+    ``previous_items`` 是可选的批次基线快照，元素可以是完整题库记录（含 ``id``）
+    或仅含导入字段的旧 payload；完整记录能可靠检测用户在重转换期间的编辑。
+    ``baseline`` 是同一快照的显式别名，便于恢复旧任务时调用。若两者都省略，函数
+    只信任题卡 frontmatter 中由自动导入写入的基线摘要；没有摘要的旧题在内容变化
+    时会进入审核而不会被覆盖。
+
+    返回值始终是可序列化的字典：``updated``、``added``、``preserved`` 是 qid
+    列表，``conflicts`` 是带 ``reason``/``new_index``/``qids`` 的审核项，另外提供
+    ``written`` 和各项计数。发现输入/路径等程序错误仍抛 ``ValueError``，不把环境
+    故障伪装成“无冲突”。
+    """
+    if baseline is not None:
+        if previous_items is not None and previous_items != baseline:
+            raise ValueError("增量刷新同时收到不同的基线快照")
+        previous_items = baseline
+    if not items:
+        return {
+            "ok": True, "written": False, "updated": [], "added": [],
+            "preserved": [], "conflicts": [], "matched": [],
+            "updated_count": 0, "added_count": 0, "preserved_count": 0,
+            "conflict_count": 0,
+        }
+
+    scope = str(idempotency_scope or "").strip()
+    target_dir = _checked_folder_path(folder, allow_root=True)
+    if not target_dir.is_dir():
+        raise ValueError("目标题集不存在")
+    # `_checked_folder_path` 收敛了路径；这里保留规范化 id，写入结果和日志不会因
+    # 用户用反斜杠/首尾斜杠提交而出现两个不同的目录标识。
+    target_folder = (target_dir.relative_to(config.BANK_DIR.resolve())
+                     .as_posix() if target_dir != config.BANK_DIR.resolve()
+                     else "")
+
+    def _result(*, updated=(), added=(), preserved=(), conflicts=(),
+                matched=(), written=False):
+        updated = list(updated)
+        added = list(added)
+        preserved = list(preserved)
+        conflicts = list(conflicts)
+        matched = list(matched)
+        return {
+            "ok": not conflicts,
+            "written": bool(written),
+            "updated": updated,
+            "added": added,
+            "preserved": preserved,
+            "conflicts": conflicts,
+            "matched": matched,
+            "updated_count": len(updated),
+            "added_count": len(added),
+            "preserved_count": len(preserved),
+            "conflict_count": len(conflicts),
+        }
+
+    def _conflict(reason: str, *, new_index: int | None = None,
+                  qids=(), message: str = "", **extra) -> dict:
+        row = {
+            "reason": reason,
+            # `kind`/`code` 是前端和旧脚本常用的别名，全部保留以便任务快照升级
+            # 时不需要猜某一版本的字段名。
+            "kind": reason,
+            "code": reason,
+            "qids": list(dict.fromkeys(str(qid) for qid in qids if qid)),
+        }
+        if new_index is not None:
+            row["new_index"] = int(new_index)
+        if message:
+            row["message"] = message
+        row.update(extra)
+        return row
+
+    def _qid_from_snapshot(row: Mapping) -> str:
+        return str(row.get("id") or row.get("qid") or "").strip()
+
+    def _snapshot_digest(row: Mapping, fallback_row: Mapping | None = None):
+        meta = row.get("_meta") if isinstance(row, Mapping) else None
+        meta = meta if isinstance(meta, Mapping) else {}
+        for source in (row, meta):
+            for key in (_IMPORT_BASELINE_DIGEST_KEY,
+                        "baseline_digest", "_baseline_digest"):
+                value = source.get(key) if isinstance(source, Mapping) else None
+                if value:
+                    return str(value)
+        if fallback_row is not None:
+            return _import_owned_digest(fallback_row)
+        # A plain payload supplied as the baseline is itself authoritative. A full
+        # current record is handled separately so that a missing digest on a legacy
+        # card does not silently bless a later edit.
+        if all(key in row for key in _IMPORT_OWNED_FIELDS):
+            return _import_owned_digest(_import_item_record(row))
+        return None
+
+    def _current_row(record: Mapping) -> dict:
+        return _import_item_record(record)
+
+    # 所有读取、匹配和临时写入都在同一把锁内完成。这样两个原卷重转换同时指向
+    # 同一题集时，不会拿到相同的 order，也不会把另一批刚追加的题误当成空位。
+    with _write_lock:
+        records = collection_records_snapshot(target_folder, recursive=False)
+        by_id = {str(record.get("id")): record for record in records
+                 if record.get("id")}
+
+        selected_ids: set[str] | None = None
+        candidate_ids_limited = candidate_ids is not None
+        has_scope_identity_snapshot = False
+        snapshots_by_id = {}
+        snapshots_by_scope_index = {}
+        missing_snapshot_ids: set[str] = set()
+        missing_snapshot_scope_indexes: set[tuple[str, int]] = set()
+        if candidate_ids is not None:
+            selected_ids = {str(qid) for qid in candidate_ids if qid}
+        if previous_items is not None:
+            # 优先用快照中的稳定 qid；旧快照只有 scope/index 时也能认回。没有任何
+            # 可辨认身份的旧 payload 才退回“本级全部题卡”，并在匹配阶段以题号/指纹
+            # 消歧，宁可产生审核冲突也不静默更新无关题目。
+            snapshot_ids: set[str] = set()
+            unresolved_snapshot = []
+            for snapshot in previous_items:
+                if not isinstance(snapshot, Mapping):
+                    unresolved_snapshot.append(snapshot)
+                    continue
+                qid = _qid_from_snapshot(snapshot)
+                if qid:
+                    snapshot_ids.add(qid)
+                    continue
+                meta = snapshot.get("_meta")
+                meta = meta if isinstance(meta, Mapping) else snapshot
+                snap_scope = str(meta.get("_quizforge_import_scope") or "")
+                snap_index = _as_number(
+                    meta.get("_quizforge_import_index"))
+                if snap_scope and snap_index is not None:
+                    has_scope_identity_snapshot = True
+                    for record in records:
+                        rmeta = record.get("_meta") or {}
+                        if (str(rmeta.get("_quizforge_import_scope") or "")
+                                == snap_scope
+                                and _as_number(rmeta.get(
+                                    "_quizforge_import_index")) == snap_index):
+                            snapshot_ids.add(str(record["id"]))
+                            break
+                else:
+                    unresolved_snapshot.append(snapshot)
+            if snapshot_ids:
+                selected_ids = ((selected_ids & snapshot_ids)
+                                if selected_ids is not None else snapshot_ids)
+            elif (unresolved_snapshot or has_scope_identity_snapshot) \
+                    and selected_ids is None:
+                selected_ids = set(by_id)
+            elif selected_ids is None:
+                selected_ids = set()
+
+        if selected_ids is None:
+            candidate_records = records
+        else:
+            candidate_records = [record for record in records
+                                 if str(record.get("id")) in selected_ids]
+
+        # 作用域属于自动入库的幂等身份。重试时即使批次快照只保存了新增题的
+        # scope/index，也要把这些题重新纳入候选；它们不能因不在旧基线而重复追加。
+        if scope:
+            seen_candidate_ids = {str(record.get("id"))
+                                  for record in candidate_records}
+            for record in records:
+                meta = record.get("_meta") or {}
+                if (str(meta.get("_quizforge_import_scope") or "") == scope
+                        and str(record.get("id")) not in seen_candidate_ids):
+                    candidate_records.append(record)
+                    seen_candidate_ids.add(str(record.get("id")))
+
+        # 为每个候选建立基线。优先顺序是题卡 frontmatter 摘要，其次是显式快照；
+        # 旧题没有任何基线时标记为 None，后面只有“新旧导入字段完全相同”才允许
+        # 通过，避免把用户早先改过的题当成可覆盖对象。
+        # 记住快照宣称存在、但当前题集里找不到的身份。题卡可能被用户删除、
+        # 移动到其它题集，或被外部程序改了 frontmatter id；这些情况都不能被
+        # 当作“新题”静默追加，否则重转换会留下重复题或覆盖范围外的数据。
+        if previous_items is not None:
+            for snapshot in previous_items:
+                if not isinstance(snapshot, Mapping):
+                    continue
+                qid = _qid_from_snapshot(snapshot)
+                key = None
+                if qid:
+                    key = ("id", qid)
+                else:
+                    meta = snapshot.get("_meta")
+                    meta = meta if isinstance(meta, Mapping) else snapshot
+                    snap_scope = str(meta.get("_quizforge_import_scope") or "")
+                    snap_index = _as_number(meta.get("_quizforge_import_index"))
+                    if snap_scope and snap_index is not None:
+                        key = (snap_scope, snap_index)
+                if key and key[0] == "id":
+                    snapshots_by_id[key[1]] = snapshot
+                elif key:
+                    snapshots_by_scope_index[key] = snapshot
+
+            # 只在快照明确提供身份时检查“消失”。没有 id/scope/index 的旧 payload
+            # 本来就无法证明对应的是哪道旧题，继续交给题号/指纹匹配并在歧义时审核。
+            for qid in snapshots_by_id:
+                if qid not in by_id:
+                    missing_snapshot_ids.add(qid)
+            for scope_index in snapshots_by_scope_index:
+                if not any(
+                        str((record.get("_meta") or {}).get(
+                            "_quizforge_import_scope") or "")
+                        == scope_index[0]
+                        and _as_number((record.get("_meta") or {}).get(
+                            "_quizforge_import_index")) == scope_index[1]
+                        for record in records):
+                    missing_snapshot_scope_indexes.add(scope_index)
+
+        candidate_info = []
+        for record in candidate_records:
+            qid = str(record.get("id") or "")
+            snapshot = snapshots_by_id.get(qid)
+            if snapshot is None:
+                meta = record.get("_meta") or {}
+                key = (str(meta.get("_quizforge_import_scope") or ""),
+                       _as_number(meta.get("_quizforge_import_index")))
+                snapshot = snapshots_by_scope_index.get(key)
+            current = _current_row(record)
+            baseline_row = (_import_item_record(snapshot)
+                            if isinstance(snapshot, Mapping)
+                            and all(key in snapshot for key in _IMPORT_OWNED_FIELDS)
+                            else None)
+            digest = _snapshot_digest(record, baseline_row)
+            # `_snapshot_digest(record, baseline_row)` intentionally derives a digest
+            # from the explicit snapshot. For a legacy record with no snapshot/digest,
+            # it returns None and edit detection remains conservative below.
+            candidate_info.append({
+                "record": record, "qid": qid, "current": current,
+                "digest": digest, "baseline_row": baseline_row,
+            })
+
+        # 上述 helper 在“无 snapshot 但完整当前记录”时会把当前内容当 baseline；这
+        # 只适合显式 previous_items 为空的旧调用吗？为了不覆盖 legacy 用户编辑，
+        # 纠正为：只有 frontmatter 明确有摘要，或 snapshot 显式提供字段时才信任。
+        for info in candidate_info:
+            record = info["record"]
+            meta = record.get("_meta") or {}
+            explicit = any(meta.get(key)
+                           for key in (_IMPORT_BASELINE_DIGEST_KEY,
+                                       "baseline_digest", "_baseline_digest"))
+            if not explicit and info["baseline_row"] is None:
+                info["digest"] = None
+
+        number_index: dict[int, list[dict]] = {}
+        fingerprint_index: dict[str, list[dict]] = {}
+        for info in candidate_info:
+            number = info["current"].get("number")
+            if number is not None:
+                number_index.setdefault(number, []).append(info)
+            fp = dedup.fingerprint(info["current"].get("body") or "")
+            fingerprint_index.setdefault(fp, []).append(info)
+
+        new_rows = [_import_item_record(item) for item in items]
+        new_fps = [dedup.fingerprint(row.get("body") or "")
+                   for row in new_rows]
+        # 新结果自身出现同一正文时，无论题号是否不同都无法安全决定一对一归属。
+        duplicate_new_fps: dict[str, list[int]] = {}
+        for index, fp in enumerate(new_fps):
+            duplicate_new_fps.setdefault(fp, []).append(index)
+        duplicate_new_fps = {
+            fp: indexes for fp, indexes in duplicate_new_fps.items()
+            if len(indexes) > 1
+        }
+
+        conflicts: list[dict] = []
+        if candidate_ids_limited:
+            # 显式候选身份已经从磁盘消失时，同样不能把对应新结果当成
+            # 无关新增；调用方通常是在恢复任务快照，丢失应进入人工审核。
+            for qid in sorted((selected_ids or set()) - set(by_id)):
+                if qid in missing_snapshot_ids:
+                    continue
+                conflicts.append(_conflict(
+                    "candidate_missing", qids=(qid,),
+                    message="指定的候选题卡已从当前题集消失，无法安全增量写入"))
+        # candidate_ids 表示调用方只要求处理一个子集；未选中的快照缺失不应
+        # 阻断这次局部刷新。未传 candidate_ids 时，所有显式身份都必须仍可找到。
+        for qid in sorted(missing_snapshot_ids):
+            if candidate_ids_limited and qid not in (selected_ids or set()):
+                continue
+            conflicts.append(_conflict(
+                "baseline_missing", qids=(qid,),
+                message="基线题卡已从当前题集消失，无法安全判断是删除还是移动"))
+        for snap_scope, snap_index in sorted(missing_snapshot_scope_indexes):
+            if candidate_ids_limited:
+                # scope/index 快照没有 qid，只有在当前候选集合中存在同作用域题卡
+                # 才能被 candidate_ids 选择；局部调用无法证明其缺失，跳过该项。
+                continue
+            conflicts.append(_conflict(
+                "baseline_missing", new_index=snap_index,
+                message="基线题卡已从当前题集消失，无法安全判断是删除还是移动",
+                scope=snap_scope, index=snap_index))
+        matches: list[dict] = []
+        matched_by_new: dict[int, dict] = {}
+        used_old: set[str] = set()
+        blocked_new: set[int] = set()
+        for fp, indexes in duplicate_new_fps.items():
+            blocked_new.update(indexes)
+            conflicts.append(_conflict(
+                "duplicate_new_fingerprint", new_index=indexes[0],
+                new_indexes=indexes, fingerprint=fp,
+                message="新识别结果存在重复正文，无法一对一增量匹配"))
+
+        for index, (new_row, new_fp) in enumerate(zip(new_rows, new_fps)):
+            if index in blocked_new:
+                continue
+            number = new_row.get("number")
+            number_candidates = (list(number_index.get(number, []))
+                                 if number is not None else [])
+            fp_candidates = list(fingerprint_index.get(new_fp, []))
+            number_choice = (number_candidates[0]
+                             if len(number_candidates) == 1 else None)
+            fp_choice = (fp_candidates[0]
+                         if len(fp_candidates) == 1 else None)
+            chosen = None
+            method = ""
+            if number_choice is not None:
+                if fp_choice is not None and fp_choice["qid"] != number_choice["qid"]:
+                    conflicts.append(_conflict(
+                        "number_fingerprint_conflict", new_index=index,
+                        qids=(number_choice["qid"], fp_choice["qid"]),
+                        number=number, fingerprint=new_fp,
+                        message="题号和正文指纹指向不同题卡"))
+                    continue
+                chosen = number_choice
+                method = "number"
+            elif fp_choice is not None:
+                # 题号重复/缺失/找不到时，唯一正文指纹是允许的兜底。
+                if number_candidates and all(
+                        fp_choice["qid"] != candidate["qid"]
+                        for candidate in number_candidates):
+                    conflicts.append(_conflict(
+                        "number_fingerprint_conflict", new_index=index,
+                        qids=[info["qid"] for info in number_candidates]
+                        + [fp_choice["qid"]], number=number,
+                        fingerprint=new_fp,
+                        message="重复题号与正文指纹指向不同题卡"))
+                    continue
+                chosen = fp_choice
+                method = "fingerprint"
+            elif number_candidates:
+                conflicts.append(_conflict(
+                    "ambiguous_number", new_index=index,
+                    qids=[info["qid"] for info in number_candidates],
+                    number=number,
+                    message="旧题号对应多道题，正文指纹也无法唯一消歧"))
+                continue
+            elif fp_candidates:
+                conflicts.append(_conflict(
+                    "ambiguous_fingerprint", new_index=index,
+                    qids=[info["qid"] for info in fp_candidates],
+                    fingerprint=new_fp,
+                    message="正文指纹对应多道旧题，无法安全匹配"))
+                continue
+            else:
+                # 没有旧题对应，稍后追加。
+                continue
+
+            if chosen["qid"] in used_old:
+                conflicts.append(_conflict(
+                    "many_to_one", new_index=index, qids=(chosen["qid"],),
+                    message="多个新结果试图更新同一旧题"))
+                continue
+            used_old.add(chosen["qid"])
+            matched_by_new[index] = chosen
+            matches.append({"new_index": index, "qid": chosen["qid"],
+                            "method": method})
+
+        if conflicts:
+            preserved = [info["qid"] for info in candidate_info]
+            return _result(preserved=preserved, conflicts=conflicts,
+                           matched=matches, written=False)
+
+        # 生成更新/追加计划。先完成所有基线和路径校验，再开始写临时文件，保证
+        # 用户遇到冲突时不会看到半批新题或半批旧题已经被替换。
+        updated_infos = []
+        additions = []
+        preserved = []
+        next_order = _top_order(target_folder)
+        candidate_by_qid = {info["qid"]: info for info in candidate_info}
+        for index, (item, new_row) in enumerate(zip(items, new_rows)):
+            info = matched_by_new.get(index)
+            if info is None:
+                additions.append((index, item, new_row, new_fps[index]))
+                continue
+            current = info["current"]
+            baseline_digest = info.get("digest")
+            baseline_row = info.get("baseline_row")
+            current_digest = _import_owned_digest(current)
+            if baseline_digest:
+                baseline_changed = current_digest != baseline_digest
+            elif baseline_row is not None:
+                baseline_changed = current != baseline_row
+            else:
+                # 没有可靠基线时，仅当新识别内容与当前完全一致才可继续；否则转
+                # 人工审核。这样老版本手工题卡不会因“题号碰巧相同”被覆盖。
+                baseline_changed = current != new_row
+            if baseline_changed:
+                conflicts.append(_conflict(
+                    "user_edited", new_index=index, qids=(info["qid"],),
+                    message="题卡在上次入库后被用户编辑，已保留原题并转人工审核"))
+                continue
+            updated_infos.append((index, info, new_row))
+
+        if conflicts:
+            preserved = [info["qid"] for info in candidate_info]
+            return _result(preserved=preserved, conflicts=conflicts,
+                           matched=matches, written=False)
+
+        existing_ids = set(by_id)
+        prepared: list[dict] = []
+        # 更新项：复制整个 frontmatter，仅替换识别链拥有字段和新的基线摘要。
+        for index, info, new_row in updated_infos:
+            record = info["record"]
+            # 必须在 resolve 前检查链接本身；对已解析的目标调用 is_symlink()
+            # 永远是 False，会把题库内指向外部的链接误当成可覆盖的普通题卡。
+            raw_path = config.BANK_DIR / PurePosixPath(
+                str(record.get("path") or ""))
+            if (_is_link_or_junction(raw_path)
+                    or not raw_path.exists()):
+                conflicts.append(_conflict(
+                    "path_changed", new_index=index, qids=(info["qid"],),
+                    message="旧题卡位置发生变化，已停止增量写入"))
+                continue
+            path = raw_path.resolve()
+            if (path.parent != target_dir or not path.is_file()):
+                conflicts.append(_conflict(
+                    "path_changed", new_index=index, qids=(info["qid"],),
+                    message="旧题卡位置发生变化，已停止增量写入"))
+                continue
+            original = path.read_bytes()
+            try:
+                meta, raw_body = _parse_raw_text(original.decode("utf-8"))
+            except UnicodeDecodeError as exc:
+                conflicts.append(_conflict(
+                    "invalid_utf8", new_index=index, qids=(info["qid"],),
+                    message="旧题卡不是有效 UTF-8，已停止增量写入"))
+                continue
+            actual = _to_record(path, meta, raw_body)
+            if str(meta.get("id") or path.stem) != info["qid"]:
+                conflicts.append(_conflict(
+                    "identity_changed", new_index=index, qids=(info["qid"],),
+                    message="旧题卡身份发生变化，已停止增量写入"))
+                continue
+            # 与最初匹配时使用的内容再次核对，覆盖“读取快照后 Obsidian 保存”的窗口。
+            if _import_owned_digest(_current_row(actual)) != _import_owned_digest(info["current"]):
+                conflicts.append(_conflict(
+                    "external_edit", new_index=index, qids=(info["qid"],),
+                    message="写入前检测到外部编辑，旧题已保留"))
+                continue
+            next_meta = dict(meta)
+            next_meta.update({
+                "id": info["qid"], "type": new_row["type"],
+                "source": new_row["source"], "number": new_row["number"],
+                "img_split": new_row["img_split"],
+                "img_layouts": new_row["img_layouts"],
+                "sol_img_split": new_row["sol_img_split"],
+                "sol_img_layouts": new_row["sol_img_layouts"],
+                _IMPORT_BASELINE_DIGEST_KEY: _import_owned_digest(new_row),
+                "updated": _now_iso(),
+            })
+            if scope:
+                next_meta["_quizforge_import_scope"] = scope
+                next_meta["_quizforge_import_index"] = index
+            extra = list(actual.get("extra_sections") or [])
+            next_body = _join_sections(new_row["body"], new_row["solution"], extra)
+            prepared.append({"path": path, "original": original,
+                             "meta": next_meta, "body": next_body,
+                             "qid": info["qid"], "new": False})
+
+        if conflicts:
+            preserved = [info["qid"] for info in candidate_info]
+            return _result(preserved=preserved, conflicts=conflicts,
+                           matched=matches, written=False)
+
+        # 追加项的稳定 id 以题号/指纹构成，批次重试或题目插入后仍能认回同一道新题。
+        for index, item, new_row, new_fp in additions:
+            if scope:
+                token = (f"number:{new_row['number']}"
+                         if new_row.get("number") is not None
+                         else f"fingerprint:{new_fp}")
+                qid = _stable_import_qid(f"{scope}:incremental:{token}", 0)
+            else:
+                qid = _new_id()
+            if qid in existing_ids:
+                # 已有同一稳定 id 但未被上面的索引选中，不能覆盖/重复追加。
+                conflicts.append(_conflict(
+                    "stable_id_collision", new_index=index, qids=(qid,),
+                    message="增量追加的稳定题目身份已被其它题卡占用"))
+                continue
+            source = str(new_row.get("source") or "")
+            number = new_row.get("number")
+            explicit_title = safe_question_title(item.get("title") or "")
+            generated_title = default_question_title(
+                source, number,
+                index + 1 if source and number is None and len(items) > 1
+                else None)
+            title = explicit_title or generated_title or qid
+            path = _question_filename(target_dir, qid, number, title)
+            meta = dict(_KNOWN_DEFAULTS)
+            meta.update({
+                "id": qid, "type": new_row["type"],
+                "source": new_row["source"], "number": number,
+                # 增量重转换的新增题可能来自人工审核确认；这些是新题的初始
+                # 用户元数据，应沿用表单值。匹配到的旧题则在上面整份保留，
+                # 不会用识别结果覆盖既有标签/难度/星标。
+                "tags": list(item.get("tags") or []),
+                "difficulty": str(item.get("difficulty") or ""),
+                "starred": bool(item.get("starred", False)),
+                "created": _now_iso(), "updated": _now_iso(),
+                "order": next_order,
+                _IMPORT_BASELINE_DIGEST_KEY: _import_owned_digest(new_row),
+            })
+            if scope:
+                meta["_quizforge_import_scope"] = scope
+                meta["_quizforge_import_index"] = index
+            if new_row.get("img_split") is not None:
+                meta["img_split"] = new_row["img_split"]
+            if isinstance(new_row.get("img_layouts"), list):
+                meta["img_layouts"] = list(new_row["img_layouts"])
+            if new_row.get("sol_img_split") is not None:
+                meta["sol_img_split"] = new_row["sol_img_split"]
+            if isinstance(new_row.get("sol_img_layouts"), list):
+                meta["sol_img_layouts"] = list(new_row["sol_img_layouts"])
+            note = str(item.get("note") or "").strip()
+            extra = [("备注", note)] if note else []
+            body = _join_sections(new_row["body"], new_row["solution"], extra)
+            prepared.append({"path": path, "original": None, "meta": meta,
+                             "body": body, "qid": qid, "new": True})
+            existing_ids.add(qid)
+            next_order += 1.0
+
+        if conflicts:
+            preserved = [info["qid"] for info in candidate_info]
+            return _result(preserved=preserved, conflicts=conflicts,
+                           matched=matches, written=False)
+
+        staged: list[tuple[dict, Path]] = []
+        replaced: list[tuple[dict, bytes]] = []
+        try:
+            for plan in prepared:
+                path = plan["path"]
+                if plan["new"]:
+                    if path.exists() or path.is_symlink():
+                        raise ValueError(f"增量追加目标已存在：{path.name}")
+                elif path.read_bytes() != plan["original"]:
+                    raise ValueError("题卡在增量刷新期间被外部编辑，旧题已保留")
+                temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+                temp.write_text(_render_raw(plan["meta"], plan["body"]),
+                                encoding="utf-8", newline="\n")
+                staged.append((plan, temp))
+            for plan, temp in staged:
+                path = plan["path"]
+                if plan["new"]:
+                    if path.exists() or path.is_symlink():
+                        raise ValueError(f"增量追加目标已存在：{path.name}")
+                elif path.read_bytes() != plan["original"]:
+                    raise ValueError("题卡在增量刷新期间被外部编辑，旧题已保留")
+                os.replace(temp, path)
+                replaced.append((plan, plan["original"]))
+        except Exception:
+            for plan, original in reversed(replaced):
+                path = plan["path"]
+                try:
+                    if original is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.write_bytes(original)
+                except OSError:
+                    logger.exception("增量刷新回滚失败：%s", path)
+            raise
+        finally:
+            for _plan, temp in staged:
+                temp.unlink(missing_ok=True)
+            for plan, _temp in staged:
+                _cache.pop(str(plan["path"]), None)
+            if staged:
+                invalidate_scan_cache(
+                    folder_structure=any(plan["new"] for plan, _ in staged))
+
+        updated = [info["qid"] for _index, info, _row in updated_infos]
+        added = [plan["qid"] for plan in prepared if plan["new"]]
+        matched_ids = set(updated) | set(added)
+        preserved = [info["qid"] for info in candidate_info
+                     if info["qid"] not in matched_ids]
+        return _result(updated=updated, added=added, preserved=preserved,
+                       matched=matches, written=bool(prepared))
 
 
 def update_question(qid: str, body: str, solution: str = "", qtype: str = "",
@@ -1968,6 +2833,81 @@ def delete_question(qid: str) -> dict | None:
             _selected.discard(qid)
             _save_selected_unlocked()
     return rec
+
+
+def _checked_bank_file(path_or_rel: Path | str) -> tuple[Path, str]:
+    """校验一个题库内的真实文件，返回绝对路径和 POSIX 相对路径。"""
+    raw = path_or_rel
+    if isinstance(raw, Path):
+        candidate = raw
+    else:
+        value = str(raw or "").strip().replace("\\", "/")
+        rel = PurePosixPath(value)
+        if rel.is_absolute() or any(part in ("", ".", "..")
+                                    or part.startswith(".")
+                                    for part in rel.parts):
+            raise ValueError("文件路径无效")
+        candidate = config.BANK_DIR.joinpath(*rel.parts)
+    try:
+        # 先判断链接本身，再 resolve；否则指向题库外的链接会被误当成普通文件。
+        if candidate.is_symlink() or getattr(candidate, "is_junction", lambda: False)():
+            raise ValueError("不支持操作符号链接或目录联接")
+        root = config.BANK_DIR.resolve()
+        target = candidate.resolve()
+        if target == root or not target.is_relative_to(root):
+            raise ValueError("文件路径越界")
+        rel = target.relative_to(root)
+    except OSError as exc:
+        raise ValueError("文件路径无效") from exc
+    if (not target.is_file() or target.name.startswith(".")
+            or _skip_rel(rel)):
+        raise ValueError("文件不存在或不可操作")
+    return target, rel.as_posix()
+
+
+def trash_file(path_or_rel: Path | str, *, kind: str = "") -> dict:
+    """把题库内普通文件移入回收站，并记录原路径。
+
+    题卡 Markdown 应调用 ``delete_question``，以便沿用题目回收/恢复和图片引用
+    语义；此函数用于 PDF、图片、Word 及显式 ``document`` Markdown。普通文件不能
+    把原路径写进自身，因此在回收站旁放一个同名 ``.trash_meta.json`` 侧车。
+    """
+    source, rel = _checked_bank_file(path_or_rel)
+    config.TRASH_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = source.suffix
+    trash_name = f"{source.stem}__{_new_id()}{suffix}"
+    destination = config.TRASH_DIR / trash_name
+    metadata_path = destination.with_name(destination.name + ".trash_meta.json")
+    metadata = {
+        "original_path": rel,
+        "deleted_at": _now_iso(),
+        "kind": str(kind or source.suffix.lstrip(".")),
+    }
+    with _write_lock:
+        # shutil.move 在同盘时仍可能覆盖已有目标；随机 id 已足够避免正常冲突，
+        # 这里再做一次显式检查，防止极低概率的 mock/竞态把回收站文件替换掉。
+        if destination.exists() or metadata_path.exists():
+            raise FileExistsError("回收站目标已存在")
+        shutil.move(str(source), str(destination))
+        try:
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8", newline="\n")
+        except Exception:
+            # 元数据写失败时恢复原文件，避免留下无法恢复的“孤儿”回收站条目。
+            try:
+                shutil.move(str(destination), str(source))
+            except OSError:
+                logger.exception("回收站元数据写入失败且无法恢复原文件：%s", source)
+            raise
+        _cache.pop(str(source), None)
+        invalidate_scan_cache(folder_structure=True)
+    return {
+        "original_path": rel,
+        "trash_path": destination.relative_to(config.TRASH_DIR).as_posix(),
+        "deleted_at": metadata["deleted_at"],
+        "kind": metadata["kind"],
+    }
 
 
 def list_deleted_questions() -> list[dict]:
@@ -2207,11 +3147,12 @@ def _swap_layout_items(items, i: int, j: int) -> list[dict]:
 
 
 def swap_images(qid: str, i: int, j: int, text: str, field: str = "body"):
-    """交换第 i、j 张图：写入新正文，并同步换 img_layouts / img_originals 的序号。
+    """交换第 i、j 张图：写入新正文，并同步所有逐图元数据的序号。
 
     新正文由调用方给（图引用的交换是纯文本操作，见 qrender.swap_image_refs），
     这里只保证**几处一起改**：序号 i 是多处共享的不变量（`.body img` 遍历序、
     导出侧图片文件名列表下标、img_layouts[].i、img_originals[].i、
+    img_versions[].i、
     image-redraw.js 的 pickedIndex），任一处不同步就会让宽度/对齐/重绘原图错位
     到别的图上。所以一次读写落盘，不拆成两次 _update_meta_fields。
 
@@ -2229,6 +3170,8 @@ def swap_images(qid: str, i: int, j: int, text: str, field: str = "body"):
     if field != "solution":
         meta["img_originals"] = _swap_layout_items(
             list(meta.get("img_originals") or []), i, j)
+        meta["img_versions"] = _swap_layout_items(
+            list(meta.get("img_versions") or []), i, j)
     if field == "solution":
         full_body = _join_sections(rec["body"], text, rec["extra_sections"])
     else:
@@ -2263,6 +3206,124 @@ def remember_img_original(qid: str, index: int, filename: str):
     items.append({"i": index, "orig": filename})
     items.sort(key=lambda it: it.get("i", 0))
     _update_meta_fields(qid, {"img_originals": items})
+    remember_img_version(qid, index, filename, kind="original")
+
+
+class ImageVersionError(ValueError):
+    """图片版本不存在，或当前操作会破坏题目仍在使用的资源。"""
+
+
+def list_img_versions(qid: str, index: int) -> list[dict]:
+    """列出题干第 index 张图的版本，current 由正文引用实时推导。"""
+    rec = get_question(qid)
+    if not rec:
+        raise ImageVersionError(f"题目不存在：{qid}")
+    refs = [m.group(1).strip() for m in _IMAGE_REF_RE.finditer(rec["body"] or "")]
+    try:
+        current = refs[index]
+    except (IndexError, TypeError):
+        raise ImageVersionError(f"图片序号越界：{index}") from None
+    out = []
+    for item in rec.get("img_versions", []):
+        if not isinstance(item, Mapping) or item.get("i") != index:
+            continue
+        row = dict(item)
+        row["current"] = row.get("name") == current
+        out.append(row)
+    return out
+
+
+def remember_img_version(qid: str, index: int, filename: str, *,
+                         kind: str = "", created: str = "", model: str = "",
+                         prompt: str = "") -> dict:
+    """登记一个版本；同时把旧题目的当前图和原图备份纳入版本表。"""
+    try:
+        i = int(index)
+    except (TypeError, ValueError):
+        raise ImageVersionError("图片序号无效") from None
+    name = str(filename or "").strip()
+    if i < 0 or not name or "/" in name or "\\" in name or name.startswith("."):
+        raise ImageVersionError("图片版本文件名无效")
+    with _write_lock:
+        rec = get_question(qid)
+        if not rec:
+            raise ImageVersionError(f"题目不存在：{qid}")
+        path = config.BANK_DIR / rec["path"]
+        meta, body = _read_raw(path)
+        versions = _merge_img_versions(meta, body)
+        row = next((item for item in versions
+                    if item.get("i") == i and item.get("name") == name), None)
+        if row is None:
+            row = {"i": i, "name": name,
+                   "kind": _image_version_kind(name, kind),
+                   "created": (created or _now_iso())[:40]}
+            versions.append(row)
+        else:
+            row["kind"] = _image_version_kind(name, kind or row.get("kind", ""))
+            if created and not row.get("created"):
+                row["created"] = str(created)[:40]
+        if model and not row.get("model"):
+            row["model"] = str(model)[:120]
+        if prompt and not row.get("prompt"):
+            row["prompt"] = str(prompt)[:2000]
+        if meta.get("img_versions") != versions:
+            meta["img_versions"] = versions
+            meta["updated"] = _now_iso()
+            _write_raw(path, meta, body)
+        return dict(row)
+
+
+def ensure_img_versions(qid: str) -> list[dict]:
+    """把旧题的正文/原图备份迁移到 img_versions，并返回完整版本表。"""
+    with _write_lock:
+        rec = get_question(qid)
+        if not rec:
+            raise ImageVersionError(f"题目不存在：{qid}")
+        path = config.BANK_DIR / rec["path"]
+        meta, body = _read_raw(path)
+        versions = _merge_img_versions(meta, body)
+        if meta.get("img_versions") != versions:
+            meta["img_versions"] = versions
+            meta["updated"] = _now_iso()
+            _write_raw(path, meta, body)
+        return versions
+
+
+def delete_img_version(qid: str, index: int, filename: str) -> dict:
+    """删除一个非当前、非原图版本，并在全库无引用时删除对应资源文件。"""
+    name = str(filename or "").strip()
+    with _write_lock:
+        rec = get_question(qid)
+        if not rec:
+            raise ImageVersionError(f"题目不存在：{qid}")
+        refs = [m.group(1).strip() for m in _IMAGE_REF_RE.finditer(rec["body"] or "")]
+        if not isinstance(index, int) or index < 0 or index >= len(refs):
+            raise ImageVersionError("图片序号越界")
+        versions = _merge_img_versions(_read_raw(
+            config.BANK_DIR / rec["path"])[0], rec["body"])
+        target = next((item for item in versions
+                       if item.get("i") == index and item.get("name") == name), None)
+        if target is None:
+            raise ImageVersionError("图片版本不存在或已删除")
+        if name == refs[index]:
+            raise ImageVersionError("当前正在使用这个版本，请先切换到其他版本")
+        if target.get("kind") == "original":
+            raise ImageVersionError("原图版本不能删除")
+        path = config.BANK_DIR / rec["path"]
+        meta, body = _read_raw(path)
+        meta["img_versions"] = [item for item in versions
+                                 if not (item.get("i") == index
+                                         and item.get("name") == name)]
+        meta["updated"] = _now_iso()
+        _write_raw(path, meta, body)
+
+    candidates = {name}
+    if name.lower().endswith(".svg"):
+        candidates.add(name[:-4] + ".pdf")
+    # purge_orphan_images 会覆盖当前题库、其他已登记题库和回收站，只有全库无引用时才删。
+    removed_files = purge_orphan_images(candidates)
+    return {"metadata_deleted": True, "removed_files": removed_files,
+            "file_deleted": removed_files > 0}
 
 
 def get_img_original(qid: str, index: int) -> str:
@@ -2273,6 +3334,10 @@ def get_img_original(qid: str, index: int) -> str:
     for it in rec["img_originals"]:
         if isinstance(it, dict) and it.get("i") == index:
             return str(it.get("orig") or "")
+    for it in rec.get("img_versions", []):
+        if (isinstance(it, dict) and it.get("i") == index
+                and it.get("kind") == "original"):
+            return str(it.get("name") or "")
     return ""
 
 
@@ -2764,17 +3829,14 @@ def paper_abspath(paper_id: str) -> Path | None:
 
 
 def remove_paper(paper_id: str) -> bool:
-    """彻底删除一份原卷（**不进回收站**）。删掉了返回 True。
-
-    不进回收站是刻意的：回收站的语义是「题目/文件夹可恢复」，为附件在那儿再造一套
-    恢复逻辑不值得，而原卷本来就是用户自己电脑上还有一份的原始文件。面板上的删除
-    按钮会明确写「彻底删除、不进回收站」。
-    """
+    """把一份原卷移入回收站，删掉了返回 True。"""
     target = paper_abspath(paper_id)
     if target is None:
         return False
-    with _write_lock:
-        target.unlink()
+    try:
+        trash_file(target, kind="paper")
+    except (OSError, ValueError):
+        return False
     return True
 
 
@@ -2835,6 +3897,9 @@ def _refs_in(meta: dict, body: str) -> set[str]:
     for it in (meta.get("img_originals") or []):
         if isinstance(it, dict) and it.get("orig"):
             out.add(Path(str(it["orig"])).name)
+    for it in (meta.get("img_versions") or []):
+        if isinstance(it, dict) and it.get("name"):
+            out.add(Path(str(it["name"])).name)
     for name in list(out):
         if name.lower().endswith(".svg"):
             out.add(name[:-4] + ".pdf")
@@ -3011,7 +4076,9 @@ def _registered_live_refs(candidates: set[str] | None = None) -> tuple[set[str],
                     for match in _EMBED_RE.finditer(text)}
             frontmatter = _FM_RE.match(normalize_newlines(text))
             fm_text = frontmatter.group(1) if frontmatter else ""
-            if re.search(r"(?m)^img_originals\s*:\s*(?!\[\s*\]\s*$)", fm_text):
+            if re.search(
+                    r"(?m)^(?:img_originals|img_versions)\s*:\s*(?!\[\s*\]\s*$)",
+                    fm_text):
                 meta, _body = _parse_raw_text(text)
                 refs |= {name.casefold() for name in _refs_in(meta, "")}
             for name in list(refs):

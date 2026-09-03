@@ -509,6 +509,28 @@ def rename_entry(root: str | Path, source_path: str,
                            kind=kind)
 
 
+def delete_entry(root: str | Path, source_path: str) -> OperationResult:
+    """删除资料库中的单个文件或空文件夹。"""
+    root_path = _root_path(root)
+    source, old_rel = _resolve(root_path, source_path, allow_root=False)
+    _ensure_not_reserved(old_rel)
+    kind = _entry_kind(source)
+    if kind == "folder":
+        try:
+            next(source.iterdir())
+        except StopIteration:
+            pass
+        else:
+            raise LibraryOperationError("只能删除空文件夹", code="folder_not_empty")
+    with _OPERATION_LOCK, filestore._write_lock:
+        if kind == "folder":
+            source.rmdir()
+        else:
+            source.unlink()
+    _invalidate(folder_structure=kind == "folder")
+    return OperationResult(path=old_rel, old_path=old_rel, kind=kind)
+
+
 def transfer_entry(root: str | Path, source_path: str, target_folder_path: str,
                    *, copy: bool = False) -> OperationResult:
     root_path = _root_path(root)

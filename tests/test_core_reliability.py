@@ -11,15 +11,18 @@ import shutil
 import subprocess
 import tempfile
 import time
+import base64
 import unittest
 from urllib.parse import parse_qs, unquote, urlsplit
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from werkzeug.datastructures import FileStorage
 from PIL import Image
 
 import config
+import llm_client
 import tikz_render
 
 
@@ -400,6 +403,209 @@ class SecurityAndProviderTests(unittest.TestCase):
         self.assertNotIn("text-model", quick)
         self.assertIn(f'value="{vision_id}"', quick)
         self.assertNotIn(f'value="{text_id}"', quick)
+
+
+class RedrawModelTests(unittest.TestCase):
+    @staticmethod
+    def _png_bytes(color=(0, 0, 0, 255)):
+        buf = io.BytesIO()
+        Image.new("RGBA", (2, 2), color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_image_model_detection_separates_images_api_from_qwen_vision(self):
+        self.assertTrue(llm_client.is_image_generation_model("gpt-image-2"))
+        self.assertTrue(llm_client.is_image_generation_model("openai/gpt-image-1"))
+        self.assertFalse(llm_client.is_image_generation_model("dall-e-2"))
+        self.assertFalse(llm_client.is_image_generation_model("dall-e-3"))
+        self.assertFalse(llm_client.is_image_generation_model("qwen3-vl-plus"))
+
+    def test_images_edit_decodes_base64_response(self):
+        with tempfile.TemporaryDirectory() as raw:
+            image = Path(raw) / "input.jpg"
+            image.write_bytes(self._png_bytes())
+            encoded = base64.b64encode(self._png_bytes((255, 255, 255, 255))).decode()
+            edit = mock.Mock(return_value=SimpleNamespace(
+                data=[SimpleNamespace(b64_json=encoded)]))
+            client = object.__new__(llm_client.LLMClient)
+            client.model = "gpt-image-2"
+            client.base_url = "https://yapi.click/v1"
+            client._client = SimpleNamespace(
+                images=SimpleNamespace(edit=edit))
+
+            result = client.edit_image("重绘", image)
+
+        self.assertEqual(result, self._png_bytes((255, 255, 255, 255)))
+        edit.assert_called_once()
+        self.assertEqual(edit.call_args.kwargs["model"], "gpt-image-2")
+        self.assertEqual(edit.call_args.kwargs["prompt"], "重绘")
+
+    def test_image_model_redraw_saves_png_and_can_be_applied(self):
+        qid = app_module.filestore.create_question(
+            "图像模型重绘题\n![[redraw-input.png]]")
+        config.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.ASSETS_DIR / "redraw-input.png").write_bytes(self._png_bytes())
+        provider = SimpleNamespace(model="gpt-image-2")
+        client = SimpleNamespace(edit_image=mock.Mock(
+            return_value=self._png_bytes((255, 255, 255, 255))))
+
+        with mock.patch.object(app_module.providers, "resolve",
+                              return_value=provider), \
+                mock.patch.object(app_module.llm_client, "build_client",
+                                  return_value=client):
+            result = app_module.tikz_redraw.redraw(qid, 0)
+
+        self.assertRegex(result["name"], r"^redraw_[0-9a-f]{16}\.png$")
+        self.assertEqual(result["code"], "")
+        app_module.tikz_redraw.validate_generated(result["name"])
+        old = app_module.tikz_redraw.apply_redraw(qid, 0, result["name"])
+        self.assertEqual(old, "redraw-input.png")
+        self.assertIn(f"![[{result['name']}]]",
+                      app_module.filestore.get_question(qid)["body"])
+        self.assertEqual(
+            app_module.filestore.get_img_original(qid, 0), "redraw-input.png")
+
+    def test_qwen_redraw_keeps_provider_max_tokens(self):
+        qid = app_module.filestore.create_question(
+            "Qwen 视觉重绘题\n![[qwen-input.png]]")
+        config.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        (config.ASSETS_DIR / "qwen-input.png").write_bytes(self._png_bytes())
+        provider = SimpleNamespace(model="qwen3-vl-plus")
+        client = SimpleNamespace(
+            max_tokens=8192,
+            chat_vision=mock.Mock(return_value=("tikz", "stop")))
+
+        with mock.patch.object(app_module.providers, "resolve",
+                              return_value=provider), \
+                mock.patch.object(app_module.llm_client, "build_client",
+                                  return_value=client), \
+                mock.patch.object(
+                    app_module.tikz_redraw.tikz_render, "render_from_reply",
+                    return_value=("tikz", "tikz.pdf", "tikz.svg")):
+            result = app_module.tikz_redraw.redraw(qid, 0)
+
+        client.chat_vision.assert_called_once()
+        self.assertEqual(client.chat_vision.call_args.kwargs["max_tokens"], 8192)
+        self.assertEqual(result["name"], "tikz.svg")
+
+
+class ImageVersionTests(unittest.TestCase):
+    @staticmethod
+    def _png_bytes(color):
+        buf = io.BytesIO()
+        Image.new("RGBA", (3, 2), color).save(buf, format="PNG")
+        return buf.getvalue()
+
+    def setUp(self):
+        config.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        self.client = app_module.app.test_client()
+        self.headers = {"X-CSRF-Token": app_module._WRITE_TOKEN}
+
+    def _asset(self, name, color):
+        (config.ASSETS_DIR / name).write_bytes(self._png_bytes(color))
+
+    def test_old_original_metadata_is_migrated_to_versions(self):
+        qid = app_module.filestore.create_question(
+            "旧题迁移\n![[current.png]]")
+        self._asset("current.png", (10, 20, 30, 255))
+        app_module.filestore._update_meta_fields(
+            qid, {"img_originals": [{"i": 0, "orig": "source.jpg"}]})
+
+        versions = app_module.filestore.ensure_img_versions(qid)
+        self.assertEqual(
+            {(row["name"], row["kind"]) for row in versions if row["i"] == 0},
+            {("source.jpg", "original"), ("current.png", "original")})
+        meta, _body = app_module.filestore._read_raw(
+            config.BANK_DIR / app_module.filestore.get_question(qid)["path"])
+        self.assertIn("img_versions", meta)
+
+    def test_api_lists_switches_and_deletes_versions_with_csrf(self):
+        qid = app_module.filestore.create_question(
+            "版本管理题\n![[source.jpg]]")
+        self._asset("source.jpg", (0, 0, 0, 255))
+        first = "redraw_1111111111111111.png"
+        second = "redraw_2222222222222222.png"
+        self._asset(first, (255, 0, 0, 255))
+        self._asset(second, (0, 255, 0, 255))
+        app_module.tikz_redraw.apply_redraw(qid, 0, first)
+        app_module.filestore.remember_img_version(
+            qid, 0, second, kind="generated", model="gpt-image-2",
+            created="2026-09-01T12:00:00", prompt="保留坐标轴")
+
+        listed = self.client.get(
+            f"/question/{qid}/redraw/versions?index=0")
+        self.assertEqual(listed.status_code, 200)
+        rows = listed.get_json()["versions"]
+        self.assertEqual({row["name"] for row in rows},
+                         {"source.jpg", first, second})
+        second_row = next(row for row in rows if row["name"] == second)
+        self.assertEqual(second_row["model"], "gpt-image-2")
+        self.assertFalse(second_row["current"])
+        self.assertTrue(second_row["can_delete"])
+
+        self.assertEqual(self.client.post(
+            f"/question/{qid}/redraw/version/switch",
+            json={"index": 0, "name": "source.jpg"}).status_code, 400)
+        switched = self.client.post(
+            f"/question/{qid}/redraw/version/switch",
+            json={"index": 0, "name": "source.jpg"}, headers=self.headers)
+        self.assertEqual(switched.status_code, 200)
+        self.assertIn("![[source.jpg]]",
+                      app_module.filestore.get_question(qid)["body"])
+        self.assertTrue(next(row for row in switched.get_json()["versions"]
+                             if row["name"] == "source.jpg")["current"])
+
+        current_delete = self.client.post(
+            f"/question/{qid}/redraw/version/delete",
+            json={"index": 0, "name": "source.jpg"}, headers=self.headers)
+        self.assertEqual(current_delete.status_code, 400)
+        deleted = self.client.post(
+            f"/question/{qid}/redraw/version/delete",
+            json={"index": 0, "name": first}, headers=self.headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertNotIn(first, {row["name"] for row in deleted.get_json()["versions"]})
+        self.assertFalse((config.ASSETS_DIR / first).exists())
+
+    def test_shared_version_is_kept_when_deleting_one_question_metadata(self):
+        qid = app_module.filestore.create_question(
+            "共享版本题甲\n![[source-a.jpg]]")
+        other = app_module.filestore.create_question(
+            "共享版本题乙\n![[source-b.jpg]]")
+        self._asset("source-a.jpg", (0, 0, 0, 255))
+        self._asset("source-b.jpg", (0, 0, 0, 255))
+        shared = "redraw_3333333333333333.png"
+        self._asset(shared, (0, 0, 255, 255))
+        app_module.tikz_redraw.apply_redraw(qid, 0, shared)
+        app_module.filestore.remember_img_version(
+            other, 0, shared, kind="generated", model="shared")
+
+        with mock.patch.object(app_module.filestore, "_registered_bank_roots",
+                               return_value=[config.BANK_DIR]):
+            result = self.client.post(
+                f"/question/{qid}/redraw/version/delete",
+                json={"index": 0, "name": shared}, headers=self.headers)
+        self.assertEqual(result.status_code, 400)
+        # 当前版本不能删除；先切回原图，再删除共享历史版本。
+        self.client.post(
+            f"/question/{qid}/redraw/version/switch",
+            json={"index": 0, "name": "source-a.jpg"}, headers=self.headers)
+        with mock.patch.object(app_module.filestore, "_registered_bank_roots",
+                               return_value=[config.BANK_DIR]):
+            result = self.client.post(
+                f"/question/{qid}/redraw/version/delete",
+                json={"index": 0, "name": shared}, headers=self.headers)
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue((config.ASSETS_DIR / shared).exists())
+
+    def test_swap_images_moves_version_indexes_with_images(self):
+        qid = app_module.filestore.create_question(
+            "交换版本题\n![[a.jpg]]\n![[b.jpg]]")
+        app_module.filestore.remember_img_version(qid, 0, "a.jpg", kind="original")
+        app_module.filestore.remember_img_version(qid, 1, "b.jpg", kind="original")
+        body = "交换版本题\n![[b.jpg]]\n![[a.jpg]]"
+        app_module.filestore.swap_images(qid, 0, 1, body)
+        rows = app_module.filestore.get_question(qid)["img_versions"]
+        self.assertEqual({(row["i"], row["name"]) for row in rows},
+                         {(0, "b.jpg"), (1, "a.jpg")})
 
 
 class PageTests(unittest.TestCase):
@@ -1386,7 +1592,8 @@ class PageTests(unittest.TestCase):
         self.assertIn("function remapFolderTreeItem(", template)
         self.assertIn("function moveFolderTreeItem(", template)
         self.assertIn("remapFolderTreeItem(li, fid, data.id", template)
-        self.assertIn("moveFolderTreeItem(li, fid, data.id, parentId)", template)
+        self.assertIn("moveFolderTreeItem(", template)
+        self.assertIn("sourceId, data.id, cid", template)
         self.assertNotIn("await loadFolderFragment(next.url, next.changed, true);\n    flashToast(data.message || '题集已移入回收站')", template)
         self.assertIn("insertCreatedFolder(data)", template)
         self.assertNotIn("await loadFolderFragment(location.href, false, true);\n    flashToast(data.message || '文件夹已新建')", template)
@@ -1398,7 +1605,18 @@ class PageTests(unittest.TestCase):
         self.assertIn("bulk-folder-twist${node.has_children ? '' : ' is-empty'}", template)
         self.assertNotIn("bulk-folder-twist${node.has_children ? '' : ' empty'}", template)
         self.assertIn("class=\"bulk-selected-list\"", html)
+        self.assertIn('id="bulk-drawer-trigger"', html)
+        self.assertIn('<dialog id="bulkbar"', html)
+        self.assertNotIn('class="question-bulk-resizer"', html)
         self.assertIn("body.className = 'bulk-selected-body'", template)
+        self.assertIn("bulkbar.showModal()", template)
+        self.assertIn("body.classList.add('bulk-drawer-open')", template)
+        self.assertNotIn("classList.toggle('bulk-active'", template)
+        self.assertIn("syncBulkCollectionAction(activeCollectionTab()?.id || '')", template)
+        self.assertIn(
+            "loadFolderFragment(tab.url, true, false, false, ownsTargetTab)",
+            template)
+        self.assertIn("if (commitGuard && !commitGuard()) return false", template)
         self.assertIn("event.submitter?.matches('button[type=\"submit\"]')", template)
 
         stylesheet = (config.BASE_DIR / "static" / "style.css").read_text(
@@ -1409,18 +1627,28 @@ class PageTests(unittest.TestCase):
         self.assertIn("position: fixed", popover_rule.group(1))
         self.assertIn("width: min(380px, calc(100vw - 24px))", popover_rule.group(1))
         self.assertIn("overflow: auto", popover_rule.group(1))
-        self.assertIn("html:not(.desktop-host) .bulkbar.show", stylesheet)
+        self.assertNotIn(".bulkbar.show", stylesheet)
         self.assertRegex(
             stylesheet,
-            r"html:not\(\.desktop-host\) \.bulkbar\.show\s*\{"
-            r"[^}]*position:\s*static;[^}]*max-height:\s*none;",
+            r"\.bulkbar\s*\{[^}]*position:\s*fixed;[^}]*"
+            r"width:\s*min\(520px,\s*calc\(100vw\s*-\s*24px\)\);",
         )
+        self.assertIn(".bulkbar[open] { display: flex; }", stylesheet)
+        self.assertIn(
+            "main:has(> .bulk-drawer-trigger) .layout { padding-right: 48px; }",
+            stylesheet)
         self.assertRegex(
             stylesheet,
-            r"@media \(max-width: 760px\)[\s\S]*?"
-            r"body:has\(\.card\.inline-editing\) \.new-question-fab\s*"
-            r"\{\s*display:\s*none;\s*\}",
+            r"\.bulk-drawer-trigger\s*\{[^}]*width:\s*40px;[^}]*"
+            r"border-radius:\s*8px 0 0 8px;",
         )
+        self.assertIn(".bulk-drawer-feedback .toast", stylesheet)
+        self.assertIn(
+            "body:has(#export-panel:not(.hidden)) .new-question-fab,",
+            stylesheet)
+        self.assertIn(
+            "body:has(.card.inline-editing) .new-question-fab { display: none; }",
+            stylesheet)
 
         tabs_rules = re.findall(
             r"(?:^|\n)\.collection-tabs\s*\{([^}]*)\}", stylesheet, re.S)
@@ -1467,12 +1695,12 @@ class PageTests(unittest.TestCase):
         self.assertIn("const run = selectionMutationTail.then(task, task)", template)
 
         clear_start = template.index(
-            "bulkbar?.addEventListener('submit', async event => {")
+            "document.addEventListener('submit', async event => {")
         clear_end = template.index("function syncBulkPropertyInputs()", clear_start)
         clear_handler = template[clear_start:clear_end]
         self.assertIn("selectionClearInFlight = true", clear_handler)
         self.assertIn("setVisibleCardsSelected(false)", clear_handler)
-        self.assertIn("await enqueueSelectionMutation(performRequest)",
+        self.assertIn("enqueueSelectionMutation(performRequest)",
                       clear_handler)
         self.assertNotIn("querySelectorAll('.card.selected')",
                          clear_handler)
@@ -2025,8 +2253,9 @@ class PageTests(unittest.TestCase):
             "/", query_string={"collection": folder})
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'class="paper-open-obsidian"', response.data)
-        self.assertIn(b'class="btn btn-ghost btn-sm paper-open-library"', response.data)
-        self.assertIn(b"open-library-file", response.data)
+        self.assertIn(b"paper-open-library", response.data)
+        self.assertIn(b"paper-open-question", response.data)
+        self.assertIn(b"open-question-file", response.data)
         self.assertIn(b"post('open-file'", response.data)
         self.assertIn(b"post('location'", response.data)
 
@@ -2297,13 +2526,14 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertGreater(rec["order"], old_order)
         self.assertEqual(rec["tags"], ["原地", "新增"])
 
-    def test_inline_create_rejects_missing_folder_and_nav_uses_floating_button(self):
+    def test_inline_create_rejects_missing_folder_and_nav_uses_context_menu(self):
         payload = {"body": "不得落盘", "collection": "不存在的文件夹"}
         rejected = self.client.post(
             "/question/inline-create", json=payload, headers=self.headers)
         self.assertEqual(rejected.status_code, 404)
         page = self.client.get("/").get_data(as_text=True)
-        self.assertIn('id="new-question-fab"', page)
+        self.assertIn('data-act="new-question"', page)
+        self.assertIn('data-sidebar-tab="files"', page)
         self.assertIn("QOpenNewQuestionCard", page)
         self.assertNotIn('href="/question/new"', page)
 
@@ -2337,13 +2567,13 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         (folder / ".隐藏.md").write_text("secret", encoding="utf-8")
 
         page = self.client.get("/library")
-        self.assertEqual(page.status_code, 200)
-        self.assertIn("library-tabs.js", page.get_data(as_text=True))
-        self.assertIn('id="library-panes"', page.get_data(as_text=True))
-        self.assertIn('data-library-layout="vertical"', page.get_data(as_text=True))
-        self.assertIn('data-help-title="资料库帮助"', page.get_data(as_text=True))
-        self.assertIn("Markdown 保存前会核对磁盘版本", page.get_data(as_text=True))
-        self.assertIn("未选择文件", page.get_data(as_text=True))
+        self.assertEqual(page.status_code, 302)
+        self.assertTrue(page.headers["Location"].endswith("/"))
+        question_page = self.client.get(
+            "/", query_string={"show_general_md": "1", "show_pdf": "1"})
+        self.assertEqual(question_page.status_code, 200)
+        self.assertIn('name="show_pdf"', question_page.get_data(as_text=True))
+        self.assertIn('name="show_general_md"', question_page.get_data(as_text=True))
         library_script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
             encoding="utf-8")
         self.assertIn("quizforge:library-workspace:v3", library_script)
@@ -2705,6 +2935,114 @@ class HandoutStorageTests(unittest.TestCase):
         self.assertEqual(data["metadata"]["sol_img_split"], "full")
         self.assertRegex(data["metadata"]["source_hash"], r"^[0-9a-f]{64}$")
         self.assertRegex(data["metadata"]["source_mtime_ns"], r"^\d+$")
+
+    def test_selection_details_preserve_order_fields_safe_html_and_root_values(self):
+        parent = app_module.filestore.get_or_create_collection("抽屉详情父级", "")
+        folder = app_module.filestore.get_or_create_collection("抽屉详情测试", parent)
+        first = app_module.filestore.create_question(
+            '第一题 <script>alert("body")</script> $x$',
+            solution='<script>alert("solution")</script> 解析 $x=1$',
+            qtype="解答题", source="校本题源", difficulty="3",
+            tags=["函数", "重点"], folder=folder, number=1,
+            note='<script>alert("note")</script> 只读备注', title="抽屉第一题")
+        second = app_module.filestore.create_question(
+            "第二题", folder=folder, number=2, title="抽屉第二题")
+        root = app_module.filestore.create_question(
+            "根目录空值题", title="抽屉根目录题")
+        empty = app_module.filestore.create_question(
+            "", title="抽屉空题干")
+        app_module.filestore.toggle_starred(first)
+        app_module.filestore.select_ids([second, first, root, empty])
+
+        response = self.client.get("/api/selection")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["count"], 4)
+        rows = payload["questions"]
+        folder_rows = [row for row in rows if row["collection"] == folder]
+        self.assertEqual([row["id"] for row in folder_rows], [first, second])
+        first_row = next(row for row in rows if row["id"] == first)
+        self.assertEqual(set(first_row), {
+            "id", "type", "source", "number", "folder", "excerpt", "path",
+            "body_html", "title", "difficulty", "starred", "tags",
+            "collection", "solution_html", "note_html",
+        })
+        self.assertEqual(first_row["title"], "抽屉第一题")
+        self.assertEqual(first_row["difficulty"], "3")
+        self.assertTrue(first_row["starred"])
+        self.assertEqual(first_row["tags"], ["函数", "重点"])
+        self.assertEqual(first_row["folder"], "抽屉详情测试")
+        self.assertEqual(first_row["collection"], folder)
+        for field in ("body_html", "solution_html", "note_html"):
+            self.assertNotIn("<script", first_row[field])
+            self.assertIn("&lt;script&gt;", first_row[field])
+        root_row = next(row for row in rows if row["id"] == root)
+        self.assertEqual(root_row["folder"], "题库根目录")
+        self.assertEqual(root_row["collection"], "")
+        self.assertEqual(root_row["difficulty"], "")
+        self.assertFalse(root_row["starred"])
+        self.assertEqual(root_row["tags"], [])
+        self.assertEqual(root_row["solution_html"], "")
+        self.assertEqual(root_row["note_html"], "")
+        empty_row = next(row for row in rows if row["id"] == empty)
+        self.assertEqual(empty_row["body_html"], "")
+
+    def test_selection_count_ignores_stale_selected_ids(self):
+        qid = app_module.filestore.create_question("仍存在的选题")
+        app_module.filestore.toggle_selected(qid)
+        with mock.patch.object(
+                app_module.filestore, "selected_ids",
+                return_value=[qid, "missing-question-id"]):
+            response = self.client.get("/api/selection")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual([row["id"] for row in payload["questions"]], [qid])
+
+    def test_selection_details_use_targeted_reads_on_cold_cache(self):
+        qid = app_module.filestore.create_question(
+            "冷缓存抽屉题", solution="冷缓存解析", note="冷缓存备注",
+            title="冷缓存抽屉题")
+        app_module.filestore.toggle_selected(qid)
+        with app_module.filestore._scan_lock:
+            app_module.filestore._cache.clear()
+        app_module.filestore.invalidate_scan_cache()
+
+        with mock.patch.object(
+                app_module.filestore, "_scan",
+                side_effect=AssertionError("读取选题抽屉不应扫描全库")):
+            response = self.client.get("/api/selection")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["count"], 1)
+        self.assertEqual(response.get_json()["questions"][0]["id"], qid)
+
+    def test_handout_selected_endpoint_stays_lightweight(self):
+        qid = app_module.filestore.create_question(
+            "讲义轻量题", solution="不应渲染的解析", note="不应渲染的备注",
+            title="讲义轻量题")
+        app_module.filestore.toggle_selected(qid)
+        render_body = app_module.handouts.qrender.render_body
+        with (mock.patch.object(
+                app_module.handouts.qrender, "render_body",
+                wraps=render_body) as render_body_mock,
+              mock.patch.object(
+                app_module.handouts.qrender, "render_solution") as render_solution):
+            response = self.client.get("/api/handouts/selected")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotIn("count", payload)
+        self.assertEqual(len(payload["questions"]), 1)
+        self.assertEqual(set(payload["questions"][0]), {
+            "id", "type", "source", "number", "folder", "excerpt", "path",
+            "body_html",
+        })
+        render_body_mock.assert_called_once()
+        self.assertEqual(render_body_mock.call_args.args[0], "讲义轻量题")
+        render_solution.assert_not_called()
 
     def test_same_title_creates_collision_safe_file_and_future_schema_is_read_only(self):
         first = app_module.handouts.create_document("同名讲义")

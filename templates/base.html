@@ -140,7 +140,6 @@
       <div class="nav-group">
       <a href="{{ url_for('index') }}" title="题库" class="nav-link{% if endpoint == 'index' %} active{% endif %}">{{ icon('book-open') }}<span>题库</span></a>
       <a href="{{ url_for('handouts_page') }}" title="讲义" class="nav-link{% if endpoint.startswith('handouts') %} active{% endif %}">{{ icon('notebook') }}<span>讲义</span></a>
-      <a href="{{ url_for('library_page') }}" title="资料库" class="nav-link{% if endpoint.startswith('library') %} active{% endif %}">{{ icon('folder') }}<span>资料库</span></a>
       <a href="{{ url_for('import_md') }}" title="批量导入" class="nav-link{% if endpoint.startswith('import') or endpoint.startswith('block_') %} active{% endif %}">{{ icon('upload') }}<span>批量导入</span></a>
       {# 转换任务：batch_id 只在内存里，离开看板页就找不回来了，得有个总入口 #}
       <a href="{{ url_for('batches_overview') }}" title="转换任务" class="nav-link{% if 'batch' in endpoint %} active{% endif %}">{{ icon('clock') }}<span>转换任务</span>{% if nav_batch_count %}
@@ -205,39 +204,6 @@
                 title="关闭 Agent" aria-label="关闭 Agent">{{ icon('x') }}</button>
       </div>
     </header>
-
-    <div class="agent-toolbar" aria-label="Agent 工作范围、模型和权限">
-      <button type="button" id="agent-scope-toggle" class="agent-scope-button"
-              aria-expanded="false" aria-controls="agent-scope-menu">
-        <span class="agent-scope-button-icon" aria-hidden="true">{{ icon('folder') }}</span>
-        <span class="agent-scope-button-copy">
-          <small>工作范围</small>
-          <strong id="agent-scope-label">当前题库</strong>
-        </span>
-        <span class="agent-scope-chevron" aria-hidden="true">{{ icon('chevron-down') }}</span>
-      </button>
-      <label class="agent-mode-control" for="agent-mode">
-        <span>权限</span>
-        <select id="agent-mode" aria-label="Agent 权限模式">
-          <option value="standard">标准</option>
-          <option value="danger">危险</option>
-        </select>
-      </label>
-      <label class="agent-provider-control" for="agent-provider">
-        <span>模型</span>
-        <select id="agent-provider" aria-label="Agent 对话模型"
-                aria-describedby="agent-provider-status"
-                title="选择本次对话使用的模型">
-          <option value="">未连接模型 · 本地快捷模式</option>
-        </select>
-      </label>
-      <button type="button" class="agent-icon-button agent-provider-settings"
-              id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型">
-        {{ icon('settings') }}
-      </button>
-      <span id="agent-provider-status" class="agent-provider-status" role="status"
-            aria-live="polite">未连接模型 · 本地快捷模式</span>
-    </div>
 
     <div id="agent-danger-banner" class="agent-danger-banner" role="status" hidden>
       <span class="agent-danger-icon" aria-hidden="true">{{ icon('warning') }}</span>
@@ -380,7 +346,7 @@
            data-split-resizer data-split-owner="#agent-workspace"
            data-split-panel="#agent-conversation-pane"
            data-split-property="--agent-conversation-width" data-split-side="left"
-           data-split-min="180" data-split-max="420" data-split-main-min="280"
+           data-split-min="120" data-split-max="360" data-split-main-min="280"
            data-split-key="agent-conversations"></div>
 
       <section class="agent-chat" aria-label="Agent 对话">
@@ -420,10 +386,42 @@
           <div id="agent-attachments" class="agent-attachments" hidden></div>
           <textarea id="agent-input" class="input agent-input" rows="2"
                     placeholder="描述要处理的题库任务…" autocomplete="off"></textarea>
+          <div class="agent-toolbar" aria-label="Agent 工作范围、模型和权限">
+            <button type="button" id="agent-scope-toggle" class="agent-scope-button"
+                    aria-expanded="false" aria-controls="agent-scope-menu">
+              <span class="agent-scope-button-icon" aria-hidden="true">{{ icon('folder') }}</span>
+              <span class="agent-scope-button-copy">
+                <small>工作目录</small>
+                <strong id="agent-scope-label">当前题库</strong>
+              </span>
+              <span class="agent-scope-chevron" aria-hidden="true">{{ icon('chevron-down') }}</span>
+            </button>
+            <label class="agent-mode-control" for="agent-mode">
+              <span>权限</span>
+              <select id="agent-mode" aria-label="Agent 权限模式">
+                <option value="standard">标准</option>
+                <option value="danger">危险</option>
+              </select>
+            </label>
+            <label class="agent-provider-control" for="agent-provider">
+              <span>模型</span>
+              <select id="agent-provider" aria-label="Agent 对话模型"
+                      aria-describedby="agent-provider-status"
+                      title="选择本次对话使用的模型">
+                <option value="">未连接模型 · 本地快捷模式</option>
+              </select>
+            </label>
+            <span id="agent-provider-status" class="agent-provider-status" role="status"
+                  aria-live="polite">未连接模型 · 本地快捷模式</span>
+          </div>
           <div class="agent-composer-actions">
             <div class="agent-composer-tools">
               <button type="button" id="agent-attach" class="agent-composer-tool"
                       title="上传 PDF、DOCX 或 ZIP" aria-label="上传文件">{{ icon('paperclip') }}</button>
+              <button type="button" class="agent-icon-button agent-provider-settings"
+                      id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型">
+                {{ icon('settings') }}
+              </button>
               <input type="file" id="agent-file" class="agent-visually-hidden"
                      accept=".pdf,.doc,.docx,.zip,application/pdf,application/zip" multiple>
               <input type="file" id="agent-directory-picker" class="agent-visually-hidden"
@@ -1128,14 +1126,20 @@
         post('open-file', {path: paper.dataset.path, fallbackUrl: paper.href});
         return;
       }
-      var libraryPaper = ev.target.closest('button.paper-open-library[data-library-path]');
+      var libraryPaper = ev.target.closest('button.paper-open-question[data-question-file-path], button.paper-open-library[data-library-path]');
       if (libraryPaper) {
         ev.preventDefault();
-        var path = libraryPaper.dataset.libraryPath;
-        if (window.parent === window) {
-          window.location.href = '/library?open=' + encodeURIComponent(path);
+        ev.stopPropagation();
+        var path = libraryPaper.dataset.questionFilePath || libraryPaper.dataset.libraryPath;
+        if (window.QQuestionFileWorkspace && window.QQuestionFileWorkspace.open) {
+          window.QQuestionFileWorkspace.open({path: path, kind: 'pdf'});
         } else {
-          post('open-library-file', {path: path});
+          // question-files.js 是 defer 脚本；在它尚未初始化时先排队，避免
+          // 原卷按钮把用户带回已经隐藏的资料库入口。
+          post('open-question-file', {path: path, kind: 'pdf'});
+          window.dispatchEvent(new CustomEvent('qf:open-question-file', {
+            detail: {path: path, kind: 'pdf'},
+          }));
         }
         return;
       }

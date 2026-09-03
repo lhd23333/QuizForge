@@ -812,6 +812,42 @@ class FilestoreBatchCreateTests(unittest.TestCase):
             self.assertIsNone(filestore.paper_abspath("资料.md"))
             self.assertIsNone(filestore.paper_abspath("旧资料.markdown"))
 
+    def test_display_files_separate_plain_markdown_from_question_cards(self):
+        """文件树的增量开关应把普通 Markdown 与题卡分别列出。"""
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.object(config, "BANK_DIR", Path(td)):
+            folder = Path(td) / "资料"
+            folder.mkdir()
+            (folder / "plain.md").write_text("# 普通资料\n", encoding="utf-8")
+            (folder / "question.md").write_text(
+                filestore._render_raw({
+                    "id": "question-id", "quizforge_kind": "question",
+                }, "题干"), encoding="utf-8", newline="\n")
+            (folder / "document.md").write_text(
+                filestore._render_raw({
+                    "id": "document-id", "quizforge_kind": "document",
+                }, "资料正文"), encoding="utf-8", newline="\n")
+            # 旧题卡通常有 frontmatter 但没有 quizforge_kind，仍需保留兼容性。
+            (folder / "legacy.md").write_text(
+                "---\nid: legacy-id\n---\n\n旧题卡", encoding="utf-8")
+            filestore._identity_cache.clear()
+            filestore.invalidate_scan_cache()
+
+            def names(**flags):
+                return {
+                    row["name"] for row in filestore.list_display_files(
+                        "资料", **flags)
+                }
+
+            general = names(show_general_md=True)
+            cards = names(show_cards=True)
+            both = names(show_cards=True, show_general_md=True)
+
+        self.assertEqual(general, {"plain.md", "document.md"})
+        self.assertEqual(cards, {"question.md", "legacy.md"})
+        self.assertEqual(
+            both, {"plain.md", "question.md", "document.md", "legacy.md"})
+
     def test_navigation_tree_only_expands_active_path(self):
         with tempfile.TemporaryDirectory() as td, \
                 mock.patch.object(config, "BANK_DIR", Path(td)):
