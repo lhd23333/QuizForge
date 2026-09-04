@@ -305,8 +305,7 @@
     {# 文件夹局部切换依赖这个稳定挂载点；父文件夹现直接汇总后代原卷与题目。 #}
     <div id="collection-overview-host" data-overview="0"></div>
     <section id="question-file-workspace" class="question-file-workspace" hidden
-             aria-label="题库文件预览">
-      <div class="question-file-tabs" role="tablist" aria-label="已打开文件"></div>
+             aria-label="题库文件预览" data-qf-file-host>
       <div class="question-file-panes"></div>
     </section>
     <div id="papers-host">{% if active_collection and not (show_pdf and folder_papers) %}{% include "_papers_pane.html" %}{% endif %}</div>
@@ -337,8 +336,10 @@
         <input type="hidden" name="all" value="{{ '1' if show_all else '' }}">
         <button type="submit" class="btn">全选</button>
       </form>
-      <button type="button" class="btn btn-primary" id="export-toggle"
-              aria-controls="export-panel" aria-expanded="false">导出选项</button>
+      <button type="button" class="btn btn-primary export-toggle-button" id="export-toggle"
+              aria-controls="export-panel" aria-expanded="false" aria-haspopup="true">
+        <span>导出选项</span>{{ icon('chevron-down', 'export-toggle-icon') }}
+      </button>
     </div>
 
     <!-- 导出面板 -->
@@ -543,20 +544,24 @@
   <div id="new-question-dialog-body" class="new-question-dialog-body"></div>
 </dialog>
 
-<button type="button" class="bulk-drawer-trigger" id="bulk-drawer-trigger"
-        aria-controls="bulkbar" aria-expanded="false"
-        {% if not selected_count %}hidden{% endif %}>
-  {{ icon('check') }}
-  <span>已选 <b id="bulk-trigger-count">{{ selected_count }}</b> 题</span>
-</button>
-
-<div class="bulk-action-rail" id="bulk-action-rail"
+<div class="bulk-action-stack" id="bulk-action-stack"
      {% if not selected_count %}hidden{% endif %}
+     role="group"
      aria-label="已选题目操作">
-  <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="edit"
-          aria-controls="bulk-edit-section" aria-expanded="false">批量编辑</button>
-  <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="more"
-          aria-controls="bulk-more-section" aria-expanded="false">更多操作</button>
+  <button type="button" class="bulk-drawer-trigger" id="bulk-drawer-trigger"
+          aria-controls="bulkbar" aria-expanded="false">
+    {{ icon('check') }}
+    <span>已选 <b id="bulk-trigger-count">{{ selected_count }}</b> 题</span>
+  </button>
+
+  <div class="bulk-action-rail" id="bulk-action-rail"
+       {% if not selected_count %}hidden{% endif %}
+       aria-label="已选题目操作">
+    <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="edit"
+            aria-controls="bulk-edit-section" aria-expanded="false">批量编辑</button>
+    <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="more"
+            aria-controls="bulk-more-section" aria-expanded="false">更多操作</button>
+  </div>
 </div>
 
 <!-- 已选题目使用覆盖式抽屉，不再占用题库主网格宽度。 -->
@@ -704,6 +709,7 @@ if (document.documentElement.classList.contains('desktop-host')) {
 // 已选题目默认只露出计数标签；完整题卡与批量操作在覆盖式抽屉中按需读取。
 const bulkbar = document.getElementById('bulkbar');
 const bulkCount = document.getElementById('bulk-count');
+const bulkActionStack = document.getElementById('bulk-action-stack');
 const bulkDrawerTrigger = document.getElementById('bulk-drawer-trigger');
 const bulkTriggerCount = document.getElementById('bulk-trigger-count');
 const bulkActionRail = document.getElementById('bulk-action-rail');
@@ -719,10 +725,15 @@ let bulkDrawerRestoreFocus = true;
 let bulkSelectedRows = new Map();
 
 function syncBulkActionRail(count) {
+  if (bulkActionStack) bulkActionStack.hidden = count < 1;
   if (bulkActionRail) bulkActionRail.hidden = count < 1;
   if (count < 1) {
     bulkActionButtons.forEach(button => button.setAttribute('aria-expanded', 'false'));
-    document.querySelectorAll('.bulk-action-panel').forEach(panel => { panel.hidden = true; });
+    document.querySelectorAll('.bulk-action-panel').forEach(panel => {
+      panel.hidden = true;
+      panel.removeAttribute('data-open');
+    });
+    bulkActionStack?.classList.remove('has-open-panel');
   }
 }
 
@@ -907,6 +918,7 @@ function closeBulkDrawer(restoreFocus = true, cancelLocate = true) {
 
 function openBulkDrawer() {
   if (!bulkbar || !bulkDrawerTrigger || bulkDrawerTrigger.hidden || bulkbar.open) return;
+  closeBulkActionSections();
   bulkDrawerRestoreFocus = true;
   const scrollbarOffset = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
   bulkbar.showModal();
@@ -915,6 +927,15 @@ function openBulkDrawer() {
   bulkDrawerTrigger.setAttribute('aria-expanded', 'true');
   bulkDrawerClose?.focus();
   if (bulkSelectedDirty) void refreshBulkSelectedQuestions();
+}
+
+function closeBulkActionSections() {
+  bulkActionButtons.forEach(button => button.setAttribute('aria-expanded', 'false'));
+  document.querySelectorAll('.bulk-action-panel').forEach(panel => {
+    panel.hidden = true;
+    panel.removeAttribute('data-open');
+  });
+  bulkActionStack?.classList.remove('has-open-panel');
 }
 
 function openBulkActionSection(action) {
@@ -930,7 +951,9 @@ function openBulkActionSection(action) {
   });
   document.querySelectorAll('.bulk-action-panel').forEach(item => {
     item.hidden = item !== section || wasOpen;
+    item.toggleAttribute('data-open', item === section && !wasOpen);
   });
+  bulkActionStack?.classList.toggle('has-open-panel', !wasOpen);
   if (!wasOpen) section.querySelector('input, select, textarea, button')?.focus();
 }
 
@@ -941,8 +964,10 @@ document.querySelectorAll('[data-bulk-panel-close]').forEach(button => {
   button.addEventListener('click', () => {
     const panel = button.closest('.bulk-action-panel');
     panel.hidden = true;
+    panel.removeAttribute('data-open');
     const trigger = bulkActionButtons.find(item => item.getAttribute('aria-controls') === panel.id);
     trigger?.setAttribute('aria-expanded', 'false');
+    bulkActionStack?.classList.remove('has-open-panel');
   });
 });
 
@@ -971,7 +996,7 @@ bulkbar?.addEventListener('close', () => {
   document.body.classList.remove('bulk-drawer-open');
   document.body.style.removeProperty('--bulk-drawer-scrollbar-offset');
   bulkDrawerTrigger?.setAttribute('aria-expanded', 'false');
-  bulkActionButtons.forEach(button => button.setAttribute('aria-expanded', 'false'));
+  closeBulkActionSections();
   closeBulkFolderPopover();
   if (bulkDrawerRestoreFocus && !bulkDrawerTrigger?.hidden) bulkDrawerTrigger?.focus();
   bulkDrawerRestoreFocus = true;
@@ -2142,6 +2167,27 @@ function activeCollectionTab() {
   return collectionTabsState.tabs.find(tab => tab.key === collectionTabsState.active) || null;
 }
 
+// 题集和文件共用同一条顶栏标签。文件面板由 question-files.js 在脚本加载后
+// 恢复；这里保留文件页签元数据，刷新后仍能回到上次打开的文件。
+function isFileCollectionTab(tab) {
+  return tab?.view === 'file';
+}
+
+function collectionFilePath(tab) {
+  return String(tab?.filePath || tab?.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function syncCollectionFileView() {
+  const active = activeCollectionTab();
+  const isFile = isFileCollectionTab(active);
+  const content = document.querySelector('.content');
+  content?.classList.toggle('qf-file-view', isFile);
+  const workspace = document.getElementById('question-file-workspace');
+  if (workspace && !isFile) workspace.hidden = true;
+  if (isFile && workspace && workspace.dataset.qfHasPanel === '1') workspace.hidden = false;
+  syncBulkCollectionAction(isFile ? '' : (active?.id || ''));
+}
+
 function persistCollectionTabs() {
   try {
     sessionStorage.setItem(COLLECTION_TABS_STORE, JSON.stringify(collectionTabsState));
@@ -2156,8 +2202,11 @@ function renderCollectionTabs() {
   collectionTabsState.tabs.forEach(tab => {
     const item = document.createElement('div');
     const active = tab.key === collectionTabsState.active;
-    item.className = `collection-tab${active ? ' active' : ''}`;
+    const fileTab = isFileCollectionTab(tab);
+    const preview = fileTab && !tab.pinned;
+    item.className = `collection-tab${active ? ' active' : ''}${fileTab ? ' is-file' : ''}${preview ? ' is-file-preview' : ''}`;
     item.dataset.collectionTabKey = tab.key;
+    if (fileTab) item.dataset.collectionTabType = 'file';
 
     const switchButton = document.createElement('button');
     switchButton.type = 'button';
@@ -2166,10 +2215,14 @@ function renderCollectionTabs() {
     switchButton.setAttribute('role', 'tab');
     switchButton.setAttribute('aria-selected', String(active));
     switchButton.tabIndex = active ? 0 : -1;
-    switchButton.title = tab.id || tab.name;
+    switchButton.title = fileTab ? collectionFilePath(tab) || tab.name : (tab.id || tab.name);
     const label = document.createElement('span');
     label.className = 'collection-tab-label';
     label.textContent = tab.name;
+    if (fileTab) {
+      label.dataset.filePreview = preview ? '1' : '0';
+      label.title = preview ? '预览标签，双击固定' : '已固定标签';
+    }
     switchButton.append(label);
 
     const closeButton = document.createElement('button');
@@ -2204,6 +2257,7 @@ function renderCollectionTabs() {
     }
   }
   syncBulkCollectionAction(activeCollectionTab()?.id || '');
+  syncCollectionFileView();
 }
 
 function readCollectionTabs() {
@@ -2219,6 +2273,18 @@ function readCollectionTabs() {
     if (!tab || typeof tab.key !== 'string' || typeof tab.id !== 'string'
         || typeof tab.url !== 'string' || seenKeys.has(tab.key)) return;
     seenKeys.add(tab.key);
+    if (tab.view === 'file') {
+      const filePath = normalizeCollectionFilePath(tab.filePath || tab.path);
+      if (!filePath) return;
+      tabs.push({
+        key: tab.key, view: 'file', id: '', name: String(tab.name || filePath.split('/').pop()),
+        url: `#file-${encodeURIComponent(filePath)}`, position: null,
+        filePath, fileKind: fileKindFromEntry(tab, filePath),
+        pinned: Boolean(tab.pinned), preview: !tab.pinned,
+        fileDirty: false, fileGroupId: String(tab.fileGroupId || ''),
+      });
+      return;
+    }
     tabs.push({
       key: tab.key,
       id: tab.id,
@@ -2231,9 +2297,17 @@ function readCollectionTabs() {
   const currentId = listEl?.dataset.collection || collectionIdFromUrl(location.href);
   const currentUrl = collectionTabUrl(location.href);
   let current = tabs.find(tab => (
-    tab.key === saved?.active
+    !isFileCollectionTab(tab) && tab.key === saved?.active
     && collectionTabScope(tab.url) === collectionTabScope(currentUrl)
   ));
+  // 上次刷新若停留在 PDF/MD 标签，活动键指向文件，但地址仍是当前题集；
+  // 优先复用同一范围的已有题集标签，避免每次刷新都追加一个同名标签。
+  if (!current) {
+    current = tabs.find(tab => (
+      !isFileCollectionTab(tab)
+      && collectionTabScope(tab.url) === collectionTabScope(currentUrl)
+    ));
+  }
   if (!current) {
     current = {
       key: nextCollectionTabKey(), id: currentId, name: '',
@@ -2248,7 +2322,8 @@ function readCollectionTabs() {
     currentId, listEl?.dataset.collectionName || current.name, currentUrl);
   current.id = currentId;
   current.url = currentUrl;
-  collectionTabsState = {tabs, active: current.key};
+  const savedFile = tabs.find(tab => isFileCollectionTab(tab) && tab.key === saved?.active);
+  collectionTabsState = {tabs, active: savedFile?.key || current.key};
   persistCollectionTabs();
   renderCollectionTabs();
 }
@@ -2268,7 +2343,8 @@ function captureCollectionTabPosition() {
 
 function saveActiveCollectionTabState(updateUrl = true) {
   const tab = activeCollectionTab();
-  if (!tab) return;
+  // 保持该小函数可在旧版嵌入测试中独立抽取；文件页签没有题集滚动状态。
+  if (!tab || tab.view === 'file') return;
   tab.position = captureCollectionTabPosition();
   if (updateUrl && (listEl?.dataset.collection || '') === tab.id) {
     tab.url = collectionTabUrl(location.href);
@@ -2280,6 +2356,7 @@ function syncCollectionTabAfterLoad(rawUrl) {
   const id = listEl?.dataset.collection || collectionIdFromUrl(rawUrl);
   const url = collectionTabUrl(rawUrl);
   let tab = activeCollectionTab();
+  if (isFileCollectionTab(tab)) tab = null;
   if (!tab) {
     tab = {
       key: nextCollectionTabKey(), id, name: '', url, position: null,
@@ -2350,6 +2427,10 @@ async function openCollectionTab(rawUrl, fallbackName = '', options = {}) {
   const requestedUrl = collectionTabUrl(rawUrl);
   const id = collectionIdFromUrl(requestedUrl);
   let tab = activeCollectionTab();
+  if (isFileCollectionTab(tab)) {
+    tab = collectionTabsState.tabs.find(row => (
+      !isFileCollectionTab(row) && row.url === requestedUrl)) || null;
+  }
   if (!tab) {
     tab = createBlankCollectionTab();
     collectionTabsState.tabs.push(tab);
@@ -2378,6 +2459,13 @@ async function activateCollectionTab(tabKey, options = {}) {
   const {capture = true} = options;
   const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
   if (!tab) return;
+  if (isFileCollectionTab(tab)) {
+    collectionTabsState.active = tab.key;
+    persistCollectionTabs();
+    renderCollectionTabs();
+    emitCollectionFileEvent('qf:collection-file-activate', {tab});
+    return;
+  }
   if (capture) saveActiveCollectionTabState();
   collectionTabsState.active = tab.key;
   persistCollectionTabs();
@@ -2411,6 +2499,10 @@ async function closeCollectionTab(tabKey) {
   bulkLocateGeneration += 1;
   const index = collectionTabsState.tabs.findIndex(tab => tab.key === tabKey);
   if (index < 0) return;
+  if (isFileCollectionTab(collectionTabsState.tabs[index])) {
+    closeFileCollectionTab(tabKey);
+    return;
+  }
   const wasActive = collectionTabsState.active === tabKey;
   if (wasActive) saveActiveCollectionTabState();
   collectionTabsState.tabs.splice(index, 1);
@@ -2592,6 +2684,198 @@ function removeCollectionTabs(rootId) {
   persistCollectionTabs();
   renderCollectionTabs();
 }
+
+function fileKindFromEntry(entry, path) {
+  const supplied = String(entry?.kind || entry?.fileKind || '').toLowerCase();
+  if (supplied === 'pdf' || /\.pdf$/i.test(path)) return 'pdf';
+  return 'markdown';
+}
+
+function normalizeCollectionFilePath(raw) {
+  return String(raw || '').replace(/\\/g, '/').replace(/^\/+/, '')
+    .split('/').filter(part => part && part !== '.' && part !== '..').join('/');
+}
+
+function emitCollectionFileEvent(type, detail) {
+  try {
+    window.dispatchEvent(new CustomEvent(type, {detail}));
+  } catch (_error) {
+    // 极旧的嵌入环境没有 CustomEvent 构造器时，文件工作区仍可由直接 API 调用。
+  }
+}
+
+function fileTabByPath(path, groupId = '') {
+  const value = normalizeCollectionFilePath(path);
+  const target = String(groupId || '').trim();
+  const matches = collectionTabsState.tabs.filter(tab => (
+    isFileCollectionTab(tab) && collectionFilePath(tab) === value));
+  if (!target) return matches[0] || null;
+  // 同一文件可以在不同编辑器分组各开一个标签；旧会话没有分组信息时视为主分组。
+  return matches.find(tab => {
+    const tabGroup = String(tab.fileGroupId || '').trim();
+    return tabGroup === target || (target === 'primary' && !tabGroup);
+  }) || null;
+}
+
+function openFileCollectionTab(entry = {}, options = {}) {
+  const path = normalizeCollectionFilePath(entry.path || entry.filePath);
+  if (!path) return null;
+  const kind = fileKindFromEntry(entry, path);
+  const name = String(entry.name || path.split('/').pop() || path);
+  const current = activeCollectionTab();
+  // 预览标签属于编辑器分组，而不是整条顶栏。打开文件时优先使用调用方
+  // 传入的焦点分组；这样第二个分栏中的单击不会误复用第一组的临时标签。
+  const targetGroupId = String(options.groupId || (
+    isFileCollectionTab(current) ? current.fileGroupId : '') || '').trim();
+  const inTargetGroup = tab => isFileCollectionTab(tab)
+    && (!targetGroupId || String(tab.fileGroupId || '') === targetGroupId);
+  const targetPreview = () => {
+    if (targetGroupId) {
+      return collectionTabsState.tabs.find(tab => inTargetGroup(tab)
+        && !tab.pinned && tab.fileDirty) || collectionTabsState.tabs.find(tab => (
+        inTargetGroup(tab) && !tab.pinned && !tab.fileDirty)) || null;
+    }
+    return isFileCollectionTab(current) ? current : null;
+  };
+  let tab = fileTabByPath(path, targetGroupId);
+  let replaced = null;
+  let autoPinned = null;
+
+  if (tab) {
+    if (options.pin) tab.pinned = true;
+    tab.fileKind = kind;
+    tab.name = name;
+    if (targetGroupId && !tab.fileGroupId) tab.fileGroupId = targetGroupId;
+    tab.preview = !tab.pinned;
+    collectionTabsState.active = tab.key;
+  } else {
+    // 只有当前活动文件是未修改的预览标签时才复用它；固定标签或脏预览都保留。
+    const preview = targetPreview();
+    if (preview && !preview.pinned && preview.fileDirty) {
+      preview.pinned = true;
+      preview.preview = false;
+      autoPinned = preview;
+    }
+    const reusable = preview && !preview.pinned && !preview.fileDirty ? preview : null;
+    if (reusable) {
+      replaced = {
+        key: reusable.key, path: collectionFilePath(reusable),
+        kind: reusable.fileKind || fileKindFromEntry(reusable, reusable.filePath),
+      };
+      tab = reusable;
+      tab.filePath = path;
+      tab.fileKind = kind;
+      tab.name = name;
+      tab.pinned = Boolean(options.pin);
+      tab.preview = !tab.pinned;
+      tab.fileDirty = false;
+      tab.url = `#file-${encodeURIComponent(path)}`;
+    } else {
+      tab = {
+        key: nextCollectionTabKey(), view: 'file', id: '', name,
+        url: `#file-${encodeURIComponent(path)}`, position: null,
+        filePath: path, fileKind: kind, pinned: Boolean(options.pin),
+        preview: !options.pin, fileDirty: false,
+        fileGroupId: targetGroupId,
+      };
+      const anchor = (targetGroupId && [...collectionTabsState.tabs].reverse()
+        .find(row => inTargetGroup(row))) || current;
+      const insertAt = anchor ? collectionTabsState.tabs.indexOf(anchor) + 1
+        : collectionTabsState.tabs.length;
+      collectionTabsState.tabs.splice(Math.max(0, insertAt), 0, tab);
+    }
+    collectionTabsState.active = tab.key;
+  }
+  persistCollectionTabs();
+  renderCollectionTabs();
+  // 工作区维护自己的面板状态；自动固定脏预览时必须同步通知它，避免两套状态分叉。
+  if (autoPinned) emitCollectionFileEvent('qf:collection-file-pin', {tab: autoPinned});
+  emitCollectionFileEvent('qf:collection-file-open', {tab, replaced});
+  return tab;
+}
+
+function activateFileCollectionTab(tabKey) {
+  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
+  if (!isFileCollectionTab(tab)) return false;
+  collectionTabsState.active = tab.key;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  emitCollectionFileEvent('qf:collection-file-activate', {tab});
+  return true;
+}
+
+function setFileCollectionTabPinned(tabKey, pinned = true) {
+  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
+  if (!isFileCollectionTab(tab)) return false;
+  tab.pinned = Boolean(pinned);
+  tab.preview = !tab.pinned;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  emitCollectionFileEvent('qf:collection-file-pin', {tab});
+  return true;
+}
+
+function setFileCollectionTabDirty(tabKey, dirty) {
+  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
+  if (!isFileCollectionTab(tab)) return false;
+  tab.fileDirty = Boolean(dirty);
+  return true;
+}
+
+function renameCollectionFilePath(oldPath, newPath) {
+  const oldValue = normalizeCollectionFilePath(oldPath);
+  const nextValue = normalizeCollectionFilePath(newPath);
+  if (!oldValue || !nextValue) return;
+  collectionTabsState.tabs.forEach(tab => {
+    if (!isFileCollectionTab(tab)) return;
+    const path = collectionFilePath(tab);
+    if (path !== oldValue && !path.startsWith(`${oldValue}/`)) return;
+    const next = path === oldValue
+      ? nextValue : `${nextValue}${path.slice(oldValue.length)}`;
+    tab.filePath = next;
+    tab.name = next.split('/').pop() || next;
+    tab.url = `#file-${encodeURIComponent(next)}`;
+  });
+  persistCollectionTabs();
+  renderCollectionTabs();
+}
+
+function closeFileCollectionTab(tabKey, options = {}) {
+  const index = collectionTabsState.tabs.findIndex(row => row.key === tabKey);
+  const tab = index >= 0 ? collectionTabsState.tabs[index] : null;
+  if (!isFileCollectionTab(tab)) return false;
+  if (!options.force && tab.fileDirty && typeof window.confirm === 'function'
+      && !window.confirm(`“${tab.name}”有未保存修改，确定关闭并放弃吗？`)) return false;
+  const wasActive = collectionTabsState.active === tab.key;
+  collectionTabsState.tabs.splice(index, 1);
+  emitCollectionFileEvent('qf:collection-file-close', {tab});
+  if (!collectionTabsState.tabs.length) collectionTabsState.tabs.push(createBlankCollectionTab());
+  if (wasActive) {
+    const target = collectionTabsState.tabs[Math.min(index, collectionTabsState.tabs.length - 1)];
+    collectionTabsState.active = target.key;
+  }
+  persistCollectionTabs();
+  renderCollectionTabs();
+  if (wasActive) {
+    if (isFileCollectionTab(activeCollectionTab())) {
+      emitCollectionFileEvent('qf:collection-file-activate', {tab: activeCollectionTab()});
+    } else {
+      void activateCollectionTab(collectionTabsState.active, {capture: false});
+    }
+  }
+  return true;
+}
+
+window.QFCollectionTabs = {
+  active: activeCollectionTab,
+  isFile: isFileCollectionTab,
+  openFile: openFileCollectionTab,
+  activateFile: activateFileCollectionTab,
+  closeFile: closeFileCollectionTab,
+  pinFile: setFileCollectionTabPinned,
+  setFileDirty: setFileCollectionTabDirty,
+  renameFilePath: renameCollectionFilePath,
+};
 
 async function refreshCurrentCollectionTab(refreshTree = false) {
   const collectionId = listEl?.dataset.collection || '';
@@ -3748,6 +4032,7 @@ async function renameFolder(li) {
     const data = await postFolderForm(collectionActionUrl(fid, 'rename'), form);
     const next = remapActiveCollection(fid, data.id, true);
     remapCollectionTabs(fid, data.id, true);
+    window.QQuestionFileWorkspace?.renamePath(fid, data.id);
     if (next.changed) {
       await loadFolderFragment(next.url, true, true);
     } else {
@@ -3768,6 +4053,7 @@ async function deleteFolder(li) {
     const data = await postFolderForm(collectionActionUrl(fid, 'delete'), new FormData());
     const next = deletedCollectionFallback(fid, data.parent_id || '');
     removeCollectionTabs(fid);
+    window.QQuestionFileWorkspace?.closePath(fid);
     if (next.changed) {
       const loaded = await loadFolderFragment(next.url, false, true);
       // 原地址已经指向回收站中的目录，不能留在浏览历史里；replaceState 也会把
@@ -3823,6 +4109,7 @@ folderMoveSelect?.addEventListener('change', async () => {
       if (!res.ok || !data.ok) throw new Error(data.error || '移动失败');
       const next = remapActiveCollection(fid, data.id, true);
       remapCollectionTabs(fid, data.id, true);
+      window.QQuestionFileWorkspace?.renamePath(fid, data.id);
       if (next.changed) {
         await loadFolderFragment(next.url, true, true);
       } else {
@@ -3864,6 +4151,12 @@ function showFolderCtx(x, y) {
 }
 
 function setFolderContextVisibility(kind) {
+  const newFolderItem = folderCtx?.querySelector('li[data-act="new-folder"]');
+  if (newFolderItem) {
+    newFolderItem.textContent = kind === 'root' ? '新建题集' : '新建子文件夹';
+  }
+  const deleteItem = folderCtx?.querySelector('li[data-act="delete"]');
+  if (deleteItem) deleteItem.textContent = kind === 'file' ? '删除文件' : '删除文件夹';
   folderCtx?.querySelectorAll('li[data-act]').forEach(item => {
     const act = item.dataset.act;
     const visible = kind === 'file'
@@ -4029,8 +4322,10 @@ async function handleContextFileAction(action) {
     const current = path.split('/').pop() || path;
     const name = window.prompt('重命名文件', current);
     if (!name || name === current) return;
-    await postLibraryJson('/api/library/rename', {path, name});
-    const nextPath = path.includes('/') ? `${path.slice(0, path.lastIndexOf('/') + 1)}${name}` : name;
+    const result = await postLibraryJson('/api/library/rename', {path, name});
+    const guessedPath = path.includes('/')
+      ? `${path.slice(0, path.lastIndexOf('/') + 1)}${name}` : name;
+    const nextPath = result.entry?.path || guessedPath;
     window.QQuestionFileWorkspace?.renamePath(path, nextPath);
     await loadFolderFragment(location.href, false, true);
     flashToast('文件已重命名');
@@ -4259,6 +4554,7 @@ folderTree?.addEventListener('drop', async e => {
       if (!res.ok || !data.ok) throw new Error(data.error || '移动文件夹失败');
       const next = remapActiveCollection(sourceId, data.id, true);
       remapCollectionTabs(sourceId, data.id, true);
+      window.QQuestionFileWorkspace?.renamePath(sourceId, data.id);
       if (next.changed) {
         await loadFolderFragment(next.url, true, true);
       } else {

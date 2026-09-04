@@ -4,9 +4,8 @@
 
   const workspace = document.getElementById('question-file-workspace');
   if (!workspace) return;
-  const initialTabsHost = workspace.querySelector('.question-file-tabs');
   const initialPanesHost = workspace.querySelector('.question-file-panes');
-  if (!initialTabsHost || !initialPanesHost) return;
+  if (!initialPanesHost) return;
   if (workspace.dataset.questionFilesReady === '1') return;
   workspace.dataset.questionFilesReady = '1';
 
@@ -55,7 +54,12 @@
   }
 
   function showWorkspace(show) {
-    workspace.hidden = !show;
+    workspace.dataset.qfHasPanel = show ? '1' : '0';
+    const activeTop = window.QFCollectionTabs?.active?.();
+    // 题集页签激活时由顶栏控制器隐藏文件工作区；文件页签激活后才显示。
+    workspace.hidden = Boolean(window.QFCollectionTabs) && activeTop
+      ? !window.QFCollectionTabs.isFile(activeTop)
+      : !show;
   }
 
   function injectWorkspaceStyles() {
@@ -75,7 +79,7 @@
       .question-file-groups.is-single { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
       .question-file-groups.is-vertical { grid-template-columns:repeat(var(--qf-group-count), minmax(0,1fr)); grid-template-rows:minmax(0,1fr); }
       .question-file-groups.is-horizontal { grid-template-columns:minmax(0,1fr); grid-template-rows:repeat(var(--qf-group-count), minmax(0,1fr)); }
-      .qf-editor-group { display:grid; grid-template-rows:auto auto minmax(0,1fr); min-width:0; min-height:0; background:var(--surface); }
+      .qf-editor-group { display:grid; grid-template-rows:auto minmax(0,1fr); min-width:0; min-height:0; background:var(--surface); }
       .qf-editor-group.is-focused { box-shadow:inset 0 0 0 1px var(--primary); }
       .qf-group-head { display:flex; align-items:center; gap:6px; min-height:29px; padding:3px 7px;
         border-bottom:1px solid var(--border); background:var(--surface-2); }
@@ -83,6 +87,7 @@
       .qf-group-head .qf-group-spacer { flex:1; }
       .qf-group-head .qf-group-close { width:26px; padding-inline:0; }
       .qf-group-tabs { min-width:0; }
+      .qf-group-tabs { display:none !important; }
       .qf-group-panes { min-height:0; min-width:0; }
       .qf-group-empty { display:grid; place-items:center; height:100%; min-height:100px; color:var(--muted); font-size:12px; }
       .question-file-tab { max-width:100%; }
@@ -264,7 +269,8 @@
       activeKey: '',
       previewKey: '',
     };
-    root.append(head, groupTabsHost, groupPanesHost);
+    // 文件标签统一渲染在题库顶栏；分组这里只保留标题和内容面板。
+    root.append(head, groupPanesHost);
     state.groups.set(id, group);
     root.addEventListener('pointerdown', () => focusGroup(id));
     return group;
@@ -272,8 +278,7 @@
 
   function setupShell() {
     injectWorkspaceStyles();
-    const previousChildren = [...workspace.children].filter(child =>
-      child !== initialTabsHost && child !== initialPanesHost);
+    const previousChildren = [...workspace.children].filter(child => child !== initialPanesHost);
     const controls = document.createElement('div');
     controls.className = 'qf-workspace-controls';
     const label = document.createElement('span');
@@ -295,7 +300,7 @@
     groupsHost.dataset.qfGroups = '1';
     workspace.classList.add('qf-group-workspace');
     workspace.replaceChildren(controls, groupsHost);
-    const primary = createGroup('primary', initialTabsHost, initialPanesHost);
+    const primary = createGroup('primary', null, initialPanesHost);
     groupsHost.append(primary.root);
     previousChildren.forEach(child => primary.root.append(child));
     state.groupsHost = groupsHost;
@@ -327,30 +332,8 @@
 
   function renderGroup(group) {
     if (!group) return;
-    group.tabsHost.replaceChildren();
-    group.order.forEach(key => {
-      const tab = group.tabs.get(key);
-      if (!tab) return;
-      const item = document.createElement('div');
-      item.className = `question-file-tab${key === group.activeKey ? ' is-active' : ''}`;
-      item.dataset.fileTab = key;
-      item.dataset.qfGroup = group.id;
-      item.setAttribute('role', 'tab');
-      item.setAttribute('aria-selected', String(key === group.activeKey));
-      const label = `${tab.dirty ? '* ' : ''}${tab.name || pathName(tab.path)}`;
-      const open = makeButton(label, 'question-file-tab-open', tab.path);
-      open.dataset.fileTabOpen = key;
-      const pin = makeButton(tab.pinned ? '●' : '○', 'question-file-tab-pin',
-        tab.pinned ? '取消固定标签' : '固定临时标签');
-      pin.dataset.fileTabPin = key;
-      const move = makeButton('⇄', 'question-file-tab-move', '移动到另一编辑器分组');
-      move.dataset.fileTabMove = key;
-      move.hidden = state.groups.size < 2;
-      const close = makeButton('×', 'question-file-tab-close', '关闭标签');
-      close.dataset.fileTabClose = key;
-      item.append(open, pin, move, close);
-      group.tabsHost.append(item);
-    });
+    // 标签已经在题库顶栏渲染，组内不再复制一套标签按钮。
+    group.tabsHost?.replaceChildren();
     group.panesHost.querySelectorAll('[data-file-panel]').forEach(panel => {
       panel.classList.toggle('is-active', panel.dataset.filePanel === group.activeKey);
       panel.hidden = panel.dataset.filePanel !== group.activeKey;
@@ -474,6 +457,7 @@
       tab.save.hidden = !source;
       tab.save.disabled = !tab.dirty || tab.saving || tab.mtime === undefined;
     }
+    window.QFCollectionTabs?.setFileDirty?.(tab.key, Boolean(tab.dirty));
     if (tab.dirty) setStatus(tab, '未保存');
     const group = groupForTab(tab);
     if (group) renderGroup(group);
@@ -528,12 +512,7 @@
   function addToolbar(tab, panel) {
     const toolbar = document.createElement('div');
     toolbar.className = 'question-file-toolbar';
-    const path = document.createElement('span');
-    path.className = 'question-file-path';
-    path.dataset.qfPath = tab.key;
-    path.textContent = tab.path;
-    path.title = tab.path;
-    toolbar.append(path);
+    // 文件名只在题库顶栏标签显示；面板工具栏保留操作按钮，避免重复占位。
     if (tab.kind === 'markdown') {
       const modes = document.createElement('span');
       modes.className = 'question-file-modes';
@@ -618,6 +597,12 @@
       ? allTabs().find(item => item.key === tabOrKey) : tabOrKey;
     if (!tab) return false;
     if (!options.force && !confirmDiscard(tab)) return false;
+    if (!options.skipTop && window.QFCollectionTabs?.closeFile) {
+      const top = window.QFCollectionTabs.active?.();
+      // 顶栏负责真正移除页签；收到 close 事件后会再次调用本函数并跳过回调。
+      if (window.QFCollectionTabs.closeFile(tab.key, {force: true})) return true;
+      if (top?.key === tab.key) return false;
+    }
     const group = groupForTab(tab);
     if (!group) return false;
     const index = group.order.indexOf(tab.key);
@@ -630,9 +615,60 @@
     return true;
   }
 
+  function syncTopDescriptor(descriptor) {
+    if (!descriptor?.key || !descriptor.filePath) return null;
+    const path = normalizePath(descriptor.filePath);
+    const kind = kindFrom({path, kind: descriptor.fileKind});
+    let tab = allTabs().find(item => item.key === descriptor.key);
+    let group = state.groups.get(descriptor.fileGroupId) || focusedGroup()
+      || state.groups.get('primary');
+    if (!group) return null;
+    if (tab && tab.group !== group) {
+      migrateTab(tab, groupForTab(tab), group, false);
+    }
+    if (!tab) {
+      tab = {
+        key: descriptor.key, path, name: String(descriptor.name || pathName(path)),
+        kind, pinned: Boolean(descriptor.pinned), mode: 'read', generation: 0,
+        dirty: Boolean(descriptor.fileDirty), text: undefined, group, groupId: group.id,
+      };
+      group.tabs.set(tab.key, tab);
+      group.order.push(tab.key);
+      createPanel(tab);
+    } else {
+      const changed = tab.path !== path || tab.kind !== kind;
+      if (changed) {
+        tab.panel?.remove();
+        Object.assign(tab, {path, kind, name: String(descriptor.name || pathName(path)),
+          mode: 'read', generation: (tab.generation || 0) + 1, dirty: false,
+          text: undefined, savedText: undefined, mtime: undefined, panel: null,
+          preview: null, editor: null, pdfFrame: null});
+        createPanel(tab);
+      } else {
+        tab.name = String(descriptor.name || tab.name || pathName(path));
+      }
+      tab.pinned = Boolean(descriptor.pinned);
+      tab.group = group;
+      tab.groupId = group.id;
+    }
+    group.activeKey = tab.key;
+    if (!tab.pinned) group.previewKey = tab.key;
+    else if (group.previewKey === tab.key) group.previewKey = '';
+    focusGroup(group.id);
+    renderAll();
+    return tab;
+  }
+
   function open(meta, options = {}) {
     const path = normalizePath(meta?.path);
     if (!path) return null;
+    const topApi = window.QFCollectionTabs;
+    if (topApi?.openFile) {
+      const descriptor = topApi.openFile({
+        ...meta, path, kind: kindFrom({...meta, path}),
+      }, {pin: Boolean(options.pin), groupId: options.groupId || focusedGroup()?.id});
+      return syncTopDescriptor(descriptor);
+    }
     const existing = tabForPath(path);
     if (existing) {
       const group = groupForTab(existing);
@@ -691,12 +727,12 @@
     const oldValue = normalizePath(oldPath);
     const nextValue = normalizePath(newPath);
     if (!oldValue || !nextValue) return;
+    window.QFCollectionTabs?.renameFilePath?.(oldValue, nextValue);
     allTabs().filter(tab => tab.path === oldValue || tab.path.startsWith(`${oldValue}/`)).forEach(tab => {
       tab.path = tab.path === oldValue
         ? nextValue : `${nextValue}${tab.path.slice(oldValue.length)}`;
-      tab.name = pathName(nextValue);
-      const pathNode = tab.panel?.querySelector('[data-qf-path]');
-      if (pathNode) { pathNode.textContent = nextValue; pathNode.title = nextValue; }
+      // 目录改名时保留每个文件自己的名称，不能把嵌套文件都改成目录名。
+      tab.name = pathName(tab.path);
       if (tab.pdfFrame) tab.pdfFrame.src = `/library/raw?path=${encodeURIComponent(nextValue)}`;
     });
     renderAll();
@@ -998,6 +1034,35 @@
 
   setupShell();
 
+  // 顶栏标签是文件状态的唯一来源；题库文件脚本只负责把活动标签映射成内容面板。
+  window.addEventListener('qf:collection-file-open', event => {
+    syncTopDescriptor(event.detail?.tab);
+  });
+  window.addEventListener('qf:collection-file-activate', event => {
+    const descriptor = event.detail?.tab;
+    if (!descriptor) return;
+    syncTopDescriptor(descriptor);
+  });
+  window.addEventListener('qf:collection-file-pin', event => {
+    const descriptor = event.detail?.tab;
+    if (!descriptor) return;
+    const tab = allTabs().find(item => item.key === descriptor.key);
+    if (tab) {
+      tab.pinned = Boolean(descriptor.pinned);
+      const group = groupForTab(tab);
+      if (group) {
+        if (tab.pinned && group.previewKey === tab.key) group.previewKey = '';
+        if (!tab.pinned) group.previewKey = tab.key;
+      }
+      renderAll();
+    }
+  });
+  window.addEventListener('qf:collection-file-close', event => {
+    const key = event.detail?.tab?.key;
+    const tab = allTabs().find(item => item.key === key);
+    if (tab) removeTab(tab, {skipTop: true, force: true});
+  });
+
   // 控制条在 groupsHost 外层，统一委托到整个工作区才能保证布局按钮也生效。
   workspace.addEventListener('click', event => {
     const groupRoot = event.target.closest('[data-qf-group]');
@@ -1010,35 +1075,6 @@
     if (split) { addGroup(state.groups.get(split.dataset.qfGroup)); return; }
     const closeGroupButton = event.target.closest('[data-qf-group-close]');
     if (closeGroupButton) { removeGroup(state.groups.get(closeGroupButton.dataset.qfGroup)); return; }
-    const close = event.target.closest('[data-file-tab-close]');
-    if (close) { removeTab(close.dataset.fileTabClose); return; }
-    const pin = event.target.closest('[data-file-tab-pin]');
-    if (pin) {
-      const tab = allTabs().find(item => item.key === pin.dataset.fileTabPin);
-      if (tab) {
-        tab.pinned = !tab.pinned;
-        const group = groupForTab(tab);
-        if (tab.pinned && group?.previewKey === tab.key) group.previewKey = '';
-        if (!tab.pinned && group) {
-          const previous = group.previewKey ? group.tabs.get(group.previewKey) : null;
-          if (previous && previous !== tab) {
-            if (previous.dirty) previous.pinned = true;
-            else removeTab(previous, {force: true});
-          }
-          group.previewKey = tab.key;
-        }
-        renderAll();
-      }
-      return;
-    }
-    const move = event.target.closest('[data-file-tab-move]');
-    if (move) { moveTabToOtherGroup(allTabs().find(item => item.key === move.dataset.fileTabMove)); return; }
-    const openButton = event.target.closest('[data-file-tab-open]');
-    if (openButton) {
-      const tab = allTabs().find(item => item.key === openButton.dataset.fileTabOpen);
-      const group = groupForTab(tab);
-      if (group) { group.activeKey = tab.key; focusGroup(group.id); renderAll(); }
-    }
   });
 
   document.addEventListener('click', event => {
@@ -1059,6 +1095,12 @@
   });
 
   document.addEventListener('dblclick', event => {
+    const collectionFile = event.target.closest('[data-collection-tab-type="file"]');
+    if (collectionFile) {
+      event.preventDefault();
+      window.QFCollectionTabs?.pinFile?.(collectionFile.dataset.collectionTabKey, true);
+      return;
+    }
     const link = event.target.closest('.folder-file-link');
     if (link) {
       event.preventDefault();
@@ -1068,11 +1110,6 @@
         name: link.querySelector('.folder-file-name')?.textContent || link.textContent.trim(),
       }, {pin: true});
       return;
-    }
-    const tabButton = event.target.closest('[data-file-tab-open]');
-    if (tabButton) {
-      const tab = allTabs().find(item => item.key === tabButton.dataset.fileTabOpen);
-      if (tab) { tab.pinned = true; const group = groupForTab(tab); if (group) group.previewKey = ''; renderAll(); }
     }
   });
 
@@ -1112,6 +1149,10 @@
       })();
       if (path) open({path});
     });
+  }
+  const restoredFile = window.QFCollectionTabs?.active?.();
+  if (restoredFile && window.QFCollectionTabs.isFile(restoredFile)) {
+    syncTopDescriptor(restoredFile);
   }
   if (window.parent !== window) {
     try {

@@ -1,10 +1,28 @@
 {% set endpoint = request.endpoint or '' %}
 {% if endpoint == 'index' %}
   {% set help_title = '题库帮助' %}
+{% elif endpoint == 'workspace_page' %}
+  {% set help_title = '工作区帮助' %}
+{% elif endpoint == 'question_new' %}
+  {% set help_title = '新建题卡帮助' %}
+{% elif endpoint == 'question_edit' %}
+  {% set help_title = '编辑题卡帮助' %}
+{% elif endpoint == 'prompts_page' %}
+  {% set help_title = '提示词帮助' %}
+{% elif endpoint == 'batch_group_review' %}
+  {% set help_title = '批次校对帮助' %}
+{% elif endpoint == 'batch_group_source_review' %}
+  {% set help_title = '原文调整帮助' %}
+{% elif endpoint == 'batch_group_blocks' %}
+  {% set help_title = '拆题审核帮助' %}
+{% elif endpoint == 'batch_dashboard' %}
+  {% set help_title = '批次看板帮助' %}
+{% elif endpoint == 'batches_overview' %}
+  {% set help_title = '转换任务帮助' %}
 {% elif endpoint.startswith('handouts') %}
   {% set help_title = '讲义帮助' %}
 {% elif endpoint.startswith('library') %}
-  {% set help_title = '资料库帮助' %}
+  {% set help_title = '题库文件帮助' %}
 {% elif endpoint.startswith('import') or endpoint.startswith('block_') %}
   {% set help_title = '导入帮助' %}
 {% elif 'batch' in endpoint %}
@@ -31,6 +49,33 @@
     <h3>文件操作</h3><p>在文件树空白处右键可新建题目或题集；右键题集可新建题目、子文件夹、重命名或删除；右键 PDF／MD 可重命名或删除，PDF 另可重新转换。外部 PDF 可直接拖到题集行加入，不会自动转换；文件移动继续使用拖拽，删除内容可从回收站恢复。</p>
     <h3>组卷</h3><p>勾选题目后，右缘会出现“批量编辑”和“更多操作”标签；点击标签只展开对应的轻量面板。导出按钮只是展开选项，真正导出需点击面板内的提交按钮。</p>
     <h3>本地文件</h3><p>每道题都是题库目录中的 Markdown 文件，文件名就是题卡名称，可从题卡“更多”菜单重命名，也可在 Obsidian 中直接改名。题目身份和图片引用不会随文件名变化；没有题源和目标题集的散题会进入“临时卡片”。</p>
+  {% elif endpoint == 'workspace_page' %}
+    <h3>常驻工作区</h3><p>左侧导航切换题库、讲义、批量导入和其他页面；当前页面在工作区中保留，返回时会继续显示原来的滚动位置和打开状态。</p>
+    <h3>题库文件</h3><p>题库中的 PDF 和 Markdown 使用题库顶栏标签打开。需要查看不同文件时可使用分栏；帮助内容会随当前业务页面自动更新。</p>
+    <h3>桌面版</h3><p>桌面窗口的最小化、最大化和关闭按钮位于顶部。浏览器或 Obsidian 中打开时不会显示桌面专用控件。</p>
+  {% elif endpoint in ['question_new', 'question_edit'] %}
+    <h3>编辑题卡</h3><p>题目正文是必填项；解析和备注可按需展开。右侧会实时预览 Markdown，题型、难度、题源和标签用于后续筛选与组卷。</p>
+    <h3>保存位置</h3><p>点击“保存”后写入当前题库；从文件树右键新建时会沿用所选题集。点击“取消”不会保存本次修改。</p>
+    <h3>外部修改</h3><p>题卡文件也可以在 Obsidian 中编辑。保存前请确认当前内容，避免用旧页面覆盖刚刚发生的外部修改。</p>
+  {% elif endpoint == 'prompts_page' %}
+    <h3>提示词来源</h3><p>内置提示词只读；“复制为自定义”会创建可修改副本。自定义提示词保存在本机，不会随题库上传。</p>
+    <h3>编辑操作</h3><p>新建或选中提示词后可修改标题、分类和正文；保存后可复制正文供外部模型使用，也可以删除自定义条目。</p>
+  {% elif endpoint == 'batch_group_review' %}
+    <h3>校对题卡</h3><p>逐题检查切分结果，可编辑题干、解析、备注、题型、难度、标签和图片；误拆的小问可合并，遗漏内容可拆出新卡。</p>
+    <h3>导入决定</h3><p>勾选要入库的题目，填写题源、整批标签和目标题集后点击“导入本组并返回看板”。不需要的组可以跳过；识别错误时可用“重新转换”回到原文件重跑。</p>
+    <h3>原卷对照</h3><p>有原文件时左侧会显示 PDF 或图片对照。选择“保存原卷”并打包到文件夹后，原卷会和题卡一起留在题库中。</p>
+  {% elif endpoint == 'batch_group_source_review' %}
+    <h3>调整原文</h3><p>左侧对照上传的题干／解析原文件，右侧编辑对应 Markdown。这里只修改识别输入，不会直接改已有题卡。</p>
+    <h3>重新识别</h3><p>选择“整份作为一组”或“按标题拆成多组”后点击尝试识别。页面会校验版本；若文件已被其他操作更新，请先返回看板重新打开。</p>
+  {% elif endpoint == 'batch_group_blocks' %}
+    <h3>审核拆题</h3><p>这里审核的是送入 AI 前的机械切块。可调整块顺序、题干／解析区域，合并误拆内容、拆出空块或删除错误块。</p>
+    <h3>提交方式</h3><p>“机械渲染入库”直接按当前块内容生成题卡；“送 AI 规范化”会继续交给识别模型处理。提交前先用左侧原文件核对边界。</p>
+  {% elif endpoint == 'batch_dashboard' %}
+    <h3>批次状态</h3><p>看板实时显示每组的等待、转换、待审核、待拆题审核和失败状态。某组完成后可单独进入校对，不必等待整批结束。</p>
+    <h3>任务控制</h3><p>尚未开始的组可以中止；失败组可调整原文或重新转换。整批空闲后才能删除记录，已处理的题卡不会被删除。</p>
+  {% elif endpoint == 'batches_overview' %}
+    <h3>任务列表</h3><p>默认显示待处理批次，可切换查看已完成记录。进入批次看板可以逐组审核、跳过或重新转换。</p>
+    <h3>资料任务</h3><p>PDF、DOCX 和资料制卡任务也会列在这里；失败或中断的任务可点击重试，完成后从题库文件标签查看输出。</p>
   {% elif endpoint.startswith('handouts') %}
     <h3>编辑讲义</h3><p>新建或打开讲义后，从选题篮插入题目，并在右侧检查器调整标题、编号和内容。</p>
     <h3>保存与导出</h3><p>讲义保存在当前题库的 <code>_handouts</code> 目录。导出前先保存，外部修改冲突时页面会保留当前草稿。</p>

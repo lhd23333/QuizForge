@@ -97,7 +97,7 @@
         'book-open', 'notebook', 'folder', 'folder-plus', 'file', 'upload',
         'download', 'clock', 'archive', 'search', 'trash', 'database', 'cpu',
         'heart', 'settings', 'help', 'info', 'user', 'bot', 'palette', 'filter',
-        'scan', 'file-output', 'external-link', 'save', 'eye', 'paperclip', 'copy', 'send',
+        'scan', 'file-output', 'external-link', 'save', 'eye', 'paperclip', 'copy', 'send', 'shield',
         'menu', 'more-horizontal', 'check', 'check-circle', 'star', 'edit', 'move',
         'grip', 'drag', 'scissors', 'plus', 'minus', 'x', 'arrow-up', 'arrow-down',
         'arrow-left', 'arrow-right',
@@ -272,6 +272,14 @@
 
     <div id="agent-scope-menu" class="agent-scope-menu" hidden>
       <div class="agent-scope-menu-title">选择 Agent 能看到的范围</div>
+      <label class="agent-mode-control agent-scope-mode-control" for="agent-mode">
+        <span class="agent-mode-icon" aria-hidden="true">{{ icon('shield') }}</span>
+        <span>权限</span>
+        <select id="agent-mode" aria-label="Agent 权限模式">
+          <option value="standard">标准</option>
+          <option value="danger">完全访问</option>
+        </select>
+      </label>
       <label class="agent-scope-option">
         <input type="radio" name="agent-scope" value="bank" checked>
         <span class="agent-scope-option-icon" aria-hidden="true">{{ icon('database') }}</span>
@@ -386,41 +394,18 @@
           <div id="agent-attachments" class="agent-attachments" hidden></div>
           <textarea id="agent-input" class="input agent-input" rows="2"
                     placeholder="描述要处理的题库任务…" autocomplete="off"></textarea>
-          <div class="agent-toolbar" aria-label="Agent 工作范围、模型和权限">
-            <button type="button" id="agent-scope-toggle" class="agent-scope-button"
-                    aria-expanded="false" aria-controls="agent-scope-menu">
-              <span class="agent-scope-button-icon" aria-hidden="true">{{ icon('folder') }}</span>
-              <span class="agent-scope-button-copy">
-                <small>工作目录</small>
-                <strong id="agent-scope-label">当前题库</strong>
-              </span>
-              <span class="agent-scope-chevron" aria-hidden="true">{{ icon('chevron-down') }}</span>
-            </button>
-            <label class="agent-mode-control" for="agent-mode">
-              <span>权限</span>
-              <select id="agent-mode" aria-label="Agent 权限模式">
-                <option value="standard">标准</option>
-                <option value="danger">危险</option>
-              </select>
-            </label>
-            <label class="agent-provider-control" for="agent-provider">
-              <span>模型</span>
-              <select id="agent-provider" aria-label="Agent 对话模型"
-                      aria-describedby="agent-provider-status"
-                      title="选择本次对话使用的模型">
-                <option value="">未连接模型 · 本地快捷模式</option>
-              </select>
-            </label>
-            <span id="agent-provider-status" class="agent-provider-status" role="status"
-                  aria-live="polite">未连接模型 · 本地快捷模式</span>
-          </div>
-          <div class="agent-composer-actions">
+          {# 底栏刻意保持 Codex 式紧凑布局：左侧附件/权限，右侧模型/发送。
+             工作目录仍由权限按钮打开的范围面板管理，避免再占一整行。 #}
+          <div class="agent-composer-actions" aria-label="Agent 输入工具">
             <div class="agent-composer-tools">
               <button type="button" id="agent-attach" class="agent-composer-tool"
-                      title="上传 PDF、DOCX 或 ZIP" aria-label="上传文件">{{ icon('paperclip') }}</button>
-              <button type="button" class="agent-icon-button agent-provider-settings"
-                      id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型">
-                {{ icon('settings') }}
+                      title="添加附件（PDF、DOCX 或 ZIP）" aria-label="添加附件">{{ icon('paperclip') }}</button>
+              <button type="button" id="agent-scope-toggle" class="agent-scope-button agent-permission-button"
+                      aria-expanded="false" aria-controls="agent-scope-menu"
+                      title="调整权限和工作范围" aria-label="调整权限和工作范围">
+                <span class="agent-permission-icon" aria-hidden="true">{{ icon('shield') }}</span>
+                <span id="agent-permission-label">标准</span>
+                <span id="agent-scope-label" class="agent-scope-context-label">当前题库</span>
               </button>
               <input type="file" id="agent-file" class="agent-visually-hidden"
                      accept=".pdf,.doc,.docx,.zip,application/pdf,application/zip" multiple>
@@ -428,10 +413,28 @@
                      webkitdirectory directory multiple tabindex="-1" aria-hidden="true">
               <span id="agent-composer-hint" class="agent-composer-hint agent-visually-hidden">当前题库</span>
             </div>
+            <div class="agent-composer-model">
+              <label class="agent-provider-control" for="agent-provider">
+                <span class="agent-provider-label">模型</span>
+                <select id="agent-provider" aria-label="Agent 对话模型"
+                        aria-describedby="agent-provider-status"
+                        title="选择本次对话使用的模型">
+                  <option value="">未连接模型 · 本地快捷模式</option>
+                </select>
+              </label>
+            </div>
             <button class="btn primary agent-send" id="agent-send" type="submit"
                     title="发送" aria-label="发送">
               <span data-agent-send-icon aria-hidden="true">{{ icon('arrow-up', 'agent-send-mark') }}</span>
             </button>
+          </div>
+          <div class="agent-composer-status-row">
+            <button type="button" class="agent-icon-button agent-provider-settings"
+                    id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型">
+              {{ icon('settings') }}
+            </button>
+            <span id="agent-provider-status" class="agent-provider-status" role="status"
+                  aria-live="polite">未连接模型 · 本地快捷模式</span>
           </div>
         </form>
       </section>

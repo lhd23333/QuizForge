@@ -1470,6 +1470,8 @@ html.desktop-host .sidebar-filter-panel .tag-cloud { max-height: none; }
 .collection-tab-close:focus-visible,
 .collection-tab-add:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .collection-tab-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collection-tab.is-file-preview .collection-tab-label { font-style: italic; font-weight: 400; }
+.collection-tab.is-file .collection-tab-label { max-width: 260px; }
 .collection-tab-close {
   width: 26px; padding: 0 7px 1px 3px; border-radius: 4px; font-size: 16px;
 }
@@ -1529,6 +1531,17 @@ select option { background: var(--surface); color: var(--text); }
 .btn-danger { background: var(--danger); color: var(--qf-on-danger); border-color: var(--danger); }
 .btn-danger:hover { background: #b91c1c; border-color: #b91c1c; }
 .btn-sm { padding: 3px 10px; font-size: 12px; }
+.export-toggle-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: fit-content;
+  min-width: 0;
+  white-space: nowrap;
+}
+.export-toggle-icon { width: 14px; height: 14px; transition: transform .14s ease; }
+.export-toggle-button[aria-expanded="true"] .export-toggle-icon { transform: rotate(180deg); }
 
 .llm-quick-switch {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
@@ -1726,6 +1739,18 @@ body.bulk-drawer-open {
   display: grid; grid-template-rows: auto minmax(260px, 1fr); min-height: 320px;
   margin: 0 0 var(--sp-4); border: 1px solid var(--border); border-radius: var(--radius);
   background: var(--surface); overflow: hidden;
+}
+.content.qf-file-view { min-height: calc(100vh - 58px); display: flex; flex-direction: column; }
+.content.qf-file-view > :not(#collection-tabs):not(#question-file-workspace) { display: none !important; }
+.content.qf-file-view #question-file-workspace {
+  flex: 1 1 auto; min-height: 0; height: calc(100vh - 58px); margin: 0;
+  border: 0; border-radius: 0;
+}
+.content.qf-file-view #question-file-workspace .qf-workspace-controls {
+  flex: none; border-top: 1px solid var(--border);
+}
+.content.qf-file-view #question-file-workspace .question-file-groups {
+  min-height: 0; height: 100%;
 }
 .question-file-workspace[hidden] { display: none !important; }
 .question-file-tabs {
@@ -5239,5 +5264,340 @@ details.agent-tool-event > summary::marker { color: var(--muted); }
       width: calc(100% - var(--app-nav-width) - var(--agent-panel-width)) !important;
       margin-right: var(--agent-panel-width) !important;
     }
+  }
+}
+
+/* Agent 输入栏：与 Codex 保持同一条紧凑工具带。
+   旧版把范围、权限和模型拆成整行大按钮；这里统一收缩到输入框下方，
+   只保留图标命中区和必要的模型选择宽度。 */
+.agent-composer > .agent-composer-actions {
+  display: flex !important;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 30px;
+  margin-top: 6px;
+  gap: 6px;
+}
+.agent-composer .agent-composer-tools {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  gap: 2px;
+}
+.agent-composer .agent-composer-tool,
+.agent-composer .agent-provider-settings {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.agent-composer .agent-composer-tool:hover:not(:disabled),
+.agent-composer .agent-provider-settings:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.agent-composer .agent-composer-tool .ui-icon,
+.agent-composer .agent-provider-settings .ui-icon { width: 16px; height: 16px; }
+.agent-composer .agent-scope-button.agent-permission-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto !important;
+  width: auto !important;
+  min-width: 0;
+  max-width: 112px;
+  min-height: 30px;
+  height: 30px;
+  margin: 0;
+  padding: 0 7px;
+  gap: 5px;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.agent-composer .agent-scope-button.agent-permission-button:hover,
+.agent-composer .agent-scope-button.agent-permission-button[aria-expanded="true"] {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+}
+.agent-permission-icon,
+.agent-permission-icon .ui-icon { display: inline-grid; width: 16px; height: 16px; flex: 0 0 16px; }
+.agent-scope-context-label { display: none !important; }
+.agent-composer-model {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  gap: 2px;
+}
+.agent-composer-model .agent-provider-control {
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+.agent-composer-model .agent-provider-label { display: none; }
+.agent-composer-model .agent-provider-control .qf-select {
+  width: clamp(96px, 18vw, 190px) !important;
+  min-width: 0;
+}
+.agent-composer-model .agent-provider-control .qf-select-trigger {
+  min-height: 30px;
+  height: 30px;
+  padding: 4px 6px 4px 8px;
+  border-radius: 6px;
+  background: transparent;
+  font-size: 11px;
+}
+.agent-composer-model .agent-provider-control .qf-select-trigger:hover {
+  background: var(--surface-2);
+}
+.agent-composer-model .agent-provider-settings {
+  width: 26px;
+  min-width: 26px;
+  height: 30px;
+}
+.agent-composer > .agent-provider-status {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--primary);
+  font-size: 10px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-composer > .agent-provider-status[hidden] { display: none !important; }
+.agent-composer .agent-send {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 50%;
+}
+.agent-composer .agent-send-mark { width: 16px; height: 16px; }
+.agent-scope-mode-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 11px;
+}
+.agent-scope-mode-control .agent-mode-icon,
+.agent-scope-mode-control .agent-mode-icon .ui-icon { display: inline-grid; width: 16px; height: 16px; flex: 0 0 16px; color: var(--primary); }
+.agent-scope-mode-control .qf-select { width: 108px; margin-left: auto; }
+.agent-scope-mode-control .qf-select-trigger { min-height: 28px; padding: 4px 6px; font-size: 11px; }
+
+@media (max-width: 560px) {
+  .agent-composer-model .agent-provider-control .qf-select { width: clamp(86px, 30vw, 150px) !important; }
+  .agent-composer .agent-scope-button.agent-permission-button { padding-inline: 6px; }
+  .agent-composer-model .agent-provider-settings { width: 24px; min-width: 24px; }
+}
+@media (max-width: 360px) {
+  .agent-composer > .agent-composer-actions { gap: 3px; }
+  .agent-composer .agent-composer-tool,
+  .agent-composer .agent-provider-settings,
+  .agent-composer .agent-send { width: 28px; min-width: 28px; }
+  .agent-composer-model .agent-provider-control .qf-select { width: 78px !important; }
+  .agent-composer .agent-scope-button.agent-permission-button { max-width: 82px; padding-inline: 4px; }
+}
+
+/* 选题操作列：三枚标签共用同一条右侧轨道，面板从轨道左侧展开。该段保持在
+   legacy 层之外，确保桌面宿主的高优先级布局不会把操作面板重新拉成整行。 */
+main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
+.bulk-action-stack {
+  --bulk-action-rail-width: 40px;
+  position: fixed;
+  z-index: 68;
+  top: 50%;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: max-content;
+  max-width: calc(100vw - 8px);
+  transform: translateY(-50%);
+}
+.bulk-action-stack[hidden] { display: none !important; }
+.bulk-action-stack .bulk-action-rail {
+  position: static;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: auto;
+  transform: none;
+}
+.bulk-action-stack .bulk-action-rail[hidden] { display: none !important; }
+.bulk-action-stack .bulk-drawer-trigger,
+.bulk-action-stack .bulk-action-rail-button {
+  position: static;
+  flex: none;
+  width: fit-content;
+  min-width: var(--bulk-action-rail-width);
+  min-height: 0;
+  height: auto;
+  padding: 8px 7px;
+  border-right: 0;
+  border-radius: 7px 0 0 7px;
+}
+.bulk-action-stack .bulk-drawer-trigger {
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  top: auto;
+  right: auto;
+  transform: none;
+}
+.bulk-action-stack .bulk-drawer-trigger span {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  line-height: 1;
+  white-space: nowrap;
+}
+.bulk-action-stack .bulk-action-rail-button {
+  writing-mode: vertical-rl;
+  text-orientation: upright;
+  line-height: 1.15;
+  white-space: nowrap;
+}
+.bulk-action-stack .bulk-drawer-trigger[hidden] { display: none !important; }
+
+.bulk-action-panel {
+  right: calc(var(--bulk-action-rail-width, 40px) + 8px);
+  width: min(420px, calc(100vw - 64px));
+  margin: 0;
+  transform: translate(10px, -50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform .15s ease, opacity .15s ease;
+}
+.bulk-action-panel:not([hidden]) {
+  transform: translate(0, -50%);
+  opacity: 1;
+  pointer-events: auto;
+}
+.bulk-action-panel .bulk-action-body form {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+.bulk-action-panel .bulk-action-body form > .btn {
+  width: fit-content;
+  max-width: 100%;
+  justify-self: start;
+}
+.bulkbar form > .btn {
+  width: fit-content;
+  align-self: flex-start;
+}
+.bulk-transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.bulk-transfer-actions .btn {
+  width: fit-content;
+  flex: 0 0 auto;
+}
+@media (max-width: 640px) {
+  .bulk-action-stack { --bulk-action-rail-width: 36px; }
+  .bulk-action-panel {
+    right: calc(var(--bulk-action-rail-width, 36px) + 6px);
+    width: min(420px, calc(100vw - 52px));
+  }
+}
+
+/* 低宽度媒体规则曾把 Agent 里所有 span 一并隐藏，连模型选择器的可见值也会被
+   隐掉；只隐藏“模型”标签，保留自定义选择器的值和下拉箭头。 */
+.agent-composer-model .agent-provider-control > .agent-provider-label { display: none !important; }
+.agent-composer-model .agent-provider-control .qf-select-value { display: block !important; }
+.agent-composer-model .agent-provider-control .qf-select-chevron { display: grid !important; }
+.agent-scope-mode-control .qf-select-value { display: block !important; }
+.agent-scope-mode-control .qf-select-chevron,
+.agent-scope-mode-control .qf-select-chevron .ui-icon { display: grid !important; }
+.agent-scope-mode-control > span { display: inline-flex !important; }
+.agent-scope-mode-control > .agent-mode-icon { display: inline-grid !important; }
+
+/* 最终覆盖：主工具行严格保持“附件、权限、模型、发送”的 Codex 顺序。
+   Provider 设置单独放在输入框左下角，避免挤占模型和发送按钮的命中区。 */
+:root { --agent-conversation-width: 132px; }
+.agent-conversations {
+  width: var(--agent-conversation-width) !important;
+  flex-basis: var(--agent-conversation-width) !important;
+}
+.agent-composer-actions { justify-content: space-between; }
+.agent-composer-model { margin-left: auto; }
+.agent-composer-status-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  min-height: 24px;
+  margin-top: 2px;
+}
+.agent-composer-status-row .agent-provider-settings {
+  flex: 0 0 26px;
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+}
+.agent-composer-status-row .agent-provider-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-composer-status-row .agent-provider-status[hidden] { display: none !important; }
+.agent-composer > .agent-composer-actions { order: 2; }
+.agent-composer > .agent-composer-status-row { order: 3; }
+@media (max-width: 760px) {
+  .agent-conversations {
+    width: 176px !important;
+    flex-basis: 176px !important;
+  }
+}
+@media (max-width: 480px) {
+  .agent-conversations {
+    width: min(238px, calc(100% - 42px)) !important;
+    flex-basis: min(238px, calc(100% - 42px)) !important;
   }
 }

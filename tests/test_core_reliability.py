@@ -1676,6 +1676,22 @@ class PageTests(unittest.TestCase):
         self.assertIn("if (dragQuestionId) updateQuestionDragAutoScroll", template)
         self.assertIn("stopQuestionDragAutoScroll();", template)
 
+    def test_selection_action_tabs_share_compact_rail(self):
+        template = (config.BASE_DIR / "templates" / "index.html").read_text(
+            encoding="utf-8")
+        stylesheet = (config.BASE_DIR / "static" / "style.css").read_text(
+            encoding="utf-8")
+        self.assertIn('class="bulk-action-stack" id="bulk-action-stack"', template)
+        self.assertIn('role="group"', template)
+        self.assertIn('id="bulk-drawer-trigger"', template)
+        self.assertIn('id="bulk-action-rail"', template)
+        self.assertIn("function closeBulkActionSections()", template)
+        self.assertIn("bulkActionStack?.classList.toggle('has-open-panel'", template)
+        self.assertIn("main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }", stylesheet)
+        self.assertIn(".bulk-action-panel:not([hidden])", stylesheet)
+        self.assertIn(".bulk-action-panel .bulk-action-body form > .btn", stylesheet)
+        self.assertIn("width: auto;", stylesheet)
+
     def test_selection_only_changes_state_and_never_reorders_cards(self):
         template = (config.BASE_DIR / "templates" / "index.html").read_text(
             encoding="utf-8")

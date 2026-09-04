@@ -853,6 +853,15 @@
     }
     const effectiveMode = dangerArmedFor(current.id) ? 'danger' : 'standard';
     if ($('agent-mode')) $('agent-mode').value = effectiveMode;
+    const permissionLabel = $('agent-permission-label');
+    if (permissionLabel) permissionLabel.textContent = effectiveMode === 'danger' ? '完全访问' : '标准';
+    const permissionButton = $('agent-scope-toggle');
+    if (permissionButton) {
+      const workdirLabel = workdirDisplayName(current.workdir_id);
+      permissionButton.title = `调整权限和工作范围（当前目录：${workdirLabel}）`;
+      permissionButton.setAttribute('aria-label',
+        `调整权限和工作范围，当前权限：${effectiveMode === 'danger' ? '完全访问' : '标准'}，工作目录：${workdirLabel}`);
+    }
     panel.dataset.mode = effectiveMode;
     const dangerBanner = $('agent-danger-banner');
     if (dangerBanner) dangerBanner.hidden = effectiveMode !== 'danger';
