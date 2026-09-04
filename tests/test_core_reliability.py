@@ -1612,7 +1612,12 @@ class PageTests(unittest.TestCase):
         self.assertIn("bulkbar.showModal()", template)
         self.assertIn("body.classList.add('bulk-drawer-open')", template)
         self.assertNotIn("classList.toggle('bulk-active'", template)
-        self.assertIn("syncBulkCollectionAction(activeCollectionTab()?.id || '')", template)
+        self.assertIn('id="bulk-clear-form"', template)
+        self.assertIn('id="bulk-delete-form"', template)
+        self.assertIn('data-bulk-action-trigger="transfer"', template)
+        self.assertIn('id="bulk-transfer-section"', template)
+        self.assertNotIn('bulk-more-section', template)
+        self.assertNotIn('移出本集', template)
         self.assertIn(
             "loadFolderFragment(tab.url, true, false, false, ownsTargetTab)",
             template)

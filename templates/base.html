@@ -214,62 +214,6 @@
       <button type="button" id="agent-danger-exit" class="agent-danger-exit">退出</button>
     </div>
 
-    <section id="agent-provider-popover" class="agent-provider-popover" hidden
-             aria-labelledby="agent-provider-popover-title">
-      <div class="agent-provider-popover-head">
-        <div>
-          <strong id="agent-provider-popover-title">Agent 模型</strong>
-          <small>与导入识别模型独立配置</small>
-        </div>
-        <button type="button" class="agent-icon-button" id="agent-provider-close"
-          title="关闭模型设置" aria-label="关闭模型设置">{{ icon('x') }}</button>
-      </div>
-      <p class="agent-provider-protocol">
-        支持 Chat Completions 与 CC Switch 使用的 Responses API。Base URL 可填写到
-        <code>/v1</code>，程序会自动拼接请求端点；API Key 不会返回前端或写入日志。
-      </p>
-      <div id="agent-provider-list" class="agent-provider-list" aria-live="polite"></div>
-      <div class="agent-provider-import">
-        <strong>导入 CC Switch 配置</strong>
-        <span>选择 config.toml 与 auth.json，密钥只在本机解析并加密保存。</span>
-        <div class="agent-provider-import-row">
-          <label>config.toml<input id="agent-cc-config" type="file" accept=".toml,text/plain"></label>
-          <label>auth.json<input id="agent-cc-auth" type="file" accept=".json,application/json"></label>
-          <button type="button" class="agent-provider-action" id="agent-cc-import">导入</button>
-        </div>
-      </div>
-      <form id="agent-provider-form" class="agent-provider-form">
-        <div class="agent-provider-form-title">添加 Provider</div>
-        <div class="agent-provider-grid">
-          <label class="agent-provider-wide">服务商预设
-            <select id="agent-provider-preset" name="preset" class="input">
-              <option value="">自定义 OpenAI 兼容服务</option>
-            </select>
-          </label>
-          <label>名称<input name="name" required placeholder="例如 我的中转站"></label>
-          <label>模型<input name="model" list="agent-provider-model-options" required
-                placeholder="例如 deepseek-chat"></label>
-          <datalist id="agent-provider-model-options"></datalist>
-          <label class="agent-provider-wide">Base URL<input name="base_url" required
-                placeholder="https://api.example.com/v1"></label>
-          <label class="agent-provider-wide">API Key<input name="api_key" type="password"
-                autocomplete="new-password" placeholder="本地模型可留空"></label>
-          <label>接口协议<select name="wire_api"><option value="chat">Chat Completions</option><option value="responses">Responses（CC Switch）</option></select></label>
-          <label>最大输出<input name="max_tokens" type="number" min="256" max="200000" value="8192"></label>
-          <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option></select></label>
-          <label>服务等级<select name="service_tier"><option value="">默认</option><option value="auto">Auto</option><option value="default">Default</option><option value="flex">Flex</option><option value="scale">Scale</option><option value="priority">Priority</option><option value="fast">Fast</option></select></label>
-          <label class="agent-provider-check"><input name="supports_tools" type="checkbox" checked> 支持工具调用</label>
-          <label class="agent-provider-check"><input name="supports_vision" type="checkbox"> 支持图片输入</label>
-          <label class="agent-provider-check"><input name="store_responses" type="checkbox"> 保存 Responses 云端记录</label>
-        </div>
-        <div class="agent-provider-form-actions">
-          <span id="agent-provider-form-status" role="status"></span>
-          <button type="button" class="agent-provider-action" id="agent-provider-edit-cancel" hidden>取消编辑</button>
-          <button type="submit" class="btn primary">添加模型</button>
-        </div>
-      </form>
-    </section>
-
     <div id="agent-scope-menu" class="agent-scope-menu" hidden>
       <div class="agent-scope-menu-title">选择 Agent 能看到的范围</div>
       <label class="agent-mode-control agent-scope-mode-control" for="agent-mode">
@@ -326,6 +270,61 @@
     </div>
 
     <div class="agent-workspace" id="agent-workspace">
+      <section id="agent-provider-popover" class="agent-provider-popover" hidden
+               aria-hidden="true" aria-labelledby="agent-provider-popover-title">
+        <div class="agent-provider-popover-head">
+          <div>
+            <strong id="agent-provider-popover-title">Agent 模型</strong>
+            <small>与导入识别模型独立配置</small>
+          </div>
+          <button type="button" class="agent-icon-button" id="agent-provider-close"
+            title="关闭模型设置" aria-label="关闭模型设置">{{ icon('x') }}</button>
+        </div>
+        <p class="agent-provider-protocol">
+          支持 Chat Completions 与 CC Switch 使用的 Responses API。Base URL 可填写到
+          <code>/v1</code>，程序会自动拼接请求端点；API Key 不会返回前端或写入日志。
+        </p>
+        <div id="agent-provider-list" class="agent-provider-list" aria-live="polite"></div>
+        <div class="agent-provider-import">
+          <strong>导入 CC Switch 配置</strong>
+          <span>选择 config.toml 与 auth.json，密钥只在本机解析并加密保存。</span>
+          <div class="agent-provider-import-row">
+            <label>config.toml<input id="agent-cc-config" type="file" accept=".toml,text/plain"></label>
+            <label>auth.json<input id="agent-cc-auth" type="file" accept=".json,application/json"></label>
+            <button type="button" class="agent-provider-action" id="agent-cc-import">导入</button>
+          </div>
+        </div>
+        <form id="agent-provider-form" class="agent-provider-form">
+          <div class="agent-provider-form-title">添加 Provider</div>
+          <div class="agent-provider-grid">
+            <label class="agent-provider-wide">服务商预设
+              <select id="agent-provider-preset" name="preset" class="input">
+                <option value="">自定义 OpenAI 兼容服务</option>
+              </select>
+            </label>
+            <label>名称<input name="name" required placeholder="例如 我的中转站"></label>
+            <label>模型<input name="model" list="agent-provider-model-options" required
+                  placeholder="例如 deepseek-chat"></label>
+            <datalist id="agent-provider-model-options"></datalist>
+            <label class="agent-provider-wide">Base URL<input name="base_url" required
+                  placeholder="https://api.example.com/v1"></label>
+            <label class="agent-provider-wide">API Key<input name="api_key" type="password"
+                  autocomplete="new-password" placeholder="本地模型可留空"></label>
+            <label>接口协议<select name="wire_api"><option value="chat">Chat Completions</option><option value="responses">Responses（CC Switch）</option></select></label>
+            <label>最大输出<input name="max_tokens" type="number" min="256" max="200000" value="8192"></label>
+            <label>推理强度<select name="reasoning_effort"><option value="">默认</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">XHigh</option></select></label>
+            <label>服务等级<select name="service_tier"><option value="">默认</option><option value="auto">Auto</option><option value="default">Default</option><option value="flex">Flex</option><option value="scale">Scale</option><option value="priority">Priority</option><option value="fast">Fast</option></select></label>
+            <label class="agent-provider-check"><input name="supports_tools" type="checkbox" checked> 支持工具调用</label>
+            <label class="agent-provider-check"><input name="supports_vision" type="checkbox"> 支持图片输入</label>
+            <label class="agent-provider-check"><input name="store_responses" type="checkbox"> 保存 Responses 云端记录</label>
+          </div>
+          <div class="agent-provider-form-actions">
+            <span id="agent-provider-form-status" role="status"></span>
+            <button type="button" class="agent-provider-action" id="agent-provider-edit-cancel" hidden>取消编辑</button>
+            <button type="submit" class="btn primary">添加模型</button>
+          </div>
+        </form>
+      </section>
       <button type="button" id="agent-conversation-backdrop" class="agent-conversation-backdrop"
               tabindex="-1" aria-label="关闭对话列表"></button>
       <aside class="agent-conversations" id="agent-conversation-pane" aria-label="Agent 对话列表">
@@ -345,6 +344,13 @@
         <div id="agent-sessions-empty" class="agent-sessions-empty" hidden>
           <span>还没有对话</span>
           <button type="button" id="agent-empty-new" class="agent-empty-new">新建对话</button>
+        </div>
+        <div class="agent-conversations-footer">
+          <button type="button" class="agent-icon-button agent-provider-settings"
+                  id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型"
+                  aria-controls="agent-provider-popover" aria-expanded="false">
+            {{ icon('settings') }}
+          </button>
         </div>
       </aside>
 
@@ -429,10 +435,6 @@
             </button>
           </div>
           <div class="agent-composer-status-row">
-            <button type="button" class="agent-icon-button agent-provider-settings"
-                    id="agent-provider-settings" title="配置 Agent 模型" aria-label="配置 Agent 模型">
-              {{ icon('settings') }}
-            </button>
             <span id="agent-provider-status" class="agent-provider-status" role="status"
                   aria-live="polite">未连接模型 · 本地快捷模式</span>
           </div>

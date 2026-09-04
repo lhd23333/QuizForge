@@ -4882,7 +4882,7 @@ details.agent-tool-event > summary::marker { color: var(--muted); }
   .agent-toolbar .agent-provider-control .qf-select { width: 100%; }
 }
 
-/* Agent 底部控件栏：工作范围、权限和模型紧跟输入框，设置入口固定在左侧。 */
+/* Agent 底部控件栏：工作范围、权限和模型紧跟输入框。 */
 :root { --agent-conversation-width: 136px; }
 .agent-conversations {
   width: var(--agent-conversation-width);
@@ -5038,7 +5038,7 @@ details.agent-tool-event > summary::marker { color: var(--muted); }
   .prompts-page #prompt-content { min-height: 52vh; max-height: none; }
 }
 
-/* Agent 底部布局收束：输入框后先放工作范围、权限和模型，左下操作行只放附件与设置。 */
+/* Agent 底部布局收束：输入框后先放工作范围、权限和模型。 */
 :root { --agent-conversation-width: 156px; }
 .agent-panel,
 .agent-workspace,
@@ -5433,7 +5433,7 @@ details.agent-tool-event > summary::marker { color: var(--muted); }
   .agent-composer .agent-scope-button.agent-permission-button { max-width: 82px; padding-inline: 4px; }
 }
 
-/* 选题操作列：三枚标签共用同一条右侧轨道，面板从轨道左侧展开。该段保持在
+/* 选题操作列：所有标签共用同一条右侧轨道，面板从轨道左侧展开。该段保持在
    legacy 层之外，确保桌面宿主的高优先级布局不会把操作面板重新拉成整行。 */
 main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
 .bulk-action-stack {
@@ -5473,6 +5473,26 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
   border-right: 0;
   border-radius: 7px 0 0 7px;
 }
+.bulk-action-stack .bulk-action-rail-form {
+  display: flex;
+  width: fit-content;
+  margin: 0;
+  align-self: flex-end;
+}
+.bulk-action-stack .bulk-action-rail-form .bulk-action-rail-button {
+  width: fit-content;
+  min-width: 0;
+}
+.bulk-action-stack .bulk-action-rail-button-danger {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--border-strong));
+  color: var(--danger);
+}
+.bulk-action-stack .bulk-action-rail-button-danger:hover,
+.bulk-action-stack .bulk-action-rail-button-danger:focus-visible {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-2));
+  color: var(--danger);
+}
 .bulk-action-stack .bulk-drawer-trigger {
   flex-direction: column;
   align-items: center;
@@ -5492,12 +5512,15 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
   text-orientation: upright;
   line-height: 1.15;
   white-space: nowrap;
+  min-width: 0;
+  align-self: flex-end;
 }
 .bulk-action-stack .bulk-drawer-trigger[hidden] { display: none !important; }
 
 .bulk-action-panel {
   right: calc(var(--bulk-action-rail-width, 40px) + 8px);
-  width: min(420px, calc(100vw - 64px));
+  width: fit-content;
+  max-width: min(380px, calc(100vw - 64px));
   margin: 0;
   transform: translate(10px, -50%);
   opacity: 0;
@@ -5512,6 +5535,14 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
 .bulk-action-panel .bulk-action-body form {
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
+  width: fit-content;
+  max-width: 100%;
+}
+.bulk-action-panel .bulk-action-body form > :is(.input, select, textarea),
+.bulk-action-panel .bulk-folder-picker,
+.bulk-action-panel .bulk-folder-trigger {
+  width: fit-content;
+  max-width: 100%;
 }
 .bulk-action-panel .bulk-action-body form > .btn {
   width: fit-content;
@@ -5536,7 +5567,7 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
   .bulk-action-stack { --bulk-action-rail-width: 36px; }
   .bulk-action-panel {
     right: calc(var(--bulk-action-rail-width, 36px) + 6px);
-    width: min(420px, calc(100vw - 52px));
+    max-width: calc(100vw - 52px);
   }
 }
 
@@ -5551,8 +5582,7 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
 .agent-scope-mode-control > span { display: inline-flex !important; }
 .agent-scope-mode-control > .agent-mode-icon { display: inline-grid !important; }
 
-/* 最终覆盖：主工具行严格保持“附件、权限、模型、发送”的 Codex 顺序。
-   Provider 设置单独放在输入框左下角，避免挤占模型和发送按钮的命中区。 */
+/* 最终覆盖：主工具行严格保持“附件、权限、模型、发送”的 Codex 顺序。 */
 :root { --agent-conversation-width: 132px; }
 .agent-conversations {
   width: var(--agent-conversation-width) !important;
@@ -5599,5 +5629,86 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
   .agent-conversations {
     width: min(238px, calc(100% - 42px)) !important;
     flex-basis: min(238px, calc(100% - 42px)) !important;
+  }
+}
+
+/* Agent 设置从聊天区左边滑入，覆盖内容而不改变对话区高度。 */
+.agent-conversations-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 42px;
+  padding: 6px 6px calc(6px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+}
+.agent-conversations-footer .agent-provider-settings {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+.agent-conversations-footer .agent-provider-settings:hover:not(:disabled),
+.agent-conversations-footer .agent-provider-settings[aria-expanded="true"] {
+  border-color: var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+}
+.agent-conversations-footer .agent-provider-settings .ui-icon { width: 16px; height: 16px; }
+.agent-composer-status-row {
+  min-height: 0;
+  margin-top: 2px;
+}
+.agent-composer-status-row:has(.agent-provider-status[hidden]) { display: none; }
+
+/* 绝对定位使设置内容覆盖聊天主区；移动端则覆盖整个 Agent 内容区。 */
+.agent-workspace { position: relative; }
+.agent-provider-popover {
+  position: absolute !important;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: calc(var(--agent-conversation-width, 132px) + 6px);
+  z-index: 20 !important;
+  display: flex !important;
+  flex-direction: column;
+  width: auto !important;
+  max-width: none;
+  min-width: 0;
+  margin: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: -12px 0 28px rgba(16, 24, 40, .16);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-102%);
+  transition: transform .18s ease, opacity .18s ease, visibility 0s linear .18s;
+}
+.agent-provider-popover.is-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(0);
+  transition-delay: 0s;
+}
+.agent-provider-popover[hidden] {
+  display: flex !important;
+}
+.agent-provider-popover > * { flex: 0 0 auto; }
+.agent-provider-popover .agent-provider-list { flex: 0 0 auto; max-height: 180px; }
+@media (max-width: 760px) {
+  .agent-provider-popover {
+    left: 0;
+    top: 0;
   }
 }

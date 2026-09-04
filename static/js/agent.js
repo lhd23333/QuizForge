@@ -25,7 +25,7 @@
     busy: false, opening: false, abortController: null, activeTurnId: null,
     dangerGrant: null,
     taskTimers: new Map(), taskCards: new Map(), stagedCards: new Map(), approvalTimer: null,
-    draggingSessionId: null, providerEditingId: null,
+    draggingSessionId: null, providerEditingId: null, providerSettingsTimer: null,
   };
 
   function readSessionOrder() {
@@ -156,6 +156,40 @@
     if (text && $('agent-activity-text')) $('agent-activity-text').textContent = text;
   }
 
+  // 设置抽屉覆盖聊天区，不参与 Agent 工作区的正常排版。
+  function setProviderSettingsOpen(open) {
+    const popover = $('agent-provider-popover');
+    if (!popover) return false;
+    const settings = $('agent-provider-settings');
+    if (state.providerSettingsTimer) {
+      window.clearTimeout(state.providerSettingsTimer);
+      state.providerSettingsTimer = null;
+    }
+    if (open) {
+      settings?.setAttribute('aria-expanded', 'true');
+      popover.hidden = false;
+      popover.dataset.open = 'true';
+      popover.setAttribute('aria-hidden', 'false');
+      const reveal = () => {
+        if (!popover.hidden && popover.dataset.open === 'true') popover.classList.add('is-open');
+      };
+      if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(reveal);
+      else reveal();
+      return true;
+    }
+    settings?.setAttribute('aria-expanded', 'false');
+    popover.classList.remove('is-open');
+    popover.dataset.open = 'false';
+    popover.setAttribute('aria-hidden', 'true');
+    if (!popover.hidden) {
+      state.providerSettingsTimer = window.setTimeout(() => {
+        state.providerSettingsTimer = null;
+        if (!popover.classList.contains('is-open')) popover.hidden = true;
+      }, 180);
+    }
+    return false;
+  }
+
   function setOpen(open) {
     const backdrop = $('agent-backdrop');
     openButton?.setAttribute('aria-expanded', String(Boolean(open)));
@@ -185,6 +219,7 @@
       $('agent-input')?.focus();
       return;
     }
+    setProviderSettingsOpen(false);
     panel.dataset.open = 'false';
     panel.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('agent-open');
@@ -1058,7 +1093,7 @@
   function showProviderSettings() {
     const popover = $('agent-provider-popover');
     if (!popover) return;
-    popover.hidden = false;
+    setProviderSettingsOpen(true);
     loadProviders();
     $('agent-provider-form')?.elements.name?.focus();
   }
@@ -2082,10 +2117,10 @@
   $('agent-provider-settings')?.addEventListener('click', () => {
     const popover = $('agent-provider-popover');
     if (!popover) return;
-    if (popover.hidden) showProviderSettings();
-    else popover.hidden = true;
+    if (popover.hidden || !popover.classList.contains('is-open')) showProviderSettings();
+    else setProviderSettingsOpen(false);
   });
-  $('agent-provider-close')?.addEventListener('click', () => { $('agent-provider-popover').hidden = true; });
+  $('agent-provider-close')?.addEventListener('click', () => setProviderSettingsOpen(false));
   $('agent-provider-preset')?.addEventListener('change', event => {
     applyProviderPreset(event.currentTarget.value);
   });
@@ -2178,8 +2213,8 @@
       closed = true;
     }
     const providerPopover = $('agent-provider-popover');
-    if (providerPopover && !providerPopover.hidden) {
-      providerPopover.hidden = true;
+    if (providerPopover && (!providerPopover.hidden || providerPopover.classList.contains('is-open'))) {
+      setProviderSettingsOpen(false);
       closed = true;
     }
     const workspace = $('agent-workspace');
@@ -2200,7 +2235,9 @@
     }
     if (!event.target.closest('#agent-provider-settings, #agent-provider-popover')) {
       const popover = $('agent-provider-popover');
-      if (popover && !popover.hidden) popover.hidden = true;
+      if (popover && (!popover.hidden || popover.classList.contains('is-open'))) {
+        setProviderSettingsOpen(false);
+      }
     }
   });
   document.addEventListener('keydown', event => {

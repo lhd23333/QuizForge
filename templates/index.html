@@ -559,8 +559,17 @@
        aria-label="已选题目操作">
     <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="edit"
             aria-controls="bulk-edit-section" aria-expanded="false">批量编辑</button>
-    <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="more"
-            aria-controls="bulk-more-section" aria-expanded="false">更多操作</button>
+    <form method="post" action="{{ url_for('clear') }}" id="bulk-clear-form"
+          class="bulk-action-rail-form">
+      <button type="submit" class="bulk-action-rail-button">取消勾选</button>
+    </form>
+    <form method="post" action="{{ url_for('delete_selected') }}" id="bulk-delete-form"
+          class="bulk-action-rail-form"
+          data-confirm="确定删除所有已勾选的题目？题目会进入回收站。">
+      <button type="submit" class="bulk-action-rail-button bulk-action-rail-button-danger">删除勾选</button>
+    </form>
+    <button type="button" class="bulk-action-rail-button" data-bulk-action-trigger="transfer"
+            aria-controls="bulk-transfer-section" aria-expanded="false">题集操作</button>
   </div>
 </div>
 
@@ -576,30 +585,38 @@
   <div class="bulk-selected-list" id="bulk-selected-list" aria-live="polite">
     <p class="bulk-selected-empty">打开后读取已选题目</p>
   </div>
-  <span class="divider"></span>
-
-  <!-- 移动和复制是选题篮最高频动作，始终露出，不收进折叠栏。 -->
-  <form method="post" id="add-coll-form">
-    <input type="hidden" name="cid" value="">
-    <div class="bulk-folder-picker" id="bulk-folder-picker">
-      <button type="button" class="bulk-folder-trigger" id="bulk-folder-trigger"
-              aria-haspopup="tree" aria-controls="bulk-folder-popover"
-              aria-expanded="false">选择目标文件夹…</button>
-      <div class="bulk-folder-popover" id="bulk-folder-popover" hidden>
-        <ul class="bulk-folder-tree" id="bulk-folder-tree" role="tree"
-            aria-label="选择目标文件夹"></ul>
-        <p class="bulk-folder-empty muted" id="bulk-folder-empty" hidden>还没有文件夹</p>
-      </div>
-    </div>
-    <div class="bulk-transfer-actions">
-      <button type="submit" class="btn" id="bulk-folder-submit"
-              name="mode" value="move" disabled>移动到</button>
-      <button type="submit" class="btn" id="bulk-folder-copy"
-              name="mode" value="copy" disabled>复制到</button>
-    </div>
-  </form>
 
 </dialog>
+
+<aside class="bulk-action-panel bulk-action-section" id="bulk-transfer-section" hidden
+       aria-labelledby="bulk-transfer-panel-title">
+  <div class="bulk-action-panel-head">
+    <h2 id="bulk-transfer-panel-title">题集操作</h2>
+    <button type="button" class="icon-btn bulk-action-panel-close" data-bulk-panel-close="transfer"
+            aria-label="关闭题集操作" title="关闭">{{ icon('x') }}</button>
+  </div>
+  <div class="bulk-action-body">
+    <form method="post" id="add-coll-form">
+      <input type="hidden" name="cid" value="">
+      <div class="bulk-folder-picker" id="bulk-folder-picker">
+        <button type="button" class="bulk-folder-trigger" id="bulk-folder-trigger"
+                aria-haspopup="tree" aria-controls="bulk-folder-popover"
+                aria-expanded="false">选择目标题集…</button>
+        <div class="bulk-folder-popover" id="bulk-folder-popover" hidden>
+          <ul class="bulk-folder-tree" id="bulk-folder-tree" role="tree"
+              aria-label="选择目标题集"></ul>
+          <p class="bulk-folder-empty muted" id="bulk-folder-empty" hidden>还没有题集</p>
+        </div>
+      </div>
+      <div class="bulk-transfer-actions">
+        <button type="submit" class="btn" id="bulk-folder-submit"
+                name="mode" value="move" disabled>移动到</button>
+        <button type="submit" class="btn" id="bulk-folder-copy"
+                name="mode" value="copy" disabled>复制到</button>
+      </div>
+    </form>
+  </div>
+</aside>
 
 <aside class="bulk-action-panel bulk-action-section" id="bulk-edit-section" hidden
        aria-labelledby="bulk-edit-panel-title">
@@ -650,28 +667,6 @@
     </div>
   </aside>
 
-<aside class="bulk-action-panel bulk-action-section" id="bulk-more-section" hidden
-       aria-labelledby="bulk-more-panel-title">
-    <div class="bulk-action-panel-head">
-      <h2 id="bulk-more-panel-title">更多操作</h2>
-      <button type="button" class="icon-btn bulk-action-panel-close" data-bulk-panel-close="more"
-              aria-label="关闭更多操作" title="关闭">{{ icon('x') }}</button>
-    </div>
-    <div class="bulk-action-body">
-      <form method="post" id="bulk-remove-collection-form"
-            data-url-template="{{ url_for('collection_remove', cid='__collection__') }}"
-            {% if active_collection %}action="{{ url_for('collection_remove', cid=active_collection) }}"{% else %}hidden{% endif %}>
-        <button type="submit" class="btn">移出本集</button>
-      </form>
-      <form method="post" action="{{ url_for('clear') }}">
-        <button type="submit" class="btn">清空选择</button>
-      </form>
-      <form method="post" action="{{ url_for('delete_selected') }}"
-            data-confirm="确定删除所有已勾选的题目？题目会进入回收站。">
-        <button type="submit" class="btn btn-danger">删除勾选</button>
-      </form>
-    </div>
-</aside>
 {% endblock %}
 
 {% block scripts %}
@@ -706,7 +701,7 @@ if (document.documentElement.classList.contains('desktop-host')) {
   sidebarTabs.forEach(tab => tab.addEventListener('click', () => setSidebarPanel(tab.dataset.sidebarTab)));
 }
 
-// 已选题目默认只露出计数标签；完整题卡与批量操作在覆盖式抽屉中按需读取。
+// 已选题目默认只露出计数标签；完整题卡在覆盖式抽屉中按需读取，批量操作保留在右缘。
 const bulkbar = document.getElementById('bulkbar');
 const bulkCount = document.getElementById('bulk-count');
 const bulkActionStack = document.getElementById('bulk-action-stack');
@@ -716,7 +711,6 @@ const bulkActionRail = document.getElementById('bulk-action-rail');
 const bulkActionButtons = [...(bulkActionRail?.querySelectorAll('[data-bulk-action-trigger]') || [])];
 const bulkDrawerClose = document.getElementById('bulk-drawer-close');
 const bulkSelectedList = document.getElementById('bulk-selected-list');
-const bulkRemoveCollectionForm = document.getElementById('bulk-remove-collection-form');
 let bulkSelectedGeneration = 0;
 let bulkLocateGeneration = 0;
 let bulkPendingLocate = null;
@@ -882,21 +876,6 @@ async function refreshBulkSelectedQuestions() {
   }
 }
 
-function syncBulkCollectionAction(collectionOverride = null) {
-  if (!bulkRemoveCollectionForm) return;
-  const collection = collectionOverride === null
-    ? (listEl?.dataset.collection || '')
-    : String(collectionOverride || '');
-  bulkRemoveCollectionForm.hidden = !collection;
-  if (!collection) {
-    bulkRemoveCollectionForm.removeAttribute('action');
-    return;
-  }
-  const encoded = collection.split('/').map(part => encodeURIComponent(part)).join('/');
-  bulkRemoveCollectionForm.action = bulkRemoveCollectionForm.dataset.urlTemplate
-    .replace('__collection__', encoded);
-}
-
 function cancelPendingBulkLocate() {
   bulkLocateGeneration += 1;
   const pending = bulkPendingLocate;
@@ -983,7 +962,6 @@ function syncBulkbar(count) {
   }
 }
 syncBulkbar(Number(document.getElementById('sel-count').textContent) || 0);
-syncBulkCollectionAction();
 
 bulkDrawerTrigger?.addEventListener('click', openBulkDrawer);
 bulkDrawerClose?.addEventListener('click', () => closeBulkDrawer());
@@ -2185,7 +2163,6 @@ function syncCollectionFileView() {
   const workspace = document.getElementById('question-file-workspace');
   if (workspace && !isFile) workspace.hidden = true;
   if (isFile && workspace && workspace.dataset.qfHasPanel === '1') workspace.hidden = false;
-  syncBulkCollectionAction(isFile ? '' : (active?.id || ''));
 }
 
 function persistCollectionTabs() {
@@ -2256,7 +2233,6 @@ function renderCollectionTabs() {
       collectionTabsHost.scrollLeft = right - collectionTabsHost.clientWidth;
     }
   }
-  syncBulkCollectionAction(activeCollectionTab()?.id || '');
   syncCollectionFileView();
 }
 
@@ -3059,7 +3035,6 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false,
     listEl.dataset.blank = incoming.dataset.blank || '0';
     listEl.dataset.collection = incoming.dataset.collection || '';
     listEl.dataset.collectionName = incoming.dataset.collectionName || '题库根目录';
-    syncBulkCollectionAction();
     const blankPage = listEl.dataset.blank === '1';
     isCustom = listEl.dataset.customSort === '1';
     isQuestionReorderEnabled = listEl.dataset.reorderEnabled === '1';
@@ -3187,10 +3162,10 @@ listEl?.addEventListener('submit', async event => {
 });
 
 // 已选题目的操作统一改为 fetch。操作面板位于 dialog 外，因此委托到 document，
-// 同时覆盖试题篮、批量编辑和更多操作三个入口。
+// 同时覆盖试题篮、批量编辑、题集操作和两个常驻动作。
 document.addEventListener('submit', async event => {
   const form = event.target.closest('form');
-  if (!form || !form.matches('#add-coll-form, #bulk-edit-section form, #bulk-more-section form')) return;
+  if (!form || !form.matches('#add-coll-form, #bulk-edit-section form, #bulk-clear-form, #bulk-delete-form')) return;
   event.preventDefault();
   const promptText = form.dataset.confirm;
   if (promptText && !confirm(promptText)) return;

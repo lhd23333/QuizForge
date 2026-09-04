@@ -26,28 +26,30 @@ function domMarkup() {
       <div id="agent-toolbar">
         <button id="agent-scope-toggle"></button><div id="agent-scope-menu" hidden></div>
         <select id="agent-mode"><option value="standard">标准</option><option value="danger">危险</option></select>
-        <select id="agent-provider"></select><button id="agent-provider-settings"></button>
+        <select id="agent-provider"></select>
         <span id="agent-provider-status"></span>
       </div>
       <div id="agent-danger-banner" hidden><button id="agent-danger-exit"></button></div>
-      <section id="agent-provider-popover" hidden><form id="agent-provider-form">
-        <select id="agent-provider-preset" name="preset"></select>
-        <input name="name"><input name="model"><input name="base_url">
-        <input name="api_key"><input name="max_tokens" value="8192">
-        <input name="supports_tools" type="checkbox" checked>
-        <input name="supports_vision" type="checkbox">
-      </form>
-        <div id="agent-provider-list"></div><button id="agent-provider-close"></button></section>
       <input type="radio" name="agent-scope" value="bank" checked>
       <input type="radio" name="agent-scope" value="chat">
       <div id="agent-workdir-field"><select id="agent-workdir"></select></div>
       <button id="agent-scope-done"></button><button id="agent-workdir-browse"></button>
       <button id="agent-workdir-refresh"></button><input id="agent-directory-picker">
       <div id="agent-workspace">
+        <section id="agent-provider-popover" hidden aria-hidden="true"><form id="agent-provider-form">
+          <select id="agent-provider-preset" name="preset"></select>
+          <input name="name"><input name="model"><input name="base_url">
+          <input name="api_key"><input name="max_tokens" value="8192">
+          <input name="supports_tools" type="checkbox" checked>
+          <input name="supports_vision" type="checkbox">
+        </form>
+          <div id="agent-provider-list"></div><button id="agent-provider-close"></button></section>
         <button id="agent-conversation-backdrop"></button>
         <aside id="agent-conversation-pane"><div id="agent-sessions"></div>
           <div id="agent-sessions-empty" hidden><span></span><button id="agent-empty-new"></button></div>
           <input id="agent-session-search">
+          <div class="agent-conversations-footer"><button id="agent-provider-settings"
+            aria-controls="agent-provider-popover" aria-expanded="false"></button></div>
         </aside>
         <div class="agent-conversation-resizer"></div>
         <section id="agent-chat"><button id="agent-toggle-conversations"></button>
@@ -156,6 +158,38 @@ test('Agent Provider 预设可填充兼容地址、模型和能力参数', async
   assert.equal(form.elements.max_tokens.value, '32768');
   dom.window.QuizForgeAgent.close();
   await flush();
+});
+
+test('Agent 设置按钮位于历史栏底部，设置面板以左侧抽屉覆盖聊天区', async () => {
+  const dom = new JSDOM(domMarkup(), {
+    url: 'http://localhost/', pretendToBeVisual: true, runScripts: 'outside-only',
+  });
+  const session = {id: 'settings-session', scope: 'bank', workdir: '/bank', workdir_id: '',
+    mode: 'standard', provider_id: null, messages: [], created_at: 1, updated_at: 1};
+  dom.window.fetch = async url => {
+    if (url === '/api/agent/sessions') return response({ok: true, sessions: [session]});
+    if (String(url).startsWith('/api/agent/approvals')) return response({ok: true, approvals: []});
+    if (url === '/api/agent/tree') return response({ok: true, folders: []});
+    if (url === '/api/agent/providers') return response({ok: true, providers: [], presets: []});
+    return response({ok: true, session});
+  };
+  dom.window.eval(source);
+  dom.window.QuizForgeAgent.open();
+  await flush(); await flush(); await flush();
+
+  const settings = dom.window.document.getElementById('agent-provider-settings');
+  const popover = dom.window.document.getElementById('agent-provider-popover');
+  assert.ok(settings.closest('.agent-conversations-footer'));
+  settings.click();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(popover.hidden, false);
+  assert.equal(popover.classList.contains('is-open'), true);
+  assert.equal(settings.getAttribute('aria-expanded'), 'true');
+  dom.window.document.getElementById('agent-provider-close').click();
+  assert.equal(settings.getAttribute('aria-expanded'), 'false');
+  await new Promise(resolve => setTimeout(resolve, 220));
+  assert.equal(popover.hidden, true);
+  dom.window.close();
 });
 
 test('Agent SSE 可跨任意 UTF-8 字节边界增量渲染并接收终态', async () => {

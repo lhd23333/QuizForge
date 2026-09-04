@@ -118,8 +118,6 @@ function setupBulkDrawer(fetchImpl, selectedCount = 2) {
       <button type="button" id="bulk-drawer-close">关闭</button>
       <div id="bulk-drawer-feedback"></div>
       <div id="bulk-selected-list"></div>
-      <form id="bulk-remove-collection-form"
-            data-url-template="/collections/__collection__/remove"></form>
     </dialog>
   </body></html>`, {
     url: 'http://localhost/questions?collection=current',
@@ -151,7 +149,6 @@ function setupBulkDrawer(fetchImpl, selectedCount = 2) {
       renderBulkSelectedQuestions,
       setBulkCountDisplay,
       syncBulkbar,
-      syncBulkCollectionAction,
       get locatedRows() { return locatedRows; },
       get folderPopoverCloseCount() { return folderPopoverCloseCount; },
     };
@@ -221,16 +218,6 @@ test('已选题标签按计数显隐，抽屉仅在首次打开时加载并在�
     ['q-1', 'q-1'],
   );
 
-  const removeForm = document.getElementById('bulk-remove-collection-form');
-  assert.equal(removeForm.hidden, true);
-  document.getElementById('q-list').dataset.collection = '数学/代数';
-  dom.window.__bulkDrawerTest.syncBulkCollectionAction();
-  assert.equal(removeForm.hidden, false);
-  assert.equal(
-    removeForm.getAttribute('action'),
-    '/collections/%E6%95%B0%E5%AD%A6/%E4%BB%A3%E6%95%B0/remove',
-  );
-
   dialog.dispatchEvent(new MouseEvent('click', {bubbles: true, clientX: 20, clientY: 100}));
   assert.equal(dialog.open, false, '点击遮罩应关闭抽屉');
   assert.equal(document.body.classList.contains('bulk-drawer-open'), false);
@@ -255,6 +242,14 @@ test('已选题标签按计数显隐，抽屉仅在首次打开时加载并在�
   assert.equal(dialog.open, false, '选题数归零时应自动关闭抽屉');
   assert.equal(document.getElementById('bulk-count').textContent, '0');
   assert.equal(document.querySelectorAll('.bulk-selected-card').length, 0);
+});
+
+test('选题操作栏保留常驻清空/删除，并将题集移动复制收进独立面板', () => {
+  assert.match(indexSource, /id="bulk-clear-form"[\s\S]*?取消勾选/);
+  assert.match(indexSource, /id="bulk-delete-form"[\s\S]*?删除勾选/);
+  assert.match(indexSource, /data-bulk-action-trigger="transfer"[\s\S]*?题集操作/);
+  assert.match(indexSource, /id="bulk-transfer-section"/);
+  assert.doesNotMatch(indexSource, /bulk-more-section|更多操作|移出本集/);
 });
 
 test('已选题详情失败后可重试，较早请求的迟到响应不会覆盖新结果', async () => {
