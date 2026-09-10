@@ -11,12 +11,14 @@
 
   const state = {
     groups: new Map(),
-    groupSerial: 1,
     tabSerial: 0,
     focusedGroupId: 'primary',
     layout: 'single',
-    maxGroups: 4,
+    splitRatio: 50,
+    maxGroups: 2,
+    dragWorkspaceWasHidden: null,
   };
+  const SPLIT_STORE = 'quizforge:question-file-split:v1';
 
   function csrfToken() {
     return document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -67,18 +69,13 @@
     const style = document.createElement('style');
     style.dataset.questionFileWorkspace = '1';
     style.textContent = `
-      .question-file-workspace.qf-group-workspace { grid-template-rows: auto minmax(260px, 1fr); }
-      .qf-workspace-controls { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
-        padding:5px 7px; border-bottom:1px solid var(--border); background:var(--surface-2); }
-      .qf-workspace-controls .qf-layout-label { margin-right:auto; color:var(--muted); font-size:11px; }
-      .qf-workspace-controls button, .qf-group-head button { min-height:27px; padding:3px 8px;
+      .question-file-workspace.qf-group-workspace { grid-template-rows: minmax(260px, 1fr); }
+      .qf-group-head button { min-height:27px; padding:3px 8px;
         border:1px solid var(--border); border-radius:4px; background:transparent; color:var(--text-2); cursor:pointer; }
-      .qf-workspace-controls button:hover, .qf-workspace-controls button.is-active,
       .qf-group-head button:hover { border-color:var(--primary); background:var(--primary-soft); color:var(--primary); }
-      .question-file-groups { display:grid; min-height:0; min-width:0; gap:1px; background:var(--border); }
+      .question-file-groups { position:relative; display:grid; min-height:0; min-width:0; gap:1px; background:var(--border); }
       .question-file-groups.is-single { grid-template-columns:minmax(0,1fr); grid-template-rows:minmax(0,1fr); }
-      .question-file-groups.is-vertical { grid-template-columns:repeat(var(--qf-group-count), minmax(0,1fr)); grid-template-rows:minmax(0,1fr); }
-      .question-file-groups.is-horizontal { grid-template-columns:minmax(0,1fr); grid-template-rows:repeat(var(--qf-group-count), minmax(0,1fr)); }
+      .question-file-groups.is-vertical { grid-template-columns:minmax(160px, var(--qf-split, 50%)) 6px minmax(160px, 1fr); grid-template-rows:minmax(0,1fr); }
       .qf-editor-group { display:grid; grid-template-rows:auto minmax(0,1fr); min-width:0; min-height:0; background:var(--surface); }
       .qf-editor-group.is-focused { box-shadow:inset 0 0 0 1px var(--primary); }
       .qf-group-head { display:flex; align-items:center; gap:6px; min-height:29px; padding:3px 7px;
@@ -86,10 +83,18 @@
       .qf-group-head strong { min-width:0; overflow:hidden; color:var(--muted); font-size:11px; font-weight:600; text-overflow:ellipsis; white-space:nowrap; }
       .qf-group-head .qf-group-spacer { flex:1; }
       .qf-group-head .qf-group-close { width:26px; padding-inline:0; }
+      .qf-group-head .qf-group-close[hidden] { display:none; }
       .qf-group-tabs { min-width:0; }
       .qf-group-tabs { display:none !important; }
       .qf-group-panes { min-height:0; min-width:0; }
       .qf-group-empty { display:grid; place-items:center; height:100%; min-height:100px; color:var(--muted); font-size:12px; }
+      .qf-editor-group.is-drop-target, .qf-group-empty.is-drop-target { outline:2px dashed var(--primary); outline-offset:-3px; background:var(--primary-soft); }
+      .qf-splitter { grid-column:2; cursor:col-resize; background:var(--border); touch-action:none; }
+      .qf-splitter:hover, .qf-splitter.is-dragging { background:var(--primary); }
+      .qf-splitter[hidden] { display:none; }
+      .qf-tab-drop-overlay { position:absolute; z-index:8; inset:0; display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; background:color-mix(in srgb, var(--surface) 42%, transparent); }
+      .qf-tab-drop-zone { border:2px dashed var(--border-strong); background:color-mix(in srgb, var(--surface) 78%, transparent); }
+      .qf-tab-drop-zone.is-drop-target { border-color:var(--primary); background:var(--primary-soft); }
       .question-file-tab { max-width:100%; }
       .question-file-tab-open { min-width:0; }
       .question-file-tab-move { width:24px; min-height:28px; padding:0; border:0; background:transparent; color:var(--muted); cursor:pointer; }
@@ -108,8 +113,7 @@
       .qf-dialog-head h2 { margin:0; font-size:16px; }
       .qf-dialog-head .qf-dialog-close { margin-left:auto; }
       @media (max-width:640px) {
-        .question-file-groups.is-vertical { grid-template-columns:minmax(0,1fr); grid-template-rows:repeat(var(--qf-group-count), minmax(180px,1fr)); }
-        .question-file-groups.is-horizontal { grid-template-rows:repeat(var(--qf-group-count), minmax(180px,1fr)); }
+        .question-file-groups.is-vertical { grid-template-columns:minmax(160px, var(--qf-split, 50%)) 6px minmax(160px, 1fr); }
       }
     `;
     document.head.append(style);
@@ -244,12 +248,10 @@
     title.dataset.qfGroupTitle = id;
     const spacer = document.createElement('span');
     spacer.className = 'qf-group-spacer';
-    const split = makeButton('分栏', 'qf-group-split', '在当前编辑器旁边新建分栏');
-    split.dataset.qfGroupSplit = id;
     const close = makeButton('×', 'qf-group-close', '关闭此编辑器分组');
     close.dataset.qfGroupClose = id;
     close.hidden = id === 'primary';
-    head.append(title, spacer, split, close);
+    head.append(title, spacer, close);
 
     const groupTabsHost = tabsHost || document.createElement('div');
     groupTabsHost.classList.add('question-file-tabs', 'qf-group-tabs');
@@ -279,32 +281,21 @@
   function setupShell() {
     injectWorkspaceStyles();
     const previousChildren = [...workspace.children].filter(child => child !== initialPanesHost);
-    const controls = document.createElement('div');
-    controls.className = 'qf-workspace-controls';
-    const label = document.createElement('span');
-    label.className = 'qf-layout-label';
-    label.textContent = '文件编辑器';
-    controls.append(label);
-    [['single', '单栏'], ['vertical', '左右分栏'], ['horizontal', '上下分栏']]
-      .forEach(([value, text]) => {
-        const button = makeButton(text, 'qf-layout-button', `${text}布局`);
-        button.dataset.qfLayout = value;
-        controls.append(button);
-      });
-    const add = makeButton('＋ 分栏', 'qf-add-group', '新建编辑器分组');
-    add.dataset.qfAddGroup = '1';
-    controls.append(add);
-
+    /* 顶部标签承担页面切换和拖入分栏，工作区本身不再显示固定布局按钮。 */
     const groupsHost = document.createElement('div');
     groupsHost.className = 'question-file-groups is-single';
     groupsHost.dataset.qfGroups = '1';
     workspace.classList.add('qf-group-workspace');
-    workspace.replaceChildren(controls, groupsHost);
+    workspace.replaceChildren(groupsHost);
     const primary = createGroup('primary', null, initialPanesHost);
     groupsHost.append(primary.root);
     previousChildren.forEach(child => primary.root.append(child));
     state.groupsHost = groupsHost;
-    state.controls = controls;
+    try {
+      const stored = sessionStorage.getItem(SPLIT_STORE);
+      const saved = stored === null ? NaN : Number(stored);
+      if (Number.isFinite(saved)) state.splitRatio = Math.max(25, Math.min(75, saved));
+    } catch (_error) { /* sessionStorage 不可用时使用默认比例 */ }
     return primary;
   }
 
@@ -317,13 +308,18 @@
   function renderLayout() {
     const groupsHost = state.groupsHost;
     if (!groupsHost) return;
+    state.layout = state.groups.size > 1 ? 'vertical' : 'single';
     groupsHost.className = `question-file-groups is-${state.layout}`;
-    groupsHost.style.setProperty('--qf-group-count', String(Math.max(1, state.groups.size)));
-    state.controls?.querySelectorAll('[data-qf-layout]').forEach(button => {
-      const active = button.dataset.qfLayout === state.layout;
-      button.classList.toggle('is-active', active);
-      button.setAttribute('aria-pressed', String(active));
-    });
+    groupsHost.style.setProperty('--qf-split', `${state.splitRatio}%`);
+    const secondary = state.groups.get('secondary');
+    if (secondary && secondary.root.parentElement !== groupsHost) groupsHost.append(secondary.root);
+    if (secondary && state.splitter?.parentElement !== groupsHost) {
+      groupsHost.insertBefore(state.splitter, secondary.root);
+    }
+    if (state.splitter) {
+      state.splitter.hidden = !secondary;
+      state.splitter.setAttribute('aria-valuenow', String(Math.round(state.splitRatio)));
+    }
     state.groups.forEach(group => {
       const close = group.root.querySelector('[data-qf-group-close]');
       if (close) close.hidden = group.id === 'primary' || state.groups.size < 2;
@@ -349,6 +345,8 @@
     } else {
       empty?.remove();
     }
+    const activeTab = group.tabs.get(group.activeKey);
+    group.title.textContent = activeTab?.name || (group.id === 'primary' ? '编辑器 1' : '编辑器 2');
     group.root.classList.toggle('is-focused', group.id === state.focusedGroupId);
   }
 
@@ -356,6 +354,66 @@
     state.groups.forEach(renderGroup);
     renderLayout();
     showWorkspace(allTabs().length > 0 || state.groups.size > 1);
+  }
+
+  function persistSplitRatio() {
+    try { sessionStorage.setItem(SPLIT_STORE, String(state.splitRatio)); }
+    catch (_error) { /* sessionStorage 不可用时仅保留当前会话状态 */ }
+  }
+
+  function ensureSplitter() {
+    if (state.splitter) return state.splitter;
+    const splitter = document.createElement('div');
+    splitter.className = 'qf-splitter';
+    splitter.setAttribute('role', 'separator');
+    splitter.setAttribute('aria-label', '调整文件分栏宽度');
+    splitter.setAttribute('aria-orientation', 'vertical');
+    splitter.setAttribute('aria-valuemin', '25');
+    splitter.setAttribute('aria-valuemax', '75');
+    splitter.setAttribute('aria-valuenow', String(Math.round(state.splitRatio)));
+    splitter.tabIndex = 0;
+    let dragging = false;
+    const update = event => {
+      if (!dragging) return;
+      const rect = state.groupsHost.getBoundingClientRect();
+      const raw = ((event.clientX - rect.left) / rect.width) * 100;
+      state.splitRatio = Math.max(25, Math.min(75, raw));
+      state.groupsHost.style.setProperty('--qf-split', `${state.splitRatio}%`);
+      splitter.setAttribute('aria-valuenow', String(Math.round(state.splitRatio)));
+    };
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      splitter.classList.remove('is-dragging');
+      document.documentElement.classList.remove('is-resizing-pane');
+      persistSplitRatio();
+    };
+    splitter.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || state.groups.size < 2) return;
+      dragging = true;
+      splitter.setPointerCapture?.(event.pointerId);
+      splitter.classList.add('is-dragging');
+      document.documentElement.classList.add('is-resizing-pane');
+      event.preventDefault();
+    });
+    splitter.addEventListener('pointermove', update);
+    splitter.addEventListener('pointerup', stop);
+    splitter.addEventListener('pointercancel', stop);
+    // 指针捕获在嵌入页面或旧版浏览器中可能失效，文档级监听确保拖出分界线后仍能更新并收尾。
+    document.addEventListener('pointermove', update);
+    document.addEventListener('pointerup', stop);
+    document.addEventListener('pointercancel', stop);
+    window.addEventListener('blur', stop);
+    splitter.addEventListener('keydown', event => {
+      if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
+      event.preventDefault();
+      state.splitRatio = Math.max(25, Math.min(75,
+        state.splitRatio + (event.key === 'ArrowRight' ? 3 : -3)));
+      renderLayout();
+      persistSplitRatio();
+    });
+    state.splitter = splitter;
+    return splitter;
   }
 
   function findOtherGroup(group) {
@@ -386,7 +444,12 @@
   function removeGroup(group) {
     if (!group || group.id === 'primary' || !state.groups.has(group.id)) return;
     const primary = state.groups.get('primary');
-    [...group.order].forEach(key => migrateTab(group.tabs.get(key), group, primary, false));
+    [...group.order].forEach(key => {
+      const tab = group.tabs.get(key);
+      migrateTab(tab, group, primary, false);
+      // 主栏在持久化数据中用空字符串表示，关闭次栏后同步清理旧分组标记。
+      window.QFCollectionTabs?.setFileGroup?.(tab?.key, 'primary');
+    });
     group.root.remove();
     state.groups.delete(group.id);
     if (state.focusedGroupId === group.id) state.focusedGroupId = 'primary';
@@ -395,23 +458,33 @@
     focusGroup(state.focusedGroupId);
   }
 
+  function collapseEmptySecondary() {
+    const secondary = state.groups.get('secondary');
+    if (secondary && secondary.order.length === 0) removeGroup(secondary);
+  }
+
   function addGroup(sourceGroup = focusedGroup()) {
     if (state.groups.size >= state.maxGroups) {
       showToast(`最多支持 ${state.maxGroups} 个编辑器分组`, true);
       return null;
     }
-    let id;
-    do { id = `group-${++state.groupSerial}`; } while (state.groups.has(id));
-    const group = createGroup(id);
+    const group = createGroup('secondary');
     state.groupsHost.append(group.root);
-    if (state.layout === 'single') state.layout = 'vertical';
+    ensureSplitter();
+    state.layout = 'vertical';
     focusGroup(group.id);
     renderAll();
     return group;
   }
 
+  function ensureGroup(groupId) {
+    const normalized = String(groupId || '').trim();
+    if (normalized !== 'secondary') return state.groups.get('primary');
+    return state.groups.get('secondary') || addGroup(focusedGroup());
+  }
+
   function setLayout(next) {
-    const layout = ['single', 'vertical', 'horizontal'].includes(next) ? next : 'single';
+    const layout = next === 'single' ? 'single' : 'vertical';
     if (layout === 'single' && state.groups.size > 1) {
       const primary = state.groups.get('primary');
       [...state.groups.values()].filter(group => group !== primary)
@@ -611,20 +684,23 @@
     tab.panel?.remove();
     if (group.previewKey === tab.key) group.previewKey = '';
     if (group.activeKey === tab.key) group.activeKey = group.order[index] || group.order[index - 1] || group.order[0] || '';
+    if (!options.keepGroup) collapseEmptySecondary();
     renderAll();
     return true;
   }
 
-  function syncTopDescriptor(descriptor) {
+  function syncTopDescriptor(descriptor, options = {}) {
     if (!descriptor?.key || !descriptor.filePath) return null;
+    const activate = options.activate !== false;
     const path = normalizePath(descriptor.filePath);
     const kind = kindFrom({path, kind: descriptor.fileKind});
     let tab = allTabs().find(item => item.key === descriptor.key);
-    let group = state.groups.get(descriptor.fileGroupId) || focusedGroup()
+    let group = ensureGroup(descriptor.fileGroupId) || focusedGroup()
       || state.groups.get('primary');
     if (!group) return null;
     if (tab && tab.group !== group) {
       migrateTab(tab, groupForTab(tab), group, false);
+      collapseEmptySecondary();
     }
     if (!tab) {
       tab = {
@@ -651,10 +727,12 @@
       tab.group = group;
       tab.groupId = group.id;
     }
-    group.activeKey = tab.key;
+    if (activate) {
+      group.activeKey = tab.key;
+      focusGroup(group.id);
+    }
     if (!tab.pinned) group.previewKey = tab.key;
     else if (group.previewKey === tab.key) group.previewKey = '';
-    focusGroup(group.id);
     renderAll();
     return tab;
   }
@@ -689,7 +767,7 @@
     if (preview && !preview.pinned) {
       // 有未保存内容的临时标签不能静默丢弃，自动固定后再打开下一个文件。
       if (preview.dirty) preview.pinned = true;
-      else removeTab(preview, {force: true});
+      else removeTab(preview, {force: true, keepGroup: true});
     }
     const tab = {
       key: `file-${++state.tabSerial}`,
@@ -721,6 +799,20 @@
     migrateTab(tab, source, destination, true);
     focusGroup(destination.id);
     renderAll();
+  }
+
+  function moveTabToGroup(tabOrKey, groupId) {
+    const tab = typeof tabOrKey === 'string'
+      ? allTabs().find(item => item.key === tabOrKey) : tabOrKey;
+    const source = groupForTab(tab);
+    const destination = ensureGroup(groupId);
+    if (!tab || !source || !destination || source === destination) return false;
+    migrateTab(tab, source, destination, true);
+    window.QFCollectionTabs?.setFileGroup?.(tab.key, destination.id);
+    collapseEmptySecondary();
+    focusGroup(destination.id);
+    renderAll();
+    return true;
   }
 
   function renamePath(oldPath, newPath) {
@@ -1057,6 +1149,17 @@
       renderAll();
     }
   });
+  window.addEventListener('qf:collection-file-group', event => {
+    const descriptor = event.detail?.tab;
+    const tab = allTabs().find(item => item.key === descriptor?.key);
+    const target = ensureGroup(descriptor?.fileGroupId);
+    const source = groupForTab(tab);
+    if (tab && source && target && source !== target) {
+      migrateTab(tab, source, target, true);
+      collapseEmptySecondary();
+      renderAll();
+    }
+  });
   window.addEventListener('qf:collection-file-close', event => {
     const key = event.detail?.tab?.key;
     const tab = allTabs().find(item => item.key === key);
@@ -1067,14 +1170,87 @@
   workspace.addEventListener('click', event => {
     const groupRoot = event.target.closest('[data-qf-group]');
     if (groupRoot) focusGroup(groupRoot.dataset.qfGroup);
-    const add = event.target.closest('[data-qf-add-group]');
-    if (add) { addGroup(focusedGroup()); return; }
-    const layout = event.target.closest('[data-qf-layout]');
-    if (layout) { setLayout(layout.dataset.qfLayout); return; }
-    const split = event.target.closest('[data-qf-group-split]');
-    if (split) { addGroup(state.groups.get(split.dataset.qfGroup)); return; }
     const closeGroupButton = event.target.closest('[data-qf-group-close]');
     if (closeGroupButton) { removeGroup(state.groups.get(closeGroupButton.dataset.qfGroup)); return; }
+  });
+
+  let draggedTopTab = '';
+  function showTabDropOverlay(show, options = {}) {
+    state.dropOverlay?.remove();
+    state.dropOverlay = null;
+    if (!show) {
+      if (options.restore !== false && state.dragWorkspaceWasHidden !== null) {
+        workspace.hidden = state.dragWorkspaceWasHidden;
+      }
+      state.dragWorkspaceWasHidden = null;
+      return;
+    }
+    if (state.dragWorkspaceWasHidden === null) {
+      state.dragWorkspaceWasHidden = workspace.hidden;
+    }
+    // 非活动文件标签也可以拖入工作区；拖拽结束后再恢复原页面。
+    workspace.hidden = false;
+    const overlay = document.createElement('div');
+    overlay.className = 'qf-tab-drop-overlay';
+    ['primary', 'secondary'].forEach(id => {
+      const zone = document.createElement('div');
+      zone.className = 'qf-tab-drop-zone';
+      zone.dataset.qfDropGroup = id;
+      overlay.append(zone);
+    });
+    state.groupsHost.append(overlay);
+    state.dropOverlay = overlay;
+  }
+  workspace.addEventListener('dragover', event => {
+    if (!draggedTopTab) return;
+    const zone = event.target.closest('[data-qf-drop-group]');
+    if (!zone) return;
+    event.preventDefault();
+    workspace.querySelectorAll('.is-drop-target').forEach(node => node.classList.remove('is-drop-target'));
+    zone.classList.add('is-drop-target');
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  });
+  workspace.addEventListener('dragleave', event => {
+    if (!event.relatedTarget || !workspace.contains(event.relatedTarget)) {
+      workspace.querySelectorAll('.is-drop-target').forEach(node => node.classList.remove('is-drop-target'));
+    }
+  });
+  workspace.addEventListener('drop', event => {
+    if (!draggedTopTab) return;
+    const zone = event.target.closest('[data-qf-drop-group]');
+    const targetId = zone?.dataset.qfDropGroup;
+    if (!targetId) return;
+    event.preventDefault();
+    const descriptor = window.QFCollectionTabs?.active?.();
+    const tab = allTabs().find(item => item.key === draggedTopTab);
+    const target = ensureGroup(targetId);
+    const source = groupForTab(tab);
+    const effectiveTarget = target;
+    if (tab && source && effectiveTarget && source !== effectiveTarget) {
+      migrateTab(tab, source, effectiveTarget, true);
+      window.QFCollectionTabs?.setFileGroup?.(tab.key, effectiveTarget.id);
+      window.QFCollectionTabs?.activateFile?.(tab.key);
+      collapseEmptySecondary();
+      renderAll();
+    } else if (descriptor?.key === draggedTopTab && effectiveTarget) {
+      window.QFCollectionTabs?.setFileGroup?.(draggedTopTab, effectiveTarget.id);
+      window.QFCollectionTabs?.activateFile?.(draggedTopTab);
+    }
+    workspace.querySelectorAll('.is-drop-target').forEach(node => node.classList.remove('is-drop-target'));
+    showTabDropOverlay(false, {restore: false});
+    draggedTopTab = '';
+  });
+  window.addEventListener('qf:collection-tab-drag-start', event => {
+    draggedTopTab = event.detail?.file ? String(event.detail.key || '') : '';
+    if (draggedTopTab && event.detail?.tab) {
+      // 刷新后非活动标签尚未建立内容面板；拖动时惰性同步，但不抢走当前活动面板。
+      syncTopDescriptor(event.detail.tab, {activate: false});
+    }
+    showTabDropOverlay(Boolean(draggedTopTab));
+  });
+  window.addEventListener('qf:collection-tab-drag-end', () => {
+    draggedTopTab = '';
+    showTabDropOverlay(false);
   });
 
   document.addEventListener('click', event => {
@@ -1134,6 +1310,7 @@
     closePath,
     addGroup,
     setLayout,
+    moveTabToGroup,
     focusGroup,
   };
   window.QQuestionFileWorkspace = api;

@@ -183,3 +183,68 @@ test('目录重命名时，嵌套文件标签保留自身文件名', () => {
     [['新目录/a.md', 'a.md'], ['新目录/sub/b.pdf', 'b.pdf'], ['其他/c.md', 'c.md']],
   );
 });
+
+test('文件标签分栏只保留主栏和次栏，主栏使用空分组标记', () => {
+  const dom = setupCollectionTabs([
+    {
+      key: 'file-a', view: 'file', id: '', name: 'a.md', url: '#file-a',
+      filePath: 'a.md', fileKind: 'markdown', pinned: true, preview: false,
+      fileDirty: false, fileGroupId: '',
+    },
+  ], 'file-a');
+  const events = [];
+  dom.window.addEventListener('qf:collection-file-group', event => {
+    events.push([event.detail.tab.key, event.detail.tab.fileGroupId]);
+  });
+  const api = dom.window.__collectionTabsTest.api;
+
+  assert.equal(api.setFileGroup('file-a', 'secondary'), true);
+  assert.equal(dom.window.__collectionTabsTest.state().tabs[0].fileGroupId, 'secondary');
+  assert.equal(api.setFileGroup('file-a', 'group-3'), true);
+  assert.equal(dom.window.__collectionTabsTest.state().tabs[0].fileGroupId, '');
+  assert.deepEqual(events, [['file-a', 'secondary'], ['file-a', '']]);
+});
+
+test('拖动标签按目标标签前后插入并持久化当前顺序', () => {
+  const dom = new JSDOM('<!doctype html><html><body></body></html>', {
+    url: 'http://localhost/', runScripts: 'outside-only',
+  });
+  const reorder = extractFunction(indexSource, 'reorderCollectionTab');
+  dom.window.eval(`
+    let collectionTabsState = {tabs: [
+      {key: 'a'}, {key: 'b'}, {key: 'c'},
+    ], active: 'a'};
+    function persistCollectionTabs() {}
+    function renderCollectionTabs() {}
+    ${reorder}
+    window.__reorder = reorderCollectionTab;
+    window.__tabs = () => collectionTabsState.tabs.map(tab => tab.key);
+  `);
+
+  assert.equal(dom.window.__reorder('c', 'a', false), true);
+  assert.deepEqual(Array.from(dom.window.__tabs()), ['c', 'a', 'b']);
+  assert.equal(dom.window.__reorder('c', 'b', true), true);
+  assert.deepEqual(Array.from(dom.window.__tabs()), ['a', 'b', 'c']);
+});
+
+test('主栏打开新文件时，标签插入主栏标签末尾而不是当前次栏之后', () => {
+  const dom = setupCollectionTabs([
+    {
+      key: 'primary-file', view: 'file', id: '', name: '主栏.pdf', url: '#file-primary',
+      filePath: '主栏.pdf', fileKind: 'pdf', pinned: true, preview: false,
+      fileDirty: false, fileGroupId: '',
+    },
+    {
+      key: 'secondary-file', view: 'file', id: '', name: '次栏.pdf', url: '#file-secondary',
+      filePath: '次栏.pdf', fileKind: 'pdf', pinned: true, preview: false,
+      fileDirty: false, fileGroupId: 'secondary',
+    },
+  ], 'secondary-file');
+
+  dom.window.__collectionTabsTest.api.openFile(
+    {path: '新增.pdf', kind: 'pdf'}, {groupId: 'primary'});
+  assert.deepEqual(
+    Array.from(dom.window.__collectionTabsTest.state().tabs, tab => tab.key),
+    ['primary-file', 'new-1', 'secondary-file'],
+  );
+});

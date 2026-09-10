@@ -2067,6 +2067,8 @@ const collectionTabsHost = document.getElementById('collection-tabs');
 let collectionTabRestoreGeneration = 0;
 let collectionTabsState = {tabs: [], active: ''};
 let collectionTabSerial = 0;
+let collectionTabDragKey = '';
+let collectionTabDropKey = '';
 
 function nextCollectionTabKey() {
   collectionTabSerial += 1;
@@ -2183,6 +2185,7 @@ function renderCollectionTabs() {
     const preview = fileTab && !tab.pinned;
     item.className = `collection-tab${active ? ' active' : ''}${fileTab ? ' is-file' : ''}${preview ? ' is-file-preview' : ''}`;
     item.dataset.collectionTabKey = tab.key;
+    item.draggable = true;
     if (fileTab) item.dataset.collectionTabType = 'file';
 
     const switchButton = document.createElement('button');
@@ -2234,6 +2237,26 @@ function renderCollectionTabs() {
     }
   }
   syncCollectionFileView();
+}
+
+function clearCollectionTabDropFeedback() {
+  collectionTabsHost?.querySelectorAll('.is-drop-before, .is-drop-after')
+    .forEach(node => node.classList.remove('is-drop-before', 'is-drop-after'));
+}
+
+function reorderCollectionTab(sourceKey, targetKey, after = false) {
+  if (!sourceKey || !targetKey || sourceKey === targetKey) return false;
+  const sourceIndex = collectionTabsState.tabs.findIndex(tab => tab.key === sourceKey);
+  const targetIndex = collectionTabsState.tabs.findIndex(tab => tab.key === targetKey);
+  if (sourceIndex < 0 || targetIndex < 0) return false;
+  const [tab] = collectionTabsState.tabs.splice(sourceIndex, 1);
+  let insertAt = collectionTabsState.tabs.findIndex(item => item.key === targetKey);
+  if (insertAt < 0) return false;
+  if (after) insertAt += 1;
+  collectionTabsState.tabs.splice(insertAt, 0, tab);
+  persistCollectionTabs();
+  renderCollectionTabs();
+  return true;
 }
 
 function readCollectionTabs() {
@@ -2701,10 +2724,15 @@ function openFileCollectionTab(entry = {}, options = {}) {
   const current = activeCollectionTab();
   // 预览标签属于编辑器分组，而不是整条顶栏。打开文件时优先使用调用方
   // 传入的焦点分组；这样第二个分栏中的单击不会误复用第一组的临时标签。
-  const targetGroupId = String(options.groupId || (
-    isFileCollectionTab(current) ? current.fileGroupId : '') || '').trim();
-  const inTargetGroup = tab => isFileCollectionTab(tab)
-    && (!targetGroupId || String(tab.fileGroupId || '') === targetGroupId);
+  const requestedGroupId = String(options.groupId || (
+    isFileCollectionTab(current) ? current.fileGroupId : 'primary') || '').trim();
+  // 新版界面只会使用 primary/secondary；保留旧分组 ID 的精确匹配，避免
+  // 升级后历史标签互相复用或丢失。
+  const targetGroupId = requestedGroupId === 'primary' ? '' : requestedGroupId;
+  const inTargetGroup = tab => isFileCollectionTab(tab) && (
+    targetGroupId
+      ? String(tab.fileGroupId || '').trim() === targetGroupId
+      : !String(tab.fileGroupId || '').trim() || String(tab.fileGroupId).trim() === 'primary');
   const targetPreview = () => {
     if (targetGroupId) {
       return collectionTabsState.tabs.find(tab => inTargetGroup(tab)
@@ -2713,7 +2741,7 @@ function openFileCollectionTab(entry = {}, options = {}) {
     }
     return isFileCollectionTab(current) ? current : null;
   };
-  let tab = fileTabByPath(path, targetGroupId);
+  let tab = fileTabByPath(path, targetGroupId || 'primary');
   let replaced = null;
   let autoPinned = null;
 
@@ -2721,7 +2749,7 @@ function openFileCollectionTab(entry = {}, options = {}) {
     if (options.pin) tab.pinned = true;
     tab.fileKind = kind;
     tab.name = name;
-    if (targetGroupId && !tab.fileGroupId) tab.fileGroupId = targetGroupId;
+    if (targetGroupId === 'secondary' && !tab.fileGroupId) tab.fileGroupId = targetGroupId;
     tab.preview = !tab.pinned;
     collectionTabsState.active = tab.key;
   } else {
@@ -2754,8 +2782,8 @@ function openFileCollectionTab(entry = {}, options = {}) {
         preview: !options.pin, fileDirty: false,
         fileGroupId: targetGroupId,
       };
-      const anchor = (targetGroupId && [...collectionTabsState.tabs].reverse()
-        .find(row => inTargetGroup(row))) || current;
+      const anchor = [...collectionTabsState.tabs].reverse()
+        .find(row => inTargetGroup(row)) || current;
       const insertAt = anchor ? collectionTabsState.tabs.indexOf(anchor) + 1
         : collectionTabsState.tabs.length;
       collectionTabsState.tabs.splice(Math.max(0, insertAt), 0, tab);
@@ -2795,6 +2823,17 @@ function setFileCollectionTabDirty(tabKey, dirty) {
   const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
   if (!isFileCollectionTab(tab)) return false;
   tab.fileDirty = Boolean(dirty);
+  return true;
+}
+
+function setFileCollectionTabGroup(tabKey, groupId = '') {
+  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
+  if (!isFileCollectionTab(tab)) return false;
+  const normalized = String(groupId || '').trim() === 'secondary' ? 'secondary' : 'primary';
+  tab.fileGroupId = normalized === 'primary' ? '' : normalized;
+  persistCollectionTabs();
+  renderCollectionTabs();
+  emitCollectionFileEvent('qf:collection-file-group', {tab});
   return true;
 }
 
@@ -2844,12 +2883,14 @@ function closeFileCollectionTab(tabKey, options = {}) {
 
 window.QFCollectionTabs = {
   active: activeCollectionTab,
+  all: () => collectionTabsState.tabs.map(tab => ({...tab})),
   isFile: isFileCollectionTab,
   openFile: openFileCollectionTab,
   activateFile: activateFileCollectionTab,
   closeFile: closeFileCollectionTab,
   pinFile: setFileCollectionTabPinned,
   setFileDirty: setFileCollectionTabDirty,
+  setFileGroup: setFileCollectionTabGroup,
   renameFilePath: renameCollectionFilePath,
 };
 
@@ -2878,6 +2919,49 @@ collectionTabsHost?.addEventListener('click', event => {
   const switchButton = event.target.closest('[data-collection-tab]');
   if (!switchButton) return;
   void activateCollectionTab(switchButton.dataset.collectionTab || '');
+});
+collectionTabsHost?.addEventListener('dragstart', event => {
+  const item = event.target.closest('.collection-tab[data-collection-tab-key]');
+  if (!item) return;
+  collectionTabDragKey = item.dataset.collectionTabKey || '';
+  item.classList.add('is-dragging');
+  window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-start', {
+    detail: {
+      key: collectionTabDragKey,
+      file: item.dataset.collectionTabType === 'file',
+      tab: collectionTabsState.tabs.find(tab => tab.key === collectionTabDragKey) || null,
+    },
+  }));
+  event.dataTransfer?.setData('text/plain', collectionTabDragKey);
+  if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+});
+collectionTabsHost?.addEventListener('dragover', event => {
+  const item = event.target.closest('.collection-tab[data-collection-tab-key]');
+  if (!collectionTabDragKey || !item || item.dataset.collectionTabKey === collectionTabDragKey) return;
+  event.preventDefault();
+  clearCollectionTabDropFeedback();
+  const after = event.clientX > item.getBoundingClientRect().left + item.offsetWidth / 2;
+  item.classList.add(after ? 'is-drop-after' : 'is-drop-before');
+  collectionTabDropKey = item.dataset.collectionTabKey;
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+});
+collectionTabsHost?.addEventListener('drop', event => {
+  if (!collectionTabDragKey || !collectionTabDropKey) return;
+  event.preventDefault();
+  const item = event.target.closest('.collection-tab[data-collection-tab-key]');
+  const after = item?.classList.contains('is-drop-after');
+  reorderCollectionTab(collectionTabDragKey, collectionTabDropKey, after);
+  collectionTabDragKey = '';
+  collectionTabDropKey = '';
+  clearCollectionTabDropFeedback();
+  window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
+});
+collectionTabsHost?.addEventListener('dragend', event => {
+  event.target.closest('.collection-tab')?.classList.remove('is-dragging');
+  collectionTabDragKey = '';
+  collectionTabDropKey = '';
+  clearCollectionTabDropFeedback();
+  window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
 });
 window.addEventListener('pagehide', () => saveActiveCollectionTabState(), {capture: true});
 readCollectionTabs();
@@ -4363,7 +4447,55 @@ document.addEventListener('keydown', e => {
 // 「全部题目」是虚拟根：题目不能放进这里，文件夹则可放进这里成为顶级目录。
 const FOLDER_DRAG_MIME = 'application/x-quizforge-folder';
 const FILE_DRAG_MIME = 'application/x-quizforge-file';
-let dragFolderId = null;
+const QUESTION_TAB_DROP_CLASS = 'question-drop-target';
+
+function clearQuestionTabDropTarget() {
+  collectionTabsHost?.querySelectorAll('.' + QUESTION_TAB_DROP_CLASS).forEach(node => node.classList.remove(QUESTION_TAB_DROP_CLASS));
+}
+function questionTabDropTarget(event) {
+  const item = event.target.closest('.collection-tab[data-collection-tab-key]');
+  if (!item || !collectionTabsHost?.contains(item)) return null;
+  const tab = collectionTabsState.tabs.find(row => row.key === item.dataset.collectionTabKey);
+  if (!tab || isFileCollectionTab(tab) || !tab.id) return null;
+  return {item, tab};
+}
+collectionTabsHost?.addEventListener('dragover', event => {
+  if (!dragQuestionId || collectionTabDragKey) return;
+  const target = questionTabDropTarget(event);
+  if (!target) return;
+  event.preventDefault(); event.stopPropagation();
+  clearQuestionTabDropTarget(); target.item.classList.add(QUESTION_TAB_DROP_CLASS);
+  if (event.dataTransfer) event.dataTransfer.dropEffect = event.shiftKey ? 'copy' : 'move';
+});
+collectionTabsHost?.addEventListener('dragleave', event => {
+  if (!dragQuestionId) return;
+  const target = questionTabDropTarget(event);
+  if (!target || (event.relatedTarget && target.item.contains(event.relatedTarget))) return;
+  clearQuestionTabDropTarget();
+});
+collectionTabsHost?.addEventListener('drop', async event => {
+  if (!dragQuestionId || collectionTabDragKey) return;
+  const target = questionTabDropTarget(event);
+  if (!target) return;
+  event.preventDefault(); event.stopPropagation(); clearQuestionTabDropTarget();
+  const session = questionDragSession;
+  if (!session || session.id !== dragQuestionId) return;
+  session.handled = true;
+  const qid = session.id; const mode = event.shiftKey ? 'copy' : 'move';
+  const sourceCollection = listEl?.dataset.collection || ''; const targetCollection = target.tab.id;
+  restoreQuestionOrigin(session); clearQuestionDropAnchor(session);
+  if (!targetCollection || targetCollection === sourceCollection) { flashToast('题目已经在这个题集中'); return; }
+  try {
+    const response = await fetch('/collections/' + encodeURIComponent(targetCollection) + '/add_one', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question_id:qid, mode})});
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.ok === false) throw new Error(data.error || '题目转移失败');
+    const moved = mode === 'move' && Array.isArray(data.moved) && data.moved.includes(qid);
+    const targetIsActive = collectionTabsState.active === target.tab.key;
+    if (moved && !targetIsActive && session.card?.isConnected) { const removedInline = session.card.dataset.inlineCreated === '1' ? 1 : 0; session.card.remove(); syncQuestionCountAfterRemoval(1, removedInline); }
+    else if (targetIsActive) await loadFolderFragment(location.href, false);
+    flashToast(data.message || (mode === 'copy' ? '已复制到' : '已移入') + '「' + target.tab.name + '」');
+  } catch (error) { restoreQuestionOrigin(session); flashToast(error.message || '题目转移失败', 'err'); }
+});let dragFolderId = null;
 let dragFilePath = null;
 let folderDragOverRow = null;
 function clearFolderDragOver() {

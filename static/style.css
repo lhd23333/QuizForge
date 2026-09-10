@@ -1454,6 +1454,11 @@ html.desktop-host .sidebar-filter-panel .tag-cloud { max-height: none; }
   flex: none; display: inline-flex; align-items: center; min-width: 0; height: 35px;
   border-bottom: 2px solid transparent; color: var(--muted);
 }
+.collection-tab[draggable="true"] { cursor: grab; }
+.collection-tab[draggable="true"]:active, .collection-tab.is-dragging { cursor: grabbing; opacity: .72; }
+.collection-tab.is-drop-before { box-shadow: inset 3px 0 0 var(--primary); }
+.collection-tab.is-drop-after { box-shadow: inset -3px 0 0 var(--primary); }
+.collection-tab.question-drop-target { color: var(--text); background: var(--primary-soft); box-shadow: inset 0 -3px 0 var(--primary), inset 0 0 0 1px var(--primary); }
 .collection-tab:hover { color: var(--text); background: var(--surface-2); }
 .collection-tab.active { color: var(--text); border-bottom-color: var(--primary); }
 .collection-tab-switch,
@@ -1745,9 +1750,6 @@ body.bulk-drawer-open {
 .content.qf-file-view #question-file-workspace {
   flex: 1 1 auto; min-height: 0; height: calc(100vh - 58px); margin: 0;
   border: 0; border-radius: 0;
-}
-.content.qf-file-view #question-file-workspace .qf-workspace-controls {
-  flex: none; border-top: 1px solid var(--border);
 }
 .content.qf-file-view #question-file-workspace .question-file-groups {
   min-height: 0; height: 100%;
