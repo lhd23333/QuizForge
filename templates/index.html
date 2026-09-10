@@ -2069,6 +2069,37 @@ let collectionTabsState = {tabs: [], active: ''};
 let collectionTabSerial = 0;
 let collectionTabDragKey = '';
 let collectionTabDropKey = '';
+let collectionSplitState = null;
+function ensureCollectionSplitHost() {
+  const content = document.querySelector('.content'); const tabs = document.getElementById('collection-tabs');
+  if (!content || !tabs) return null;
+  let host = content.querySelector(':scope > .collection-split-host'); if (host) return host;
+  host = document.createElement('div'); host.className = 'collection-split-host';
+  const primary = document.createElement('div'); primary.className = 'collection-split-pane collection-split-primary';
+  [...content.children].filter(node => node !== tabs).forEach(node => primary.appendChild(node));
+  host.appendChild(primary); content.appendChild(host); return host;
+}
+function closeCollectionSplit() {
+  const host = document.querySelector('.content > .collection-split-host');
+  host?.querySelector('.collection-split-secondary')?.remove();
+  document.querySelector('.content')?.classList.remove('is-collection-split'); collectionSplitState = null;
+}
+function openCollectionSplit(tab, side = 'right') {
+  if (!tab || isFileCollectionTab(tab)) return;
+  const host = ensureCollectionSplitHost(); if (!host) return;
+  host.querySelector('.collection-split-secondary')?.remove();
+  const frame = document.createElement('iframe'); frame.className = 'collection-split-pane collection-split-secondary';
+  frame.title = tab.name || '题集分栏'; frame.src = new URL(tab.url, location.href).href; frame.dataset.collectionSplitKey = tab.key;
+  frame.addEventListener('load', () => { try { const doc=frame.contentDocument; doc?.documentElement.classList.add('embedded-view'); const style=doc?.createElement('style'); if(style){style.textContent='.question-sidebar{display:none!important}.content{width:100%!important;margin:0!important}.collection-tabs{display:none!important}'; doc.head.appendChild(style);} } catch (_error) {} });
+  if (side === 'left') host.insertBefore(frame, host.firstChild); else host.appendChild(frame);
+  document.querySelector('.content')?.classList.add('is-collection-split'); collectionSplitState = {key: tab.key, side};
+}
+function showCollectionTabSplitOverlay(show) {
+  const content=document.querySelector('.content'); content?.querySelector('.collection-tab-split-overlay')?.remove();
+  if (!show || !content) return; const overlay=document.createElement('div'); overlay.className='collection-tab-split-overlay';
+  ['left','right'].forEach(side=>{const zone=document.createElement('div'); zone.className='collection-tab-split-zone'; zone.dataset.collectionSplitSide=side; zone.textContent=side==='left'?'??????':'??????'; overlay.appendChild(zone);}); content.appendChild(overlay);
+}
+
 
 function nextCollectionTabKey() {
   collectionTabSerial += 1;
@@ -2933,6 +2964,7 @@ collectionTabsHost?.addEventListener('dragstart', event => {
     },
   }));
   event.dataTransfer?.setData('text/plain', collectionTabDragKey);
+  if (!item.dataset.collectionTabType) showCollectionTabSplitOverlay(true);
   if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
 });
 collectionTabsHost?.addEventListener('dragover', event => {
@@ -2946,7 +2978,10 @@ collectionTabsHost?.addEventListener('dragover', event => {
   if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
 });
 collectionTabsHost?.addEventListener('drop', event => {
-  if (!collectionTabDragKey || !collectionTabDropKey) return;
+  if (!collectionTabDragKey) return;
+  const zone = event.target.closest('[data-collection-split-side]');
+  if (zone) { event.preventDefault(); openCollectionSplit(collectionTabsState.tabs.find(tab => tab.key === collectionTabDragKey), zone.dataset.collectionSplitSide); showCollectionTabSplitOverlay(false); collectionTabDragKey=''; collectionTabDropKey=''; window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end')); return; }
+  if (!collectionTabDropKey) return;
   event.preventDefault();
   const item = event.target.closest('.collection-tab[data-collection-tab-key]');
   const after = item?.classList.contains('is-drop-after');
@@ -2956,11 +2991,20 @@ collectionTabsHost?.addEventListener('drop', event => {
   clearCollectionTabDropFeedback();
   window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
 });
+document.querySelector('.content')?.addEventListener('dragover', event => {
+  if (!collectionTabDragKey || !event.target.closest('[data-collection-split-side]')) return;
+  event.preventDefault(); event.target.closest('[data-collection-split-side]').classList.add('is-drop-target');
+});
+document.querySelector('.content')?.addEventListener('drop', event => {
+  const zone=event.target.closest('[data-collection-split-side]'); if(!collectionTabDragKey || !zone) return;
+  event.preventDefault(); openCollectionSplit(collectionTabsState.tabs.find(tab=>tab.key===collectionTabDragKey), zone.dataset.collectionSplitSide); showCollectionTabSplitOverlay(false); collectionTabDragKey=''; collectionTabDropKey=''; window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
+});
 collectionTabsHost?.addEventListener('dragend', event => {
   event.target.closest('.collection-tab')?.classList.remove('is-dragging');
   collectionTabDragKey = '';
   collectionTabDropKey = '';
   clearCollectionTabDropFeedback();
+  showCollectionTabSplitOverlay(false);
   window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
 });
 window.addEventListener('pagehide', () => saveActiveCollectionTabState(), {capture: true});
