@@ -2457,11 +2457,42 @@ function captureCollectionTabPosition() {
   };
 }
 
+function captureCollectionFilterState() {
+  const form = document.getElementById('filter-form');
+  if (!form) return null;
+  const state = {};
+  form.querySelectorAll('input, select').forEach(control => {
+    if (!control.name) return;
+    if (control.type === 'checkbox') state[control.name] = Boolean(control.checked);
+    else if (control.type !== 'hidden') state[control.name] = control.value;
+  });
+  state.tags = [...form.querySelectorAll('input[name="tag"]:checked')].map(input => input.value);
+  return state;
+}
+
+function applyCollectionFilterState(state) {
+  if (!state) return;
+  const form = document.getElementById('filter-form');
+  if (!form) return;
+  form.querySelectorAll('input[name="tag"]').forEach(input => {
+    input.checked = Array.isArray(state.tags) && state.tags.includes(input.value);
+  });
+  form.querySelectorAll('input, select').forEach(control => {
+    if (!control.name || !(control.name in state)) return;
+    if (control.type === 'checkbox') control.checked = Boolean(state[control.name]);
+    else if (control.type !== 'hidden') control.value = state[control.name];
+  });
+}
+
 function saveActiveCollectionTabState(updateUrl = true) {
   const tab = activeCollectionTab();
   // 保持该小函数可在旧版嵌入测试中独立抽取；文件页签没有题集滚动状态。
   if (!tab || tab.view === 'file') return;
   tab.position = captureCollectionTabPosition();
+  // ??????????????????????????????
+  if (typeof captureCollectionFilterState === 'function') {
+    tab.filterState = captureCollectionFilterState();
+  }
   if (updateUrl && tab.view !== 'file') {
     tab.url = collectionTabUrl(location.href);
   }
@@ -2587,6 +2618,7 @@ async function activateCollectionTab(tabKey, options = {}) {
   persistCollectionTabs();
   renderCollectionTabs();
   const position = tab.position ? {...tab.position} : null;
+  applyCollectionFilterState(tab.filterState);
   const id = collectionIdFromUrl(tab.url);
   if (collectionTabUrl(location.href) !== tab.url
       || (listEl?.dataset.collection || '') !== id) {
@@ -3302,6 +3334,13 @@ async function loadFolderFragment(rawUrl, push = true, refreshTree = false,
     resetQuestionInfiniteScroll();
     if (push) history.pushState({qfFragment: true}, '', url);
     syncCollectionTabAfterLoad(url);
+    const activeTab = activeCollectionTab();
+    if (activeTab && activeTab.view !== 'file'
+        && typeof captureCollectionFilterState === 'function') {
+      activeTab.filterState = captureCollectionFilterState();
+      persistCollectionTabs();
+      applyCollectionFilterState(activeTab.filterState);
+    }
     return true;
   } catch (_error) {
     if (generation !== folderLoadGeneration) return;
