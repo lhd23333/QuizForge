@@ -2106,6 +2106,36 @@ function openCollectionSplit(tab, side = 'right') {
   if (side === 'left') host.insertBefore(frame, host.firstChild); else host.appendChild(frame);
   document.querySelector('.content')?.classList.add('is-collection-split'); collectionSplitState = {key: tab.key, side};
 }
+function focusedCollectionSplitTab() {
+  const key = document.querySelector('.content')?.dataset.focusedCollectionTab || '';
+  const tab = collectionTabsState.tabs.find(row => row.key === key);
+  return tab && collectionSplitState?.key === key ? tab : null;
+}
+async function navigateFocusedSplitTab(rawUrl) {
+  const tab = focusedCollectionSplitTab();
+  if (!tab) return false;
+  const url = collectionTabUrl(rawUrl);
+  tab.url = url;
+  const frame = document.querySelector(`.collection-split-secondary[data-collection-split-key="${CSS.escape(tab.key)}"]`);
+  if (frame) frame.src = new URL(url, location.href).href;
+  persistCollectionTabs();
+  try {
+    const res = await fetch(new URL(url, location.href), {headers: {'X-QF-Fragment': '1'}});
+    const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+    const incomingTree = doc.getElementById('folder-tree');
+    const currentTree = document.getElementById('folder-tree');
+    if (incomingTree && currentTree) currentTree.innerHTML = incomingTree.innerHTML;
+    ['filter-form', 'search-form'].forEach(id => syncHiddenFormContext(id, doc));
+    const incomingSearch = doc.querySelector('#search-form input[name="q"]');
+    const currentSearch = document.querySelector('#search-form input[name="q"]');
+    if (incomingSearch && currentSearch) currentSearch.value = incomingSearch.value;
+    document.querySelectorAll('.folder-item').forEach(item => item.classList.remove('active'));
+    const active = [...document.querySelectorAll('a.folder-link[data-ajax="1"]')].find(link => new URL(link.href, location.href).searchParams.get('collection') === new URL(url, location.href).searchParams.get('collection'));
+    active?.closest('.folder-item')?.classList.add('active');
+  } catch (_error) { /* ??????? URL ?????????????? */ }
+  return true;
+}
+
 function focusCollectionSplitPane(tabKey) {
   const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
   if (!tab) return;
@@ -3253,6 +3283,7 @@ folderTree?.addEventListener('click', event => {
   if (!link) return;
   event.preventDefault();
   const item = link.closest('.folder-item');
+  if (focusedCollectionSplitTab()) { void navigateFocusedSplitTab(link.href); return; }
   void openCollectionTab(link.href, item?.dataset.folderName || link.textContent);
 });
 collectionOverviewHost?.addEventListener('click', event => {
@@ -3312,6 +3343,15 @@ listEl?.addEventListener('submit', async event => {
 
 // 已选题目的操作统一改为 fetch。操作面板位于 dialog 外，因此委托到 document，
 // 同时覆盖试题篮、批量编辑、题集操作和两个常驻动作。
+document.addEventListener('submit', event => {
+  const form = event.target.closest('#search-form, #filter-form');
+  if (!form || !focusedCollectionSplitTab()) return;
+  event.preventDefault();
+  const url = new URL(form.action || location.href, location.href);
+  new FormData(form).forEach((value, key) => { if (value) url.searchParams.set(key, value); else url.searchParams.delete(key); });
+  void navigateFocusedSplitTab(url.toString());
+}, true);
+
 document.addEventListener('submit', async event => {
   const form = event.target.closest('form');
   if (!form || !form.matches('#add-coll-form, #bulk-edit-section form, #bulk-clear-form, #bulk-delete-form')) return;
