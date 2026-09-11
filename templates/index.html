@@ -2077,7 +2077,7 @@ function ensureCollectionSplitHost() {
   host = document.createElement('div'); host.className = 'collection-split-host';
   const primary = document.createElement('div'); primary.className = 'collection-split-pane collection-split-primary';
   [...content.children].filter(node => node !== tabs).forEach(node => primary.appendChild(node));
-  primary.dataset.collectionSplitKey = collectionTabsState.active || ''; host.appendChild(primary); content.appendChild(host); primary.addEventListener('pointerdown', () => focusCollectionSplitPane(collectionTabsState.active)); return host;
+  primary.dataset.collectionSplitKey = collectionTabsState.active || ''; host.appendChild(primary); content.appendChild(host); primary.addEventListener('pointerdown', () => { if (collectionSplitState) void focusCollectionSplitPane(collectionTabsState.active); }); return host;
 }
 function closeCollectionSplit() {
   const host = document.querySelector('.content > .collection-split-host');
@@ -2097,7 +2097,7 @@ function openCollectionSplit(tab, side = 'right') {
       const style = doc?.createElement('style');
       if (style) {
         // ??????????????????????????????????
-        style.textContent = '.app-sidebar,.sidebar,.question-sidebar-resizer,.collection-tabs,.search-bar{display:none!important}.layout{grid-template-columns:minmax(0,1fr)!important}.content{width:100%!important;margin:0!important;padding:10px!important}.toolbar{top:0!important}';
+        style.textContent = '#question-sidebar,#question-layout > .question-sidebar-resizer,.app-sidebar,.sidebar,.question-sidebar-resizer,.collection-tabs,.search-bar{display:none!important}#question-layout{display:block!important;min-height:0!important;height:100%!important}#question-layout > .content{width:100%!important;min-width:0!important;margin:0!important;padding:10px!important}#question-layout > .content > *{max-width:none!important}.toolbar{top:0!important}';
         doc.head.appendChild(style);
       }
       frame.contentDocument?.body.addEventListener('pointerdown', () => focusCollectionSplitPane(tab.key), {capture: true});
@@ -2136,13 +2136,39 @@ async function navigateFocusedSplitTab(rawUrl) {
   return true;
 }
 
-function focusCollectionSplitPane(tabKey) {
-  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
-  if (!tab) return;
-  collectionTabsState.active = tab.key;
-  document.querySelector('.content')?.setAttribute('data-focused-collection-tab', tab.key);
-  renderCollectionTabs();
-  document.querySelectorAll('.collection-split-pane').forEach(node => node.classList.toggle('is-focused', node.dataset.collectionSplitKey === tab.key || node.classList.contains('collection-split-primary') && tab.key === collectionTabsState.active));
+async function focusCollectionSplitPane(tabKey) {
+  const target = collectionTabsState.tabs.find(row => row.key === tabKey);
+  const current = activeCollectionTab();
+  if (!target || isFileCollectionTab(target)) return;
+  // ??????????????????????????? DOM?
+  // ??????????/???????????????
+  if (collectionSplitState?.key === tabKey && current?.key !== tabKey) {
+    saveActiveCollectionTabState();
+    const oldUrl = current?.url || collectionTabUrl(location.href);
+    const oldKey = current?.key || '';
+    collectionTabsState.active = tabKey;
+    collectionSplitState.key = oldKey;
+    const frame = document.querySelector('.collection-split-secondary');
+    if (frame && current) {
+      frame.dataset.collectionSplitKey = oldKey;
+      frame.title = current.name || '????';
+      frame.src = new URL(oldUrl, location.href).href;
+    }
+    persistCollectionTabs();
+    renderCollectionTabs();
+    await loadFolderFragment(target.url, true);
+  } else {
+    collectionTabsState.active = tabKey;
+    document.querySelector('.content')?.setAttribute('data-focused-collection-tab', tabKey);
+    persistCollectionTabs();
+    renderCollectionTabs();
+  }
+  const activeKey = collectionTabsState.active;
+  const primary = document.querySelector('.collection-split-primary');
+  if (primary) primary.dataset.collectionSplitKey = activeKey;
+  document.querySelectorAll('.collection-split-pane').forEach(node => {
+    node.classList.toggle('is-focused', node.dataset.collectionSplitKey === activeKey);
+  });
 }
 
 function showCollectionTabSplitOverlay(show) {
