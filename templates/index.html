@@ -2117,7 +2117,7 @@ function openCollectionSplit(tab, side = 'right') {
       doc?.body.addEventListener('pointerdown', event => {
         event.stopPropagation();
         if (frameKey) void focusCollectionSplitPane(frameKey);
-      }, {capture: true, once: true});
+      }, {capture: true});
     } catch (_error) { /* ????????????????? */ }
   });
   if (side === 'left') host.insertBefore(frame, host.firstChild); else host.appendChild(frame);
