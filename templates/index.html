@@ -2110,7 +2110,14 @@ function openCollectionSplit(tab, side = 'right') {
         style.textContent = '#question-sidebar,#question-layout > .question-sidebar-resizer,.app-sidebar,.sidebar,.question-sidebar-resizer,.collection-tabs,.search-bar{display:none!important}#question-layout{display:block!important;min-height:0!important;height:100%!important}#question-layout > .content{width:100%!important;min-width:0!important;margin:0!important;padding:10px!important}#question-layout > .content > *{max-width:none!important}.toolbar{top:0!important}';
         doc.head.appendChild(style);
       }
-      frame.contentDocument?.body.addEventListener('pointerdown', () => focusCollectionSplitPane(tab.key), {capture: true});
+      // iframe ???????????? frame???????? URL ?????
+      // ?????????? tab ???????????????????????
+      // ???????????????????????????? frame ?????
+      const frameKey = frame.dataset.collectionSplitKey || '';
+      doc?.body.addEventListener('pointerdown', event => {
+        event.stopPropagation();
+        if (frameKey) void focusCollectionSplitPane(frameKey);
+      }, {capture: true, once: true});
     } catch (_error) { /* ????????????????? */ }
   });
   if (side === 'left') host.insertBefore(frame, host.firstChild); else host.appendChild(frame);
