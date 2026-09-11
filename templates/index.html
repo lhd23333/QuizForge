@@ -2070,6 +2070,7 @@ let collectionTabSerial = 0;
 let collectionTabDragKey = '';
 let collectionTabDropKey = '';
 let collectionSplitState = null;
+let collectionFocusGeneration = 0;
 function ensureCollectionSplitHost() {
   const content = document.querySelector('.content'); const tabs = document.getElementById('collection-tabs');
   if (!content || !tabs) return null;
@@ -2140,8 +2141,9 @@ async function focusCollectionSplitPane(tabKey) {
   const target = collectionTabsState.tabs.find(row => row.key === tabKey);
   const current = activeCollectionTab();
   if (!target || isFileCollectionTab(target)) return;
-  // ??????????????????????????? DOM?
-  // ??????????/???????????????
+  const focusGeneration = ++collectionFocusGeneration;
+  const isStillFocused = () => focusGeneration === collectionFocusGeneration
+    && collectionTabsState.active === tabKey;
   if (collectionSplitState?.key === tabKey && current?.key !== tabKey) {
     saveActiveCollectionTabState();
     const oldUrl = current?.url || collectionTabUrl(location.href);
@@ -2156,13 +2158,17 @@ async function focusCollectionSplitPane(tabKey) {
     }
     persistCollectionTabs();
     renderCollectionTabs();
-    await loadFolderFragment(target.url, true);
+    await loadFolderFragment(target.url, true, false, true, isStillFocused);
+    if (!isStillFocused()) return;
+    applyCollectionFilterState(target.filterState);
   } else {
     collectionTabsState.active = tabKey;
     document.querySelector('.content')?.setAttribute('data-focused-collection-tab', tabKey);
     persistCollectionTabs();
     renderCollectionTabs();
+    applyCollectionFilterState(target.filterState);
   }
+  if (!isStillFocused()) return;
   const activeKey = collectionTabsState.active;
   const primary = document.querySelector('.collection-split-primary');
   if (primary) primary.dataset.collectionSplitKey = activeKey;
