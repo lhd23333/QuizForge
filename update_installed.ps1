@@ -23,7 +23,7 @@ $updatePycachePrefix = Join-Path $projectRoot `
     (".quizforge-update-pycache-" + [Guid]::NewGuid().ToString("N"))
 
 if (-not $InstallDir) {
-    $InstallDir = Join-Path $workspaceRoot "QuizForge"
+    $InstallDir = Join-Path $workspaceRoot ("archive\QuizForge" + [char]0x5386 + [char]0x53f2 + "\QuizForge")
 }
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
 $installedExe = Join-Path $InstallDir "QuizForge.exe"
