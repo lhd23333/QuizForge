@@ -2172,9 +2172,18 @@ async function focusCollectionSplitPane(tabKey) {
 }
 
 function showCollectionTabSplitOverlay(show) {
-  const content=document.querySelector('.content'); content?.querySelector('.collection-tab-split-overlay')?.remove();
-  if (!show || !content) return; const overlay=document.createElement('div'); overlay.className='collection-tab-split-overlay';
-  ['left','right'].forEach(side=>{const zone=document.createElement('div'); zone.className='collection-tab-split-zone'; zone.dataset.collectionSplitSide=side; zone.textContent=side==='left'?'??????':'??????'; overlay.appendChild(zone);}); content.appendChild(overlay);
+  document.querySelectorAll('.collection-tab-split-overlay').forEach(node => node.remove());
+  if (!show) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'collection-tab-split-overlay';
+  ['left', 'right'].forEach(side => {
+    const zone = document.createElement('div');
+    zone.className = 'collection-tab-split-zone';
+    zone.dataset.collectionSplitSide = side;
+    zone.textContent = side === 'left' ? '??????' : '??????';
+    overlay.appendChild(zone);
+  });
+  document.body.appendChild(overlay);
 }
 
 
@@ -2453,7 +2462,7 @@ function saveActiveCollectionTabState(updateUrl = true) {
   // 保持该小函数可在旧版嵌入测试中独立抽取；文件页签没有题集滚动状态。
   if (!tab || tab.view === 'file') return;
   tab.position = captureCollectionTabPosition();
-  if (updateUrl && (listEl?.dataset.collection || '') === tab.id) {
+  if (updateUrl && tab.view !== 'file') {
     tab.url = collectionTabUrl(location.href);
   }
   persistCollectionTabs();
@@ -3068,11 +3077,11 @@ collectionTabsHost?.addEventListener('drop', event => {
   clearCollectionTabDropFeedback();
   window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
 });
-document.querySelector('.content')?.addEventListener('dragover', event => {
+document.addEventListener('dragover', event => {
   if (!collectionTabDragKey || !event.target.closest('[data-collection-split-side]')) return;
   event.preventDefault(); event.target.closest('[data-collection-split-side]').classList.add('is-drop-target');
 });
-document.querySelector('.content')?.addEventListener('drop', event => {
+document.addEventListener('drop', event => {
   const zone=event.target.closest('[data-collection-split-side]'); if(!collectionTabDragKey || !zone) return;
   event.preventDefault(); openCollectionSplit(collectionTabsState.tabs.find(tab=>tab.key===collectionTabDragKey), zone.dataset.collectionSplitSide); showCollectionTabSplitOverlay(false); collectionTabDragKey=''; collectionTabDropKey=''; window.dispatchEvent(new CustomEvent('qf:collection-tab-drag-end'));
 });
