@@ -2077,7 +2077,7 @@ function ensureCollectionSplitHost() {
   host = document.createElement('div'); host.className = 'collection-split-host';
   const primary = document.createElement('div'); primary.className = 'collection-split-pane collection-split-primary';
   [...content.children].filter(node => node !== tabs).forEach(node => primary.appendChild(node));
-  host.appendChild(primary); content.appendChild(host); return host;
+  primary.dataset.collectionSplitKey = collectionTabsState.active || ''; host.appendChild(primary); content.appendChild(host); primary.addEventListener('pointerdown', () => focusCollectionSplitPane(collectionTabsState.active)); return host;
 }
 function closeCollectionSplit() {
   const host = document.querySelector('.content > .collection-split-host');
@@ -2090,10 +2090,31 @@ function openCollectionSplit(tab, side = 'right') {
   host.querySelector('.collection-split-secondary')?.remove();
   const frame = document.createElement('iframe'); frame.className = 'collection-split-pane collection-split-secondary';
   frame.title = tab.name || '题集分栏'; frame.src = new URL(tab.url, location.href).href; frame.dataset.collectionSplitKey = tab.key;
-  frame.addEventListener('load', () => { try { const doc=frame.contentDocument; doc?.documentElement.classList.add('embedded-view'); const style=doc?.createElement('style'); if(style){style.textContent='.question-sidebar{display:none!important}.content{width:100%!important;margin:0!important}.collection-tabs{display:none!important}'; doc.head.appendChild(style);} } catch (_error) {} });
+  frame.addEventListener('load', () => {
+    try {
+      const doc = frame.contentDocument;
+      doc?.documentElement.classList.add('embedded-view');
+      const style = doc?.createElement('style');
+      if (style) {
+        // ??????????????????????????????????
+        style.textContent = '.app-sidebar,.sidebar,.question-sidebar-resizer,.collection-tabs,.search-bar{display:none!important}.layout{grid-template-columns:minmax(0,1fr)!important}.content{width:100%!important;margin:0!important;padding:10px!important}.toolbar{top:0!important}';
+        doc.head.appendChild(style);
+      }
+      frame.contentDocument?.body.addEventListener('pointerdown', () => focusCollectionSplitPane(tab.key), {capture: true});
+    } catch (_error) { /* ????????????????? */ }
+  });
   if (side === 'left') host.insertBefore(frame, host.firstChild); else host.appendChild(frame);
   document.querySelector('.content')?.classList.add('is-collection-split'); collectionSplitState = {key: tab.key, side};
 }
+function focusCollectionSplitPane(tabKey) {
+  const tab = collectionTabsState.tabs.find(row => row.key === tabKey);
+  if (!tab) return;
+  collectionTabsState.active = tab.key;
+  document.querySelector('.content')?.setAttribute('data-focused-collection-tab', tab.key);
+  renderCollectionTabs();
+  document.querySelectorAll('.collection-split-pane').forEach(node => node.classList.toggle('is-focused', node.dataset.collectionSplitKey === tab.key || node.classList.contains('collection-split-primary') && tab.key === collectionTabsState.active));
+}
+
 function showCollectionTabSplitOverlay(show) {
   const content=document.querySelector('.content'); content?.querySelector('.collection-tab-split-overlay')?.remove();
   if (!show || !content) return; const overlay=document.createElement('div'); overlay.className='collection-tab-split-overlay';

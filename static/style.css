@@ -5726,3 +5726,5 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
 .collection-tab-split-zone { display: grid; place-items: center; border: 2px dashed color-mix(in srgb, var(--primary) 65%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--primary-soft) 72%, transparent); color: var(--primary); font-weight: 700; font-size: 15px; pointer-events: auto; }
 .collection-tab-split-zone.is-drop-target, .collection-tab-split-zone:hover { background: color-mix(in srgb, var(--primary-soft) 92%, transparent); }
 @media (max-width: 900px) { .collection-split-host { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } }
+
+.collection-split-pane.is-focused { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
