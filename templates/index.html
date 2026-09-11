@@ -2083,10 +2083,19 @@ function ensureCollectionSplitHost() {
 function closeCollectionSplit() {
   const host = document.querySelector('.content > .collection-split-host');
   host?.querySelector('.collection-split-secondary')?.remove();
-  document.querySelector('.content')?.classList.remove('is-collection-split'); collectionSplitState = null;
+  document.querySelector('.content')?.classList.remove('is-collection-split');
+  document.querySelector('.content')?.removeAttribute('data-focused-collection-tab');
+  collectionSplitState = null;
 }
 function openCollectionSplit(tab, side = 'right') {
-  if (!tab || isFileCollectionTab(tab)) return;
+  // ????????????????????????????????????
+  // ????????????????????? iframe ??????????
+  const active = activeCollectionTab();
+  const splitCandidates = collectionTabsState.tabs.filter(row => !isFileCollectionTab(row));
+  if (!tab || isFileCollectionTab(tab) || !active || tab.key === active.key || splitCandidates.length < 2) {
+    if (splitCandidates.length < 2) closeCollectionSplit();
+    return;
+  }
   const host = ensureCollectionSplitHost(); if (!host) return;
   host.querySelector('.collection-split-secondary')?.remove();
   const frame = document.createElement('iframe'); frame.className = 'collection-split-pane collection-split-secondary';
@@ -2660,6 +2669,9 @@ async function closeCollectionTab(tabKey) {
   const wasActive = collectionTabsState.active === tabKey;
   if (wasActive) saveActiveCollectionTabState();
   collectionTabsState.tabs.splice(index, 1);
+  if (collectionTabsState.tabs.filter(row => !isFileCollectionTab(row)).length < 2) {
+    closeCollectionSplit();
+  }
   if (!wasActive) {
     persistCollectionTabs();
     renderCollectionTabs();
