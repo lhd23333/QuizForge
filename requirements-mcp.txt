@@ -1,0 +1,6 @@
+# QuizForge MCP server 专用依赖。
+# 只有 tools/qf_mcp_server.py（把题库能力挂到 pi 等 MCP 客户端）需要它；
+# 刻意与 requirements.txt 分离，桌面安装包不受影响。
+#
+#     .venv\Scripts\python.exe -m pip install -r requirements-mcp.txt
+mcp==2.2.0

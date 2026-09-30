@@ -109,6 +109,16 @@ AGENT_PROVIDER_PRESETS = (
             {"id": "local-model", "label": "当前加载的模型", "max_tokens": 8192},
         ),
     },
+    {
+        "id": "magpie",
+        "label": "Magpie 网关（本机）",
+        "name": "Magpie",
+        "base_url": "http://127.0.0.1:3425/v1",
+        "models": (
+            {"id": "deepseek/deepseek-flash", "label": "DeepSeek Flash（经 magpie）", "max_tokens": 32768},
+            {"id": "qwen/qwen3.8-max", "label": "Qwen3.8 Max（经 magpie）", "max_tokens": 65536},
+        ),
+    },
 )
 
 

@@ -1,0 +1,7 @@
+{
+  "defaultTools": ["codemode", "read", "grep", "ls"],
+  "sessionDir": "sessions",
+  "defaultProvider": "magpie",
+  "defaultModel": "deepseek/deepseek-flash",
+  "enabledModels": ["magpie/**"]
+}

@@ -94,6 +94,28 @@ LLM_PROVIDER_PRESETS = (
             },
         ),
     },
+    {
+        "id": "magpie",
+        "label": "Magpie 网关（本机）",
+        "name": "Magpie",
+        "base_url": "http://127.0.0.1:3425/v1",
+        "models": (
+            {
+                "id": "deepseek/deepseek-flash",
+                "label": "DeepSeek Flash（经 magpie）",
+                "context_label": "由 magpie 路由",
+                "recommended_max_tokens": 32768,
+                "supports_vision": False,
+            },
+            {
+                "id": "qwen/qwen3.8-max",
+                "label": "Qwen3.8 Max（经 magpie）",
+                "context_label": "由 magpie 路由",
+                "recommended_max_tokens": 65536,
+                "supports_vision": False,
+            },
+        ),
+    },
 )
 
 #: 用途 → JSON 里存 active id 的键名。`md` 沿用老键 `active`，这样**已有的

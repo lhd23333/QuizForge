@@ -229,7 +229,6 @@
     const targetPath = routePath(requested);
     const currentPath = routePath(current);
     if (targetPath === '/') return currentPath === '/';
-    if (targetPath === '/handouts') return currentPath.startsWith('/handouts');
     if (targetPath === '/library') return currentPath.startsWith('/library');
     if (targetPath === '/import') {
       return currentPath.startsWith('/import') || currentPath.startsWith('/block-');

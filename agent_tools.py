@@ -8,11 +8,18 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
+import agent_snapshots
+import agent_handouts
+import api_config
+import blocksplit
 import config
 import filestore
+import qualcheck
+import template_pipeline
 import agent_actions
 import dedup
 
@@ -42,6 +49,33 @@ TOOLS = [
     {"name": "import_conversion", "description": "把识别结果导入题库（标准模式需要确认）", "parameters": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}, "folder": {"type": "string"}, "include_solution": {"type": "boolean"}}}},
     {"name": "export_questions", "description": "筛选并导出 PDF、TeX 或 ZIP（默认直接执行；output_dir 为空时输出到当前工作目录）", "parameters": {"type": "object", "properties": {"folder": {"type": "string"}, "output_dir": {"type": "string"}, "query": {"type": "string"}, "ids": {"type": "array", "items": {"type": "string"}}, "format": {"type": "string", "enum": ["pdf", "tex", "zip"]}, "title": {"type": "string"}, "template_id": {"type": "string"}}}},
     {"name": "execute_command", "description": "在当前 Agent 选定的输入目录和题库目录范围内执行 PowerShell、CMD 或 Python 命令。可读写的文件路径必须位于允许目录内；标准模式下每条命令都需要确认，只有当前页面显式武装的危险模式可直接执行。禁止访问目录范围外的路径。", "parameters": {"type": "object", "required": ["command"], "properties": {"command": {"type": "string", "minLength": 1}, "cwd": {"type": "string", "description": "允许目录内的相对路径，默认使用题库联动目录"}, "language": {"type": "string", "enum": ["powershell", "cmd", "python"]}, "timeout": {"type": "integer", "minimum": 1, "maximum": 300}}}},
+    {"name": "filter_questions", "description": "按组合条件筛选题目：题型、难度、标签、来源关键词、星标、关键词搜索；标签支持 and/or 匹配。返回分页的题目摘要列表", "parameters": {"type": "object", "properties": {"folder": {"type": "string"}, "query": {"type": "string"}, "type": {"type": "string"}, "difficulty": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "tag_match": {"type": "string", "enum": ["and", "or"]}, "source": {"type": "string"}, "starred": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "offset": {"type": "integer", "minimum": 0}}}},
+    {"name": "copy_questions", "description": "批量复制题目成新题（标准模式需要确认）；原题保持不变", "parameters": {"type": "object", "required": ["ids"], "properties": {"ids": {"type": "array", "items": {"type": "string"}}, "folder": {"type": "string", "description": "目标目录，默认当前工作目录"}}}},
+    {"name": "bulk_update_questions", "description": "批量修改题目属性：题型、难度、来源、备注（可追加）、星标（标准模式需要确认）", "parameters": {"type": "object", "required": ["ids"], "properties": {"ids": {"type": "array", "items": {"type": "string"}}, "type": {"type": "string"}, "difficulty": {"type": "string"}, "source": {"type": "string"}, "note": {"type": "string"}, "append_note": {"type": "boolean"}, "starred": {"type": "boolean"}}}},
+    {"name": "list_api_configs", "description": "列出全部 API 配置（agent 对话 / 题目处理 LLM / 配图重绘 / OCR），包含用途、协议、传输方式与凭据状态，凭据本身永不返回", "parameters": {"type": "object", "properties": {}}},
+    {"name": "get_api_config", "description": "查看单条 API 配置详情（脱敏）", "parameters": {"type": "object", "required": ["cid"], "properties": {"cid": {"type": "string", "description": "形如 llm:<id> / agent:<id> / mineru:<id> / doc2x:<id>"}}}},
+    {"name": "upsert_api_config", "description": "新增或修改 API 配置（标准模式需要确认）。明文凭据不接受对话传入：本机端点（magpie 等）可直接创建，需要 Key 的端点会提示通过本地安全通道填写", "parameters": {"type": "object", "properties": {"cid": {"type": "string"}, "name": {"type": "string"}, "purpose": {"type": "string", "enum": ["agent", "md", "redraw", "ocr-mineru", "ocr-doc2x"]}, "base_url": {"type": "string"}, "model": {"type": "string"}, "max_tokens": {"type": "integer"}, "supports_vision": {"type": "boolean"}, "wire_api": {"type": "string", "enum": ["chat", "responses"]}}}},
+    {"name": "set_active_api_config", "description": "把某条配置设为某用途的当前生效项（标准模式需要确认）。LLM 用途需要指定 purpose=md/redraw", "parameters": {"type": "object", "required": ["cid"], "properties": {"cid": {"type": "string"}, "purpose": {"type": "string", "enum": ["md", "redraw"]}}}},
+    {"name": "delete_api_config", "description": "删除一条 API 配置（标准模式需要确认）", "parameters": {"type": "object", "required": ["cid"], "properties": {"cid": {"type": "string"}}}},
+    {"name": "test_api_config", "description": "测试一条 API 配置的连通性并返回模型目录摘要", "parameters": {"type": "object", "required": ["cid"], "properties": {"cid": {"type": "string"}}}},
+    {"name": "list_remote_models", "description": "从 OpenAI 兼容端点（如 magpie / Ollama）动态拉取可用模型列表；仅支持无需 Key 的本机端点", "parameters": {"type": "object", "required": ["base_url"], "properties": {"base_url": {"type": "string"}}}},
+    {"name": "probe_magpie", "description": "探测本机 magpie 网关（127.0.0.1:3425）是否可用，并返回其模型目录", "parameters": {"type": "object", "properties": {}}},
+    {"name": "list_snapshots", "description": "列出最近的写操作快照（写前自动保存，可回滚）", "parameters": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
+    {"name": "rollback_snapshot", "description": "把题库文件恢复到某个快照（标准模式需要确认）；回滚前会自动为当前状态创建反向快照", "parameters": {"type": "object", "required": ["snapshot_id"], "properties": {"snapshot_id": {"type": "string"}}}},
+    {"name": "diagnose_markdown", "description": "只读诊断一段 OCR Markdown 的结构：题号连续性、切块预估、疑似粘连/断裂、选项与图片引用缺失，不做任何修改", "parameters": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}, "boundary_mode": {"type": "string", "enum": ["auto", "whitelist"]}, "num_template": {"type": "string"}}}},
+    {"name": "split_preview", "description": "预览切题结果（题号、首行、长度），不落盘、不导入；boundary_mode 支持智能 auto 与白名单 whitelist", "parameters": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}, "boundary_mode": {"type": "string", "enum": ["auto", "whitelist"]}, "num_template": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}}},
+    {"name": "apply_review_fixes", "description": "对识别任务结果应用逐题修正（替换题干/解析、与下一题合并、删除），需确认；已导入的任务不能修改", "parameters": {"type": "object", "required": ["job_id", "fixes"], "properties": {"job_id": {"type": "string"}, "fixes": {"type": "array", "items": {"type": "object", "properties": {"index": {"type": "integer", "minimum": 0}, "body": {"type": "string"}, "solution": {"type": "string"}, "merge_next": {"type": "boolean"}, "delete": {"type": "boolean"}}}}}}},
+    {"name": "list_templates", "description": "列出导出模板（内置与用户模板），含校验状态、是否启用与选中项", "parameters": {"type": "object", "properties": {"include_disabled": {"type": "boolean"}}}},
+    {"name": "validate_template", "description": "校验 TeX 模板：按 template_id 校验已登记模板，或直接校验一段 TeX 源码（不落盘）；返回 schema v2 结果与诊断", "parameters": {"type": "object", "properties": {"template_id": {"type": "string"}, "source": {"type": "string"}, "filename": {"type": "string"}}}},
+    {"name": "preview_template", "description": "用产品固定样例真实编译已登记模板并刷新校验状态；编译较慢，同一时刻只允许一个", "parameters": {"type": "object", "required": ["template_id"], "properties": {"template_id": {"type": "string"}}}},
+    {"name": "enable_template", "description": "启用一个已通过校验的导出模板（需要确认）；启用后导出默认使用该模板", "parameters": {"type": "object", "required": ["template_id"], "properties": {"template_id": {"type": "string"}}}},
+    {"name": "list_handouts", "description": "列出现有讲义（标题、版式、更新时间）", "parameters": {"type": "object", "properties": {}}},
+    {"name": "read_handout", "description": "读取一份讲义的版式与题目块结构", "parameters": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string", "description": "形如 _handouts/xxx.md"}}}},
+    {"name": "create_handout", "description": "把指定题目做成一份新讲义（标准模式需要确认）。用 ids 直接点名，或用 query/type/difficulty/tags 筛选；题目内容以快照存入，后续原题改动不影响讲义", "parameters": {"type": "object", "required": ["title"], "properties": {"title": {"type": "string"}, "ids": {"type": "array", "items": {"type": "string"}}, "query": {"type": "string"}, "type": {"type": "string"}, "difficulty": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "page_format": {"type": "string", "enum": ["a4", "slides"]}, "columns": {"type": "integer", "enum": [1, 2]}, "solution_mode": {"type": "string", "enum": ["hidden", "inline", "appendix"]}, "paper_tone": {"type": "string", "enum": ["white", "cream"]}, "wimath_logo": {"type": "boolean"}, "header_footer": {"type": "object"}}}},
+    {"name": "add_handout_questions", "description": "向已有讲义追加题目（标准模式需要确认）", "parameters": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}, "ids": {"type": "array", "items": {"type": "string"}}, "query": {"type": "string"}, "type": {"type": "string"}, "difficulty": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}, "position": {"type": "string", "enum": ["end", "start"]}}}},
+    {"name": "update_handout_meta", "description": "修改讲义版式：页式、栏数、解析模式、页眉页脚（标准模式需要确认）", "parameters": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}, "page_format": {"type": "string", "enum": ["a4", "slides"]}, "columns": {"type": "integer", "enum": [1, 2]}, "solution_mode": {"type": "string", "enum": ["hidden", "inline", "appendix"]}, "paper_tone": {"type": "string", "enum": ["white", "cream"]}, "wimath_logo": {"type": "boolean"}, "header_footer": {"type": "object"}}}},
+    {"name": "export_handout", "description": "把讲义导出为 PDF / TeX / ZIP（标准模式需要确认）", "parameters": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}, "format": {"type": "string", "enum": ["pdf", "tex", "zip"]}}}},
+    {"name": "delete_handout", "description": "删除整份讲义（标准模式需要确认）；不影响原题与选题篮", "parameters": {"type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}},
 ]
 
 # 需要依赖 Flask 任务表或导出器的动作由 app 在完成初始化后注册；模块本身仍可
@@ -423,6 +457,370 @@ def _check_duplicates(args: dict, *, bound_folder: str) -> dict:
     }
 
 
+#: 需要审批的 API 配置写入工具。执行体不接收明文凭据；需要 Key 的端点
+#: 返回 needs_secret，由 GUI / CLI 的安全输入通道完成凭据录入。
+API_WRITE_TOOLS = {
+    "upsert_api_config", "set_active_api_config", "delete_api_config",
+    "rollback_snapshot",
+}
+
+#: 依赖运行时（任务表 / 模板目录）的动作，由 agent_services 注册；
+#: 标准模式下一律先经审批，再由 execute_approval 统一执行。
+SERVICE_TOOLS = frozenset({
+    "inspect_conversion", "start_conversion", "import_conversion",
+    "export_questions", "apply_review_fixes", "enable_template",
+})
+
+#: 权限档位。GUI 只用 standard / danger；CLI 额外提供只读档。
+PERMISSION_READ_ONLY = "readonly"
+PERMISSION_STANDARD = "standard"
+PERMISSION_FULL = "danger"
+
+#: 名义上只读、实际会改动应用状态的工具（只读档下同样拒绝）。
+_STATEFUL_READ_TOOLS = frozenset({"preview_template"})
+
+
+def permission_mode(session: dict | None) -> str:
+    """归一化会话权限档，未知值一律当标准档，与旧会话兼容。"""
+    value = str((session or {}).get("mode") or PERMISSION_STANDARD).strip().lower()
+    if value == PERMISSION_FULL:
+        return PERMISSION_FULL
+    if value == PERMISSION_READ_ONLY:
+        return PERMISSION_READ_ONLY
+    return PERMISSION_STANDARD
+
+
+def is_write_tool(name: str) -> bool:
+    """该工具是否会产生写入/副作用（用于只读档拦截）。"""
+    if name == "execute_command":
+        return True
+    if name in API_WRITE_TOOLS:
+        return True
+    if name in _STATEFUL_READ_TOOLS:
+        return True
+    if name in SERVICE_TOOLS:
+        return name != "inspect_conversion"
+    if agent_handouts.is_handout_action(name):
+        return True
+    try:
+        return bool(agent_actions.is_write_action(name))
+    except Exception:  # noqa: BLE001 - 未知工具不因此被当成写操作
+        return False
+
+
+#: 诊断 / 预览类只读工具的文本上限，防止把整本 OCR 产物塞进一次调用。
+_MARKDOWN_MAX_CHARS = 400_000
+_TEMPLATE_PREVIEW_LOCK = threading.Lock()
+
+
+def plan_api_action(name: str, args: dict | None = None) -> dict:
+    """校验 API 配置写工具的参数，返回可展示的计划。无副作用。"""
+    args = args if isinstance(args, dict) else {}
+    if name == "upsert_api_config":
+        cid = str(args.get("cid") or "").strip() or None
+        purpose = str(args.get("purpose") or "").strip()
+        base_url = str(args.get("base_url") or "").strip()
+        model = str(args.get("model") or "").strip()
+        label = str(args.get("name") or "").strip()
+        if cid:
+            if ":" not in cid:
+                raise ToolError("cid 形如 llm:<id> / agent:<id>")
+            summary = f"修改 API 配置 {cid}"
+        else:
+            if purpose not in api_config.PURPOSES:
+                raise ToolError(
+                    "新建配置需要 purpose：agent / md / redraw / ocr-mineru / ocr-doc2x")
+            if purpose in api_config.OCR_PURPOSES:
+                summary = f"新增 OCR 凭据条目（{purpose}）"
+            else:
+                if not base_url:
+                    raise ToolError("新建 LLM 配置需要 base_url")
+                summary = f"新增 API 配置“{label or base_url}”（{purpose}）"
+        normalized = {"cid": cid, "name": label, "purpose": purpose,
+                      "base_url": base_url, "model": model}
+        for key in ("max_tokens", "supports_vision", "wire_api"):
+            if args.get(key) is not None:
+                normalized[key] = args.get(key)
+        return {"name": name, "arguments": normalized, "summary": summary,
+                "preview": {k: v for k, v in normalized.items()
+                            if v not in (None, "")}}
+    if name == "set_active_api_config":
+        cid = str(args.get("cid") or "").strip()
+        if not cid:
+            raise ToolError("cid 不能为空")
+        purpose = str(args.get("purpose") or "").strip()
+        return {"name": name, "arguments": {"cid": cid, "purpose": purpose},
+                "summary": f"把 {cid} 设为当前生效配置",
+                "preview": {"cid": cid, "purpose": purpose}}
+    if name == "delete_api_config":
+        cid = str(args.get("cid") or "").strip()
+        if not cid:
+            raise ToolError("cid 不能为空")
+        return {"name": name, "arguments": {"cid": cid},
+                "summary": f"删除 API 配置 {cid}", "preview": {"cid": cid}}
+    if name == "rollback_snapshot":
+        snapshot_id = str(args.get("snapshot_id") or "").strip()
+        if not snapshot_id:
+            raise ToolError("snapshot_id 不能为空")
+        return {"name": name, "arguments": {"snapshot_id": snapshot_id},
+                "summary": f"回滚到快照 {snapshot_id}",
+                "preview": {"snapshot_id": snapshot_id}}
+    raise ToolError(f"未注册的 API 写操作：{name}")
+
+
+def execute_api_action(name: str, args: dict, *,
+                       session: dict | None = None) -> dict:
+    """执行一个已批准的 API 配置写操作（供审批层与危险模式调用）。"""
+    plan = plan_api_action(name, args)
+    values = plan["arguments"]
+    if name == "upsert_api_config":
+        try:
+            result = api_config.upsert_api_config(
+                cid=values.get("cid"), name=values.get("name", ""),
+                purpose=values.get("purpose", ""),
+                base_url=values.get("base_url", ""),
+                model=values.get("model", ""),
+                max_tokens=values.get("max_tokens"),
+                supports_vision=values.get("supports_vision"),
+                wire_api=values.get("wire_api"))
+        except api_config.ApiConfigError as exc:
+            detail = str(exc)
+            if "API Key" in detail or "Token" in detail or "Key" in detail:
+                return {"ok": False, "needs_secret": True, "message": detail,
+                        "next_step": "请在设置页填写凭据（本地安全通道），"
+                                     "或对本机端点直接创建"}
+            raise ToolError(detail) from exc
+        return {"ok": True, "config": result}
+    if name == "set_active_api_config":
+        try:
+            result = api_config.set_active_api_config(
+                values["cid"], purpose=values.get("purpose", ""))
+        except api_config.ApiConfigError as exc:
+            raise ToolError(str(exc)) from exc
+        return {"ok": True, "config": result}
+    if name == "delete_api_config":
+        try:
+            result = api_config.delete_api_config(values["cid"])
+        except api_config.ApiConfigError as exc:
+            raise ToolError(str(exc)) from exc
+        return {"ok": True, "config": result}
+    if name == "rollback_snapshot":
+        try:
+            result = agent_snapshots.rollback_snapshot(
+                values["snapshot_id"],
+                session_id=str((session or {}).get("id") or ""))
+        except agent_snapshots.SnapshotError as exc:
+            raise ToolError(str(exc)) from exc
+        filestore.invalidate_scan_cache()
+        return {"ok": True, "result": result}
+    raise ToolError(f"未注册的 API 写操作：{name}")
+
+
+def _filter_questions(args: dict, *, bound_folder: str) -> dict:
+    """组合条件筛选：全部条件在服务端逐层收敛，避免模型自行全量遍历。"""
+    requested = str(args.get("folder", "") or "").strip()
+    folder = _check_folder(requested if requested else bound_folder)
+    if not _folder_in_scope(folder, bound_folder):
+        raise ToolError("筛选目录必须位于当前 Agent 工作目录内")
+    tags = [str(item).strip() for item in (args.get("tags") or [])
+            if str(item).strip()]
+    try:
+        records = (filestore.collection_records_snapshot(folder)
+                   if folder else filestore.all_records_snapshot())
+        rows = filestore.list_questions(
+            records=records,
+            search=str(args.get("query", "") or ""),
+            tags=tags, match=str(args.get("tag_match") or "and"),
+            qtype=str(args.get("type", "") or ""),
+            difficulty=str(args.get("difficulty", "") or ""),
+            starred=bool(args.get("starred", False)),
+            sort="custom")
+    except Exception as exc:
+        raise ToolError(f"筛选失败：{exc}") from exc
+    source_kw = str(args.get("source", "") or "").strip().lower()
+    if source_kw:
+        rows = [row for row in rows
+                if source_kw in str(row.get("source") or "").lower()]
+    total = len(rows)
+    try:
+        offset = max(0, int(args.get("offset", 0) or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = max(1, min(200, int(args.get("limit", 50) or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+    return {"total": total, "offset": offset, "limit": limit,
+            "questions": [_summary(row) for row in rows[offset:offset + limit]]}
+
+
+def _boundary_mode_arg(raw: object) -> str:
+    """切题边界模式；未知值一律回落到智能识别，与转换链路保持一致。"""
+    value = str(raw or "").strip().lower()
+    return value if value in {"auto", "whitelist"} else "auto"
+
+
+def _catalog_module():
+    """延迟导入 agent_catalog：它是 Blueprint 路由层，顶层导入会把 Flask 带进来。"""
+    import agent_catalog
+    return agent_catalog
+
+
+def _diagnose_markdown(args: dict) -> dict:
+    """只读结构体检：切块预估 + 题号空洞 + 结构风险 + 图片引用缺失。"""
+    text = str(args.get("text") or "")
+    if not text.strip():
+        raise ToolError("markdown 文本不能为空")
+    if len(text) > _MARKDOWN_MAX_CHARS:
+        raise ToolError("文本过长，请分段诊断（单次上限 40 万字符）")
+    boundary = _boundary_mode_arg(args.get("boundary_mode"))
+    num_template = str(args.get("num_template") or "").strip()
+    try:
+        blocks = blocksplit.split_blocks(
+            text, num_template=num_template, boundary_mode=boundary)
+    except blocksplit.TemplateError as exc:
+        raise ToolError(f"题号模板写法不对：{exc}") from exc
+    numbers = [b.number for b in blocks if b.number is not None]
+    try:
+        notes = qualcheck.report(blocks, None, check_numbering=False)
+    except Exception as exc:  # 体检是辅助信息，不能反过来阻断诊断
+        notes = [f"结构体检未完成：{exc}"]
+    refs = re.findall(r"!\[\[([^\]\|]+)", text)
+    unique_refs = list(dict.fromkeys(str(item).strip() for item in refs if str(item).strip()))
+    missing = [name for name in unique_refs
+               if not (config.ASSETS_DIR / name).is_file()]
+    return {
+        "boundary_mode": boundary,
+        "block_count": len(blocks),
+        "numbers": numbers[:200],
+        "number_count": len(numbers),
+        "number_gaps": blocksplit.find_number_gaps(numbers)[:50],
+        "suspicious_notes": notes,
+        "image_refs": {"total": len(refs), "unique": len(unique_refs),
+                       "missing": missing[:50], "missing_count": len(missing)},
+        "first_heads": [b.head(80) for b in blocks[:30]],
+        "hint": "suspicious_notes 非空表示存在粘连/断裂/选项缺失等结构风险，请人工核对对应块。",
+    }
+
+
+def _split_preview(args: dict) -> dict:
+    """只读切题预览：只回题号、首行与长度，不改动内容也不落盘。"""
+    text = str(args.get("text") or "")
+    if not text.strip():
+        raise ToolError("markdown 文本不能为空")
+    if len(text) > _MARKDOWN_MAX_CHARS:
+        raise ToolError("文本过长，请分段落预览（单次上限 40 万字符）")
+    boundary = _boundary_mode_arg(args.get("boundary_mode"))
+    num_template = str(args.get("num_template") or "").strip()
+    try:
+        blocks = blocksplit.split_blocks(
+            text, num_template=num_template, boundary_mode=boundary)
+    except blocksplit.TemplateError as exc:
+        raise ToolError(f"题号模板写法不对：{exc}") from exc
+    try:
+        limit = max(1, min(200, int(args.get("limit", 50) or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+    questions = [{"index": b.index, "number": b.number, "zone": b.zone,
+                  "kind": b.kind, "head": b.head(80), "chars": len(b.text)}
+                 for b in blocks[:limit]]
+    return {"boundary_mode": boundary, "total": len(blocks),
+            "shown": len(questions), "questions": questions}
+
+
+def _list_templates(args: dict) -> dict:
+    catalog = _catalog_module()
+    include_disabled = args.get("include_disabled")
+    include_disabled = True if include_disabled is None else bool(include_disabled)
+    try:
+        rows = catalog.list_templates(include_disabled=include_disabled)
+    except catalog.CatalogError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"total": len(rows), "templates": rows}
+
+
+def _validate_template(args: dict) -> dict:
+    """校验已登记模板或一段 TeX 源码；失败是可预期结果，返回结构化诊断。"""
+    catalog = _catalog_module()
+    template_id = str(args.get("template_id") or "").strip()
+    source = args.get("source")
+    try:
+        if template_id:
+            row = catalog.get_template(template_id)
+            info = template_pipeline.inspect_directory(
+                catalog.template_directory(template_id))
+            return {"template_id": template_id, "name": row.get("name", ""),
+                    "valid": True, "origin": "registered", "info": info}
+        if not isinstance(source, str) or not source.strip():
+            raise ToolError("必须提供 template_id 或 source")
+        if len(source) > 200_000:
+            raise ToolError("TeX 源码过长（单次上限 20 万字符）")
+        filename = str(args.get("filename") or "template.tex").strip() or "template.tex"
+        files = template_pipeline.single_tex_package(filename, source.encode("utf-8"))
+        return {"template_id": None, "name": filename, "valid": True,
+                "origin": "inline", "info": template_pipeline.inspect_files(files)}
+    except (catalog.CatalogError, template_pipeline.TemplatePipelineError) as exc:
+        return {"template_id": template_id or None, "valid": False,
+                "error": str(exc), "details": getattr(exc, "details", None)}
+
+
+def _preview_template(args: dict) -> dict:
+    """真实编译预览：非阻塞锁保证同一时刻只有一个 XeLaTeX 编译。"""
+    template_id = str(args.get("template_id") or "").strip()
+    if not template_id:
+        raise ToolError("必须提供 template_id")
+    catalog = _catalog_module()
+    if not _TEMPLATE_PREVIEW_LOCK.acquire(blocking=False):
+        raise ToolError("已有模板预览正在编译，请稍后重试")
+    try:
+        try:
+            row = catalog.preview_template(template_id)
+        except catalog.CatalogError as exc:
+            raise ToolError(str(exc)) from exc
+    finally:
+        _TEMPLATE_PREVIEW_LOCK.release()
+    return {"template": row}
+
+
+def _list_handouts(args: dict) -> dict:
+    import handouts
+
+    rows = handouts.list_documents()
+    return {"total": len(rows), "handouts": [
+        {"path": row.get("path"), "title": row.get("title"),
+         "page_format": row.get("page_format"), "columns": row.get("columns"),
+         "updated_at": row.get("updated_at"),
+         "warning_count": row.get("warning_count", 0)}
+        for row in rows]}
+
+
+def _read_handout(args: dict) -> dict:
+    import handouts
+
+    path = str(args.get("path") or "").strip()
+    if not path:
+        raise ToolError("必须提供讲义路径")
+    try:
+        document = handouts.read_document(path)
+    except (handouts.HandoutError, OSError, UnicodeError) as exc:
+        raise ToolError(str(exc)) from exc
+    meta = dict(document["metadata"] or {})
+    # question_blocks 是逐题快照的完整副本，字很多；对模型只给计数，避免撑爆上下文。
+    block_meta = meta.pop("question_blocks", {}) or {}
+    blocks, warnings = handouts.parse_content(document["body"], block_meta)
+    questions = [{
+        "block_id": block.get("block_id"),
+        "type": block.get("question_type") or "",
+        "source_id": block.get("source_id") or "",
+        "source": block.get("source") or "",
+        "body": str(block.get("body") or "")[:400],
+        "has_solution": bool(str(block.get("solution") or "").strip()),
+    } for block in blocks if block.get("kind") == "question"]
+    return {"path": document["path"], "metadata": meta,
+            "question_count": len(questions), "questions": questions,
+            "warnings": list(document.get("warnings") or []) + list(warnings)}
+
+
 def _service_call(name: str, args: dict, session: dict) -> dict:
     callback = _services.get(name)
     if callback is None:
@@ -443,6 +841,10 @@ def dispatch(name: str, args: dict | None = None, *, session: dict | None = None
     args = args or {}
     if session and session.get("scope") == "chat":
         raise ToolError("当前会话为仅聊天模式，不能访问题库")
+    # 只读档是硬边界：写操作在生成审批之前就被拒绝，不给模型讨价还价的空间。
+    if permission_mode(session) == PERMISSION_READ_ONLY and is_write_tool(name):
+        raise ToolError(
+            "当前权限档位为只读，写操作已被拒绝；如需执行请用 /permissions 调整。")
     bound_folder = _session_folder(session)
     if name == "list_folders":
         tree = filestore.list_navigation_tree(active_id=bound_folder)
@@ -482,6 +884,51 @@ def dispatch(name: str, args: dict | None = None, *, session: dict | None = None
 
     if name == "check_duplicates":
         return _check_duplicates(args, bound_folder=bound_folder)
+
+    if name == "filter_questions":
+        return _filter_questions(args, bound_folder=bound_folder)
+    if name == "list_api_configs":
+        return _json_value({"configs": api_config.list_api_configs()})
+    if name == "get_api_config":
+        row = api_config.get_api_config(str(args.get("cid") or ""))
+        if row is None:
+            raise ToolError("未找到该 API 配置")
+        return _json_value({"config": row})
+    if name == "test_api_config":
+        try:
+            return _json_value(
+                api_config.test_api_config(str(args.get("cid") or "")))
+        except api_config.ApiConfigError as exc:
+            raise ToolError(str(exc)) from exc
+    if name == "list_remote_models":
+        try:
+            return _json_value(api_config.list_remote_models(
+                str(args.get("base_url") or "")))
+        except api_config.ApiConfigError as exc:
+            raise ToolError(str(exc)) from exc
+    if name == "probe_magpie":
+        return _json_value(api_config.probe_magpie())
+    if name == "list_snapshots":
+        try:
+            limit = max(1, min(200, int(args.get("limit", 30) or 30)))
+        except (TypeError, ValueError):
+            limit = 30
+        return _json_value({"snapshots": agent_snapshots.list_snapshots(limit)})
+
+    if name == "diagnose_markdown":
+        return _json_value(_diagnose_markdown(args))
+    if name == "split_preview":
+        return _json_value(_split_preview(args))
+    if name == "list_templates":
+        return _json_value(_list_templates(args))
+    if name == "validate_template":
+        return _json_value(_validate_template(args))
+    if name == "preview_template":
+        return _json_value(_preview_template(args))
+    if name == "list_handouts":
+        return _json_value(_list_handouts(args))
+    if name == "read_handout":
+        return _json_value(_read_handout(args))
 
     if name == "execute_command":
         plan = _command_plan(args, session or {})
@@ -530,8 +977,46 @@ def dispatch(name: str, args: dict | None = None, *, session: dict | None = None
         except agent_actions.AgentActionError as exc:
             raise ToolError(str(exc)) from exc
 
-    if name in {"inspect_conversion", "start_conversion", "import_conversion",
-                "export_questions"}:
+    if name in API_WRITE_TOOLS:
+        plan = plan_api_action(name, args)
+        if str((session or {}).get("mode") or "standard") == "danger":
+            result = execute_api_action(name, plan["arguments"], session=session or {})
+            return {"ok": True, "executed": True, "result": _json_value(result)}
+        if approval_store is not None:
+            approval = approval_store.create(
+                session, name, plan["summary"], plan["arguments"])
+            return {"ok": True, "pending_confirmation": True,
+                    "approval": approval, "preview": _json_value(plan["preview"]),
+                    "message": "配置写入已生成预览，请确认后执行。"}
+        return {"ok": True, "pending_confirmation": True,
+                "plan": {"action": name, "summary": plan["summary"],
+                         "preview": _json_value(plan["preview"]),
+                         "arguments": _json_value(plan["arguments"])},
+                "message": "配置写入需要确认。"}
+
+    # 讲义是与题库平级的另一类内容（存在 _handouts/ 下），单独一套动作与快照。
+    if agent_handouts.is_handout_action(name):
+        try:
+            plan = agent_handouts.plan_handout_action(name, args, session=session or {})
+            if str((session or {}).get("mode") or "standard") == "danger":
+                result = agent_handouts.execute_handout_action(
+                    plan["name"], plan["arguments"], session=session or {})
+                return {"ok": True, "executed": True, "result": _json_value(result)}
+            if approval_store is not None:
+                approval = approval_store.create(
+                    session, plan["name"], plan["summary"], plan["arguments"])
+                return {"ok": True, "pending_confirmation": True,
+                        "approval": approval, "preview": _json_value(plan["preview"]),
+                        "message": "讲义操作已生成预览，请确认后执行。"}
+            return {"ok": True, "pending_confirmation": True,
+                    "plan": {"action": plan["name"], "summary": plan["summary"],
+                             "preview": _json_value(plan["preview"]),
+                             "arguments": _json_value(plan["arguments"])},
+                    "message": "讲义操作需要确认。"}
+        except agent_handouts.AgentActionError as exc:
+            raise ToolError(str(exc)) from exc
+
+    if name in SERVICE_TOOLS:
         if session and session.get("scope") == "chat":
             raise ToolError("当前会话为仅聊天模式，不能操作题库任务")
         # 客户端即使传入内部审批标记，也必须在这里被剥掉。
@@ -543,3 +1028,5 @@ def dispatch(name: str, args: dict | None = None, *, session: dict | None = None
         return _json_value(result)
 
     raise ToolError(f"未注册的 Agent 工具：{name}")
+
+

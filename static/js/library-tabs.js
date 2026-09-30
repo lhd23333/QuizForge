@@ -29,7 +29,7 @@
   let dragSession = null;
 
   function kindFromPath(path) {
-    if (String(path || '').replace(/\\/g, '/').startsWith('_handouts/')) return 'handout';
+    // 讲义板块已移到 agent；_handouts/ 下的 .md 现在按普通 Markdown 打开。
     const ext = (path.match(/\.[^.\/]+$/) || [''])[0].toLowerCase();
     if (['.md', '.markdown'].includes(ext)) return 'markdown';
     if (ext === '.pdf') return 'pdf';

@@ -5,12 +5,16 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import agent_snapshots
 import config
 import filestore
+
+logger = logging.getLogger(__name__)
 
 
 class AgentActionError(ValueError):
@@ -252,6 +256,41 @@ def plan_action(name: str, args: dict | None, *, session: dict) -> dict:
                 "summary": f"恢复回收站中的题目“{deleted.get('title') or qid}”",
                 "preview": {"id": qid, "original_path": original}}
 
+    if action == "copy_questions":
+        ids = _ids(args.get("ids", args.get("id")), session)
+        folder, _ = _folder(args.get("folder", args.get("target_folder")), session)
+        normalized = {"ids": ids, "folder": folder}
+        return {"name": action, "arguments": normalized,
+                "summary": f"复制 {len(ids)} 道题到“{folder or '题库根目录'}”",
+                "preview": {"ids": ids, "folder": folder}}
+
+    if action in {"bulk_update_questions", "update_question_fields"}:
+        ids = _ids(args.get("ids", args.get("id")), session)
+        fields: dict = {}
+        if args.get("type", args.get("qtype")) is not None:
+            fields["qtype"] = _text(args.get("type", args.get("qtype")), "题型", limit=80)
+        if args.get("difficulty") is not None:
+            fields["difficulty"] = _text(args.get("difficulty"), "难度", limit=20)
+        if args.get("source") is not None:
+            fields["source"] = _text(args.get("source"), "题源", limit=300)
+        if args.get("note") is not None:
+            fields["note"] = _text(args.get("note"), "备注", limit=10000)
+        if args.get("starred") is not None:
+            fields["starred"] = bool(args.get("starred"))
+        if not fields:
+            raise AgentActionError(
+                "批量修改至少需要提供一项属性（type / difficulty / source / note / starred）")
+        append_note = bool(args.get("append_note"))
+        normalized = {"ids": ids, "append_note": append_note, **fields}
+        changed = "、".join(k for k in fields if k != "note")
+        if "note" in fields:
+            changed = (changed + "、备注").strip("、")
+        return {"name": "bulk_update_questions", "arguments": normalized,
+                "summary": f"批量修改 {len(ids)} 道题的属性（{changed}）",
+                "preview": {"ids": ids,
+                            "changes": {k: v for k, v in fields.items() if k != "note"},
+                            "note_chars": len(str(fields.get("note") or ""))}}
+
     # 导入/导出由 app 注册的服务提供额外任务状态和参数校验。
     if action in {"import_conversion", "export_questions"}:
         raise AgentActionError("该任务必须通过 Agent 编排接口提交")
@@ -263,6 +302,15 @@ def execute_action(name: str, args: dict, *, session: dict) -> dict:
     plan = plan_action(name, args, session=session)
     action = plan["name"]
     values = plan["arguments"]
+    # 内容类写操作执行前先做快照，供回滚使用；快照失败不阻断操作本身，
+    # 只记日志（危险模式下的最终兜底仍是题库自身的备份体系）。
+    if action in _SNAPSHOT_ACTIONS:
+        try:
+            agent_snapshots.create_snapshot(
+                _snapshot_paths(values), action=action,
+                session_id=str(session.get("id") or ""))
+        except agent_snapshots.SnapshotError as exc:
+            logger.warning("写操作快照失败（%s）：%s", action, exc)
     try:
         if action == "create_question":
             qids = filestore.create_questions_batch([{
@@ -301,6 +349,19 @@ def execute_action(name: str, args: dict, *, session: dict) -> dict:
         if action == "restore_question":
             filestore.restore_question(values["id"])
             return {"action": action, "restored_id": values["id"]}
+        if action == "copy_questions":
+            created = filestore.copy_to_collection(values["ids"], values["folder"])
+            return {"action": action, "created_ids": created, "count": len(created)}
+        if action == "bulk_update_questions":
+            updated = filestore.update_question_fields_many(
+                values["ids"],
+                qtype=values.get("qtype"),
+                difficulty=values.get("difficulty"),
+                starred=values.get("starred"),
+                source=values.get("source"),
+                note=values.get("note"),
+                append_note=bool(values.get("append_note")))
+            return {"action": action, "updated_ids": updated, "count": len(updated)}
     except (OSError, KeyError, ValueError, TypeError) as exc:
         raise AgentActionError(f"{action} 执行失败：{exc}") from exc
     raise AgentActionError(f"未注册的 Agent 写入操作：{action}")
@@ -311,7 +372,7 @@ def is_write_action(name: str) -> bool:
         "create_question", "update_question", "rename_question",
         "move_questions", "move_question", "create_folder", "create_collection",
         "tag_questions", "add_tags", "delete_questions", "delete_question",
-        "restore_question",
+        "restore_question", "copy_questions", "bulk_update_questions",
     }
 
 
@@ -319,3 +380,31 @@ def normalize_folder(value: object, *, session: dict,
                      must_exist: bool = True) -> tuple[str, Path]:
     """供任务服务复用的公开目录校验入口。"""
     return _folder(value, session, must_exist=must_exist)
+
+
+#: 参与执行前快照的"内容类"写操作。rename / move 是路径操作，回滚它们会在
+#: 旧路径制造副本而非恢复原状，因此不纳入快照；删除与恢复继续由回收站兜底。
+_SNAPSHOT_ACTIONS = {
+    "update_question", "tag_questions", "delete_questions",
+    "bulk_update_questions",
+}
+
+
+def _snapshot_paths(values: dict) -> list[str]:
+    """列出该动作会改动的既有题卡文件（题库内相对路径）。"""
+    ids: list[str] = []
+    single = values.get("id")
+    if isinstance(single, str) and single:
+        ids.append(single)
+    many = values.get("ids")
+    if isinstance(many, (list, tuple)):
+        ids.extend(str(item) for item in many if item)
+    paths = []
+    for qid in dict.fromkeys(ids):
+        row = filestore.get_question(qid)
+        rel = str((row or {}).get("path") or "")
+        if rel:
+            paths.append(rel)
+    return paths
+
+

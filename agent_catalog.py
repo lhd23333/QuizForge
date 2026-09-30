@@ -1322,6 +1322,14 @@ def template_source_path(template_id: str, *, relative: str | None = None,
     return target
 
 
+def template_directory(template_id: str) -> Path:
+    """返回模板包目录；仅供服务端校验使用，不把路径暴露给 HTTP 客户端。"""
+    template_id = _id(template_id)
+    with _lock:
+        _find(_load("templates")["templates"], template_id, kind="templates")
+    return _template_directory(template_id)
+
+
 def update_template(template_id: str, **changes: Any) -> dict[str, Any]:
     allowed = {"name", "description", "fields", "default_params", "version"}
     if set(changes) - allowed:

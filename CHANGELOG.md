@@ -4,7 +4,36 @@
 
 ## [Unreleased]
 
-- ???????????????????????????????????????????????????????????????????
+### 新增
+
+- Agent 新增统一 API 配置层：`list_api_configs / get_api_config / upsert_api_config / set_active_api_config / delete_api_config / test_api_config` 六个工具统一管理 Agent 模型、题目处理 LLM 与 MinerU / Doc2X 凭据；聚合视图永不返回明文凭据，写入走审批，需要 Key 的端点由设置页安全输入框完成。
+- Agent 新增批量工具：`filter_questions`（题型 / 难度 / 标签 / 来源 / 星标 / 关键词组合筛选）、`copy_questions`（批量复制成新题）、`bulk_update_questions`（批量改题型 / 难度 / 来源 / 备注 / 星标）。
+- Agent 内容类写操作（修改 / 标签 / 删除 / 批量改）执行前自动快照，新增 `list_snapshots / rollback_snapshot` 工具；回滚前自动创建反向快照；快照保留 30 天或最近 100 个，随启动清理回收。
+- LLM 配置与 Agent Provider 新增 Magpie 本机网关预设（`http://127.0.0.1:3425/v1`），可直接选用 magpie 目录中的任意模型。
+- 新增终端交互式会话：根目录 `qf.cmd` / `cli.py` 打开即对话，**默认全屏终端界面**（based on `textual`：顶部状态栏显示模型/权限/目录、中部对话滚动区、底部输入框、Markdown 渲染、审批内联弹窗；`Ctrl+Q` 退出、`Ctrl+N` 新会话、`Ctrl+M` 权限循环、`Ctrl+Y` 权限面板、`Ctrl+L` 清屏）；`--plain` 或非交互终端自动回退零依赖行式 REPL。与桌面版共享核心层和 `data/agent_sessions.json`，可互相接续会话；首启检测到本机 magpie 网关时可 `/provider magpie` 一键创建并启用。不做一次性命令模式。
+- 新增权限档位 `/permissions`（`read-only` / `standard` / `full`，`/mode` 为简写，启动参数 `--permissions` 或 `--danger`）：`read-only` 在工具层硬性拒绝一切写操作（含导出落盘、模板预览与 `execute_command`），`standard` 逐次确认，`full` 直接执行；档位仅本次进程内有效，不写回会话文件。审批弹窗的 `always` 等价于切到 `full`。
+- CLI 依赖与桌面依赖分离：`textual` 归入新建的 `requirements-cli.txt`，不出现在 `requirements.txt`，因此桌面安装包体积不受影响；未安装时 CLI 自动回退行式界面。
+- 新增 MCP server（`tools/qf_mcp_server.py`）：把 `agent_tools` 的 38 个工具原样暴露给 MCP 客户端（如 pi），每个工具带 `readOnlyHint` / `destructiveHint` 注解；`integrations/pi/` 提供一键接入 pi 的安装脚本（注册 mcp server、权限门扩展、题库 skill），写操作改由 pi 侧确认，QuizForge 的写前快照与回滚不变。新增可选依赖 `requirements-mcp.txt`（`mcp`），与 `requirements.txt` 分离，不影响桌面安装包。
+- 新增全局命令组 `qf` / `qf-tui` / `qf-mcp`（`tools\install_qf_alias.ps1`）：把仓库目录写入用户环境变量 `QF_ROOT`，并在已在用户 PATH 的目录放纯 ASCII 转发脚本；`qf` 是基于 pi 的 QuizForge 专属 agent（见下条），`qf-tui` 是自研终端界面，`qf-mcp` 是 MCP server。支持 `-Bank` 指定题库根（写入用户级变量，中文路径不受终端代码页影响）、`-Workdir` 指定题库内工作目录。不改 PATH、不写系统级变量，`-Uninstall` 可完全还原。
+- 新增 QuizForge 独立 agent（`qf`，基于 pi 二次开发但**独立安装**）：资源在 `integrations/qf-agent/agent/`，安装到 lib `%LOCALAPPDATA%\QuizForge\agent`，由 `PI_CODING_AGENT_DIR` 指向它，因此与通用 pi（`~/.pi/agent`）**不共用**任何东西——mcp.json、扩展、skill、提示词、会话历史、模型配置全部独立。内含：`.SYSTEM.md` **完整替换**系统提示（身份为 QuizForge，不再自称其它产品）、`settings.json`（禁用 `bash`/`edit`/`write`，题库写入只能走 QuizForge 工具）、品牌扩展 `qf-brand.ts`（QF 标志 header、终端标题与工作 spinner、状态栏；`/qf:status`、`/qf:brand`、`/qf:plain`）、权限门 `qf-permissions.ts`、题库 skill 与 5 个专属命令（`/qf-overview`、`/qf-doctor`、`/qf-check`、`/qf-batch-edit`、`/qf-export`）。`integrations/qf-agent/install.ps1` 负责安装/卸载、生成自包含 mcp.json、导入初始模型配置并清理旧的全局安装。权限档 `QF_PERMISSION`：`standard` / `full` / `read-only`，非交互模式默认拒绝写操作。
+- 新增 Agent 讲义能力（`agent_handouts.py` + 7 个工具）：`list_handouts` / `read_handout` /
+  `create_handout`（**按题目 id 或筛选条件直接生成讲义**，可选 A4 单栏・双栏・16:9、
+  解析 hidden/inline/appendix、页眉页脚）/ `add_handout_questions` / `update_handout_meta` /
+  `export_handout`（PDF/TeX/ZIP）/ `delete_handout`。走同一套审批与写前快照；
+  改/删讲义前自动快照，`rollback_snapshot` 可回滚（`_handouts` 已纳入快照范围）。
+- 桌面版移除讲义板块：导航项与 `/handouts` 页面入口已删，`_handouts/*.md` 在资料库里
+  按普通 Markdown 打开；讲师制作全部改由 agent 完成。作为导出模式的“组卷按讲义版式导出”不受影响。
+- 新增对话内 `/api` 与 `/api:list` 命令（`qf-api.ts`）：列出 Agent 对话 / 题目识别 LLM /
+  配图重绘 / OCR 五类 API 配置（脱敏，含生效项与凭据状态），选中一条可直接做连通性测试；
+  复用 MCP 工具 `list_api_configs` / `test_api_config`，不重写业务逻辑。
+  需要明文 Key/Token 的新增与修改仍只能在桌面版设置页完成。
+- 新增 `qf-bank` 命令：从桌面版登记（`desktop.json`）列出题库并一键切换（自动带上 `QUIZFORGE_SUBJECT` 与共享图片目录），写入独立 agent 的 `mcp.json`，下次 `qf` 即生效。
+- 新增对话内 `/bank` 命令（`qf-bank.ts`）：列出题库并用上下键选择、回车确认，与 `qf-bank` 写同一份 `mcp.json`；切换后当前会话执行 `/mcp reconnect quizforge` 生效。
+- `qf` / `qf-tui` / `qf-mcp` / `qf-bank` 四个命令均由 `tools\install_qf_alias.ps1` 安装到用户 PATH。
+- Agent 新增批次 2 工具——导入域：`diagnose_markdown`（OCR Markdown 结构诊断）、`split_preview`（切题预览）、`apply_review_fixes`（识别结果逐题修正，需确认）；模板域：`list_templates` / `validate_template` / `preview_template`（真实编译预览限流）/ `enable_template`（启用模板需确认）。
+- Agent 任务服务（识别 / 导入 / 导出）与审批执行核心迁出 `app.py`，收进共享模块 `agent_services.py`，桌面版与 CLI 共用同一套原子领取执行逻辑；该模块零 Flask 依赖。
+
+- 桌面模式支持全局导航栏和题集栏独立折叠与恢复，状态持久化且不影响已保存的分栏宽度；同时修复分栏脚本在无分隔条页面上的早退和折叠宽度判断。
 
 ### 修复
 

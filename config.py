@@ -86,6 +86,9 @@ AGENT_SESSIONS_PATH = DATA_DIR / "agent_sessions.json"
 AGENT_SKILLS_DIR = DATA_DIR / "agent_skills"
 AGENT_TEMPLATES_DIR = DATA_DIR / "agent_templates"
 
+# Agent 写操作快照（回滚保障）。属于运行态数据，由启动清理按保留策略删除。
+AGENT_SNAPSHOTS_DIR = DATA_DIR / "agent_snapshots"
+
 # MinerU API Token（OCR）：同样只存 Fernet 密文，与 LLM 的 API Key 用同一把
 # ENC_KEY_PATH。单独一个文件而不是塞进 providers.json —— MinerU 只有一份 token、
 # 没有「多套切换」的概念，混进那份列表结构里会让 providers.py 的 active 语义变形。
@@ -341,3 +344,4 @@ def question_type_label(qtype: str) -> str:
 
 # 难度选项：1-5（1 最易，5 最难）；空表示未设
 DIFFICULTIES = ["1", "2", "3", "4", "5"]
+

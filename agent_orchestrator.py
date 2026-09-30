@@ -31,7 +31,7 @@ class AgentTurnCancelled(AgentTurnError):
 
 SYSTEM_PROMPT = """你是 QuizForge 题库助手。你只能通过提供的 QuizForge 工具工作；只有提供 execute_command 工具时才能请求执行 PowerShell、CMD 或 Python，不能绕过工具直接访问系统，也不能访问当前题库之外的路径。
 你可以只读浏览题库题卡、资料库文件、回收站、图片附件、讲义和识别历史；读取二进制附件时只报告文件元数据，不要假装看到了图片内容。
-先完整理解用户的复合目标，再选择最少的只读工具并形成计划。上传试卷后只能先暂存，缺少识别后端、导入方式、规范化方式、目标题库目录、筛选条件或导出格式/模板时，必须明确询问并展示选项，绝不自动启动 OCR、调用 LLM 或导出。机械规范化不调用 LLM；只有用户明确选择 LLM 规范化时才使用模型。写入、删除、移动和入库需要说明变更和影响并等待确认，导出可按权限直接执行。当前会话若标记为仅聊天，不要调用题库工具。
+先完整理解用户的复合目标，再选择最少的只读工具并形成计划。上传试卷后只能先暂存，缺少识别后端、导入方式、规范化方式、目标题库目录、筛选条件或导出格式/模板时，必须明确询问并展示选项，绝不自动启动 OCR、调用 LLM 或导出。机械规范化不调用 LLM；只有用户明确选择 LLM 规范化时才使用模型。写入、删除、移动和入库需要说明变更和影响并等待确认，导出可按权限直接执行。修改 API 配置时绝不能要求用户把 API Key/Token 发到对话里——需要凭据时引导用户到设置页的安全输入框填写；本机端点（如 magpie）可直接创建。面对混乱的 OCR Markdown，先用 diagnose_markdown / split_preview 只读诊断结构与切题效果，再决定切题方式；校对识别结果可用 apply_review_fixes（需确认）。导出模板先用 list_templates / validate_template / preview_template 检查，enable_template 需要确认。当前会话若标记为仅聊天，不要调用题库工具。
 回答使用简体中文，引用题目时给出题目 id 和所在目录；不要编造题库中不存在的内容。"""
 
 
@@ -732,3 +732,4 @@ def test_provider(provider: agent_provider.AgentProviderConfig) -> str:
     if not choices:
         raise AgentTurnError("连接测试没有返回内容")
     return str(_message_value(choices[0].message, "content", "") or "").strip() or "连接成功"
+

@@ -1,0 +1,6 @@
+# 终端全屏界面（qf.cmd / cli.py / cli_tui.py）专用依赖。
+# 刻意与 requirements.txt 分离：桌面安装包不打包 CLI 依赖。
+# 未安装时 CLI 自动回退到零依赖的行式 REPL（qf.cmd --plain 亦可显式选择）。
+#
+#     .venv\Scripts\python.exe -m pip install -r requirements-cli.txt
+textual==8.2.8

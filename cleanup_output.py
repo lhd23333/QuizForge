@@ -6,6 +6,7 @@ import logging
 import time
 from pathlib import Path
 
+import agent_snapshots
 import config
 import task_store
 
@@ -126,7 +127,7 @@ def run_cleanup(now: float | None = None) -> dict[str, int]:
     active = _active_uploads()
     active_cleanup_dirs = _active_cleanup_dirs()
     counts = {"tasks": len(removed_tasks), "uploads": 0,
-              "outputs": 0, "workspaces": 0}
+              "outputs": 0, "workspaces": 0, "snapshots": 0}
 
     # 过期任务携带的上传件可立即删；同一路径仍被未过期任务引用时必须保留。
     for payload in removed_tasks:
@@ -202,6 +203,14 @@ def run_cleanup(now: float | None = None) -> dict[str, int]:
             if expired:
                 counts["outputs"] += int(_unlink(path))
         _remove_empty_dirs(config.OUTPUT_DIR)
+
+    # Agent 写操作快照按保留策略（30 天 / 最近 100 个）回收；这是运行态
+    # 保障数据，不属于用户数据保护范围。
+    try:
+        counts["snapshots"] = agent_snapshots.cleanup_expired(current)
+    except Exception:
+        logger.exception("Agent 快照清理失败")
+        counts["snapshots"] = 0
 
     if any(counts.values()):
         logger.info("启动清理完成：%s", counts)

@@ -139,7 +139,6 @@
       </a>
       <div class="nav-group">
       <a href="{{ url_for('index') }}" title="题库" class="nav-link{% if endpoint == 'index' %} active{% endif %}">{{ icon('book-open') }}<span>题库</span></a>
-      <a href="{{ url_for('handouts_page') }}" title="讲义" class="nav-link{% if endpoint.startswith('handouts') %} active{% endif %}">{{ icon('notebook') }}<span>讲义</span></a>
       <a href="{{ url_for('import_md') }}" title="批量导入" class="nav-link{% if endpoint.startswith('import') or endpoint.startswith('block_') %} active{% endif %}">{{ icon('upload') }}<span>批量导入</span></a>
       {# 转换任务：batch_id 只在内存里，离开看板页就找不回来了，得有个总入口 #}
       <a href="{{ url_for('batches_overview') }}" title="转换任务" class="nav-link{% if 'batch' in endpoint %} active{% endif %}">{{ icon('clock') }}<span>转换任务</span>{% if nav_batch_count %}
@@ -162,6 +161,7 @@
       <button type="button" class="nav-link nav-action" data-help-open title="帮助">{{ icon('help') }}<span>帮助</span></button>
       <a href="{{ url_for('about_page') }}" title="关于" class="nav-link nav-link-utility{% if endpoint in ['about_page', 'welcome_page'] %} active{% endif %}">{{ icon('info') }}<span>关于</span></a>
     </nav>
+    <button type="button" class="sidebar-collapse-button" id="app-sidebar-collapse" data-sidebar-collapse="app-sidebar-collapsed" aria-label="收起总任务栏" aria-expanded="true" title="收起总任务栏">‹</button>
     <div class="split-resizer app-nav-resizer" role="separator" tabindex="0"
          aria-label="调整导航栏宽度" aria-orientation="vertical"
          title="拖动调整宽度，双击恢复"

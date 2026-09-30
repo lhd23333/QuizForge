@@ -32,8 +32,17 @@ dist/
 !.env.example
 !vendor/project_alpha/.env.example
 
-# IDE / 系统
-.vscode/
+# 本地试卷迁移实验数据：体积大（单个 6–9 MB）且含真实题面，只在本地使用
+tools/exam-math-*.json
+
+# 本地调试截图（工作区分栏联调产物）
+/workspace-*.png
+/local-dir-split.png
+
+# 内部交接文档：含本机路径与项目内部流程，不进入公开仓库
+docs/HANDOFF_*.md
+
+# IDE / 系统.vscode/
 .idea/
 .DS_Store
 Thumbs.db
