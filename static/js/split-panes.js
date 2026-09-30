@@ -2,8 +2,43 @@
 (function () {
   'use strict';
 
+  const root = document.documentElement;
+  const collapseButtons = [...document.querySelectorAll('[data-sidebar-collapse]')];
+  const collapseStoragePrefix = 'quizforge.sidebar.';
+
+  function syncCollapseButton(button, collapsed) {
+    const isQuestionSidebar = button.dataset.sidebarCollapse === 'question-sidebar-collapsed';
+    const name = isQuestionSidebar ? '题集栏' : '总任务栏';
+    button.setAttribute('aria-expanded', String(!collapsed));
+    button.setAttribute('aria-label', `${collapsed ? '展开' : '收起'}${name}`);
+    button.title = `${collapsed ? '展开' : '收起'}${name}`;
+    button.textContent = collapsed ? '›' : '‹';
+  }
+
+  function setCollapsed(button, collapsed, persist = true) {
+    const className = button.dataset.sidebarCollapse;
+    if (!className) return;
+    root.classList.toggle(className, collapsed);
+    syncCollapseButton(button, collapsed);
+    if (persist) {
+      try {
+        localStorage.setItem(collapseStoragePrefix + className, collapsed ? '1' : '0');
+      } catch (_) { /* 禁用本地存储时仅保持当前会话状态。 */ }
+    }
+  }
+
+  collapseButtons.forEach(button => {
+    const className = button.dataset.sidebarCollapse;
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(collapseStoragePrefix + className) === '1'; } catch (_) { /* 使用默认展开状态。 */ }
+    setCollapsed(button, collapsed, false);
+    button.addEventListener('click', () => {
+      setCollapsed(button, !root.classList.contains(className));
+      window.dispatchEvent(new Event('resize'));
+    });
+  });
+
   const handles = [...document.querySelectorAll('[data-split-resizer]')];
-  if (!handles.length) return;
   const states = new Map();
   const storagePrefix = 'quizforge.split.';
 
@@ -35,8 +70,12 @@
   }
 
   function visible(state) {
+    const handleRect = state.handle.getBoundingClientRect();
+    const panelRect = state.panel.getBoundingClientRect();
     return state.handle.getClientRects().length > 0
-      && state.panel.getClientRects().length > 0;
+      && state.panel.getClientRects().length > 0
+      && handleRect.width > 0
+      && panelRect.width > 0;
   }
 
   function availableMax(state) {

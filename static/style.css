@@ -5730,10 +5730,10 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
 .collection-split-pane.is-focused { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
 
 /* Obsidian 风格两级侧栏折叠：保留窄边缘按钮，避免折叠后找不到恢复入口。 */
-html.desktop-host.app-sidebar-collapsed { --app-nav-width: 0px; }
+html.desktop-host.app-sidebar-collapsed { --app-nav-width: 0px !important; }
 html.desktop-host.app-sidebar-collapsed .app-sidebar { width: 0; padding: 0; border-right: 0; overflow: visible; }
 html.desktop-host.app-sidebar-collapsed .app-sidebar > nav, html.desktop-host.app-sidebar-collapsed .app-nav-resizer { display: none; }
-html.desktop-host.question-sidebar-collapsed { --question-sidebar-width: 0px; }
+html.desktop-host.question-sidebar-collapsed #question-layout { --question-sidebar-width: 0px !important; }
 html.desktop-host.question-sidebar-collapsed #question-sidebar { width: 0; min-width: 0; padding: 0; border-right: 0; overflow: visible; }
 html.desktop-host.question-sidebar-collapsed #question-sidebar > :not(.question-sidebar-collapse), html.desktop-host.question-sidebar-collapsed .question-sidebar-resizer { display: none; }
 .sidebar-collapse-button { position: absolute; z-index: 45; display: grid; place-items: center; width: 24px; height: 42px; padding: 0; border: 1px solid var(--border); border-left: 0; border-radius: 0 8px 8px 0; background: var(--surface); color: var(--text-2); font-size: 22px; line-height: 1; cursor: pointer; }
