@@ -153,6 +153,69 @@ def commit_version(record: dict, manifest: dict) -> dict:
     raise ValueError("版本预留记录不存在")
 
 
+def validate_manifest(manifest: dict) -> dict:
+    """验证输出清单的结构；文件哈希在 staged 根目录下再次核对。"""
+    if not isinstance(manifest, dict):
+        raise ValueError("版本清单必须是对象")
+    source = manifest.get("source_path")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("版本清单缺少源文件")
+    files = manifest.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValueError("版本清单缺少输出文件")
+    clean = []
+    seen_paths = set()
+    for item in files:
+        if not isinstance(item, dict):
+            raise ValueError("版本清单文件项无效")
+        raw_path = item.get("path")
+        digest = str(item.get("sha256") or "").lower()
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError("版本清单路径无效")
+        relative = Path(raw_path.replace("\\", "/"))
+        if relative.is_absolute() or relative.name in {"", ".", ".."}:
+            raise ValueError("版本清单不能包含绝对路径")
+        if ".." in relative.parts:
+            raise ValueError("版本清单路径越界")
+        normalized_path = relative.as_posix()
+        if normalized_path in seen_paths:
+            raise ValueError("版本清单包含重复路径")
+        seen_paths.add(normalized_path)
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("版本清单哈希无效")
+        clean.append({"path": normalized_path, "sha256": digest})
+    return {**manifest, "source_path": str(Path(source)), "files": clean}
+
+
+def commit_outputs(record: dict, staged_output: Path, manifest: dict) -> dict:
+    """校验暂存输出、提交版本，再把源文件送入系统回收站。"""
+    import source_recycle
+
+    clean = validate_manifest(manifest)
+    staged = Path(staged_output)
+    if not staged.exists():
+        raise FileNotFoundError(str(staged))
+    for item in clean["files"]:
+        file_path = staged / item["path"]
+        if (file_path.is_symlink() or not file_path.is_file()
+                or sha256_file(file_path) != item["sha256"]):
+            raise ValueError(f"输出文件校验失败: {item['path']}")
+    source = Path(clean["source_path"])
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    target = Path(record.get("path") or "")
+    if not target or target.exists():
+        raise FileExistsError(str(target))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(staged, target)
+    committed = commit_version(record, clean)
+    try:
+        source_recycle.send_to_recycle_bin(source)
+    except Exception:
+        return mark_recycle_pending(committed["version_id"], "SOURCE_RECYCLE_FAILED")
+    return committed
+
+
 def mark_recycle_pending(version_id: str, error: str) -> dict:
     with _lock:
         rows = _read()
@@ -196,3 +259,35 @@ def list_versions(profile: str | None = None) -> list[dict]:
             if row.get("status") == "committed"
             and (profile is None or row.get("profile") == profile)
         ]
+
+
+def retry_recycle(version_id: str) -> dict:
+    """只重试源文件回收，不重新生成或分配版本。"""
+    import source_recycle
+
+    with _lock:
+        rows = _read()
+        target = None
+        for row in rows:
+            if row.get("version_id") == version_id:
+                target = row
+                break
+        if target is None:
+            raise ValueError("版本记录不存在")
+        if target.get("status") == "committed":
+            return dict(target)
+        if target.get("status") != "recycle_pending":
+            raise ValueError("版本不在待回收状态")
+        manifest = target.get("manifest") or {}
+        source = Path(str(manifest.get("source_path") or ""))
+    if source.exists():
+        source_recycle.send_to_recycle_bin(source)
+    with _lock:
+        rows = _read()
+        for row in rows:
+            if row.get("version_id") == version_id:
+                row["status"] = "committed"
+                row.pop("recycle_error", None)
+                _write(rows)
+                return dict(row)
+    raise ValueError("版本记录不存在")
