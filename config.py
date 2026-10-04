@@ -114,6 +114,12 @@ OFFICIAL_PROMPTS_DIR = BASE_DIR / "prompts"
 # 转换任务快照。插件退出会停止后端，已完成结果与待审核状态必须跨进程保留。
 TASKS_PATH = BANK_STATE_DIR / "conversion_tasks.json"
 
+# 自动导入工作站的题库隔离状态。输入/输出目录本身可在题库外，状态仍不能
+# 跟着来源目录散落，避免多个 QuizForge 进程互相覆盖配置与版本账本。
+SOURCE_SETTINGS_PATH = BANK_STATE_DIR / "source_ingest.json"
+SOURCE_VERSIONS_PATH = BANK_STATE_DIR / "source_versions.json"
+SOURCE_WORKSPACE_DIR = BANK_STATE_DIR / "source_workspace"
+
 # 来源接入配置与工作区按题库隔离；来源版本登记保留源文件哈希和输出记录。
 SOURCE_SETTINGS_PATH = BANK_STATE_DIR / "source_settings.json"
 SOURCE_VERSIONS_PATH = BANK_STATE_DIR / "source_versions.json"
