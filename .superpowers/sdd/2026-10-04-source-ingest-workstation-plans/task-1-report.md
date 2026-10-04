@@ -1,6 +1,6 @@
 # Task 1 实施报告
 
-状态：DONE_WITH_CONCERNS
+状态：DONE；审查发现已在后续修复，详见下方「审查修复报告」。
 
 ## 改动文件
 
@@ -32,11 +32,42 @@ GREEN：
 
 差异检查：`git diff --check` 退出码 `0`。Git 对工作区中若干文件提示 LF 将在后续 Git 操作时转换为 CRLF；未改写无关文件。
 
-## 担忧
-
-- `reserve_version()` 的简报签名没有 `profile` 参数，但 `list_versions(profile)` 要按 profile 过滤。当前登记使用输出目录名作为 profile；调用者若输出目录名与 profile 名不同，筛选结果不会符合预期。后续调用约定需明确或扩展 API。
-- 配置或版本 JSON 若损坏，读取目前退回默认/空记录；需要更强的数据保全策略时，应仿照 `task_store` 保留损坏文件副本。
-
 ## 提交
 
-待提交。
+功能提交：`fbd6b9b`；初始报告提交：`94c1a67`。
+
+## 审查修复报告
+
+状态：修复完成，待提交。
+
+### 追加改动
+
+- 配置与版本账本遇到无效 JSON/schema 时，复制原文件到 `.corrupt-<time_ns>`，记录固定原因码并抛出专用异常；若复制失败也阻止后续写入。配置读取 I/O 错误同样 fail closed。
+- 版本预留要求显式 `profile` 并按真实 profile 查询；新增 `cancel_reservation()`，只删除目标不存在的 `reserved` 记录。已提交或目标已出现时拒绝释放；`recycle_pending` 仍占用目标序号，且不能被重新提交。
+- 目录验证检查工作区本身是否经符号链接／junction 重定向、词法路径与解析目标边界，以及解析后 UNC 目标。配置读取逐条重新验证路径；不安全条目跳过，并在旁路审计 JSONL 中仅保存时间、profile 名的短哈希和固定原因码。
+- 回收失败只存受控错误码并省略外部错误详情，避免把路径或凭据写入登记 JSON。
+
+### 修复验证
+
+RED：
+
+命令：`.venv\Scripts\python.exe -m unittest tests.test_source_settings tests.test_source_versions -v`
+
+结果：`Ran 13 tests`，`FAILED (failures=2, errors=6)`。新增断言按预期暴露缺失的损坏账本异常、profile 参数、预留释放接口、profile 审计和工作区链接检查。
+
+GREEN：
+
+命令：`.venv\Scripts\python.exe -m unittest tests.test_source_settings tests.test_source_versions tests.test_task_store -v`
+
+结果：`Ran 20 tests in 0.180s`，`OK`，退出码 `0`。输出中的 corrupt/evidence/recycle 日志是测试触发的预期固定消息，不含路径或凭据。
+
+语法检查：`.venv\Scripts\python.exe -m py_compile config.py task_store.py source_settings.py source_versions.py tests\test_source_settings.py tests\test_source_versions.py tests\test_task_store.py`，退出码 `0`，无输出。
+
+差异检查：`git diff --check` 退出码 `0`。Git 报告现有工作区文件的 LF/CRLF 转换提示，不影响检查结果。
+
+### 尚存注意事项
+
+- 版本序号分配依简报约定由单进程锁保护；多个 QuizForge 进程同时写同一版本账本不属于当前实现保证范围。
+- 配置非法 profile 的审计日志记录于 `source_settings.audit.jsonl`，只写 profile 名哈希，不包含路径或错误原文。
+
+修复提交：`b3cd9b1`。
