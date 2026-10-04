@@ -37,6 +37,9 @@ import doc2x_store
 import ui_prefs
 import tikz_redraw
 import task_store
+import source_settings
+import source_ingest
+import source_versions
 import history_store
 import cleanup_output
 import handouts
@@ -171,6 +174,7 @@ agent_approval_store = agent_approval_module.ApprovalStore()
 agent_services.configure(runtime=agent_runtime,
                          approvals=agent_approval_store,
                          url_builder=url_for)
+_source_ingest_service = source_ingest.SourceIngestService()
 _agent_danger_lock = threading.Lock()
 _agent_danger_grants: dict[str, str] = {}
 
@@ -2651,6 +2655,7 @@ def index():
 
     return render_template(
         "index.html",
+        export_fonts=exporter.available_export_fonts(),
         folder_papers=folder_papers,
         questions=questions,
         question_total=question_total,
@@ -7005,6 +7010,7 @@ def settings_page():
         prefs["theme_mode"], prefs["theme_color"])
     return render_template(
         "settings.html", providers=enriched,
+        source_profiles=source_settings.load_profiles(),
         llm_presets=providers.LLM_PROVIDER_PRESETS,
         default_max_tokens=llm_client.MAX_TOKENS_DEFAULT,
         # has_mineru_token 而不是 token 本身：明文绝不进模板上下文，
@@ -7035,6 +7041,72 @@ def settings_tex_install():
 @app.route("/settings/tex/status")
 def settings_tex_status():
     return jsonify(ok=True, install=tex_installer.snapshot())
+
+
+@app.route("/api/source-ingest/config")
+def source_ingest_config():
+    profiles = source_settings.load_profiles()
+    tasks = task_store.load("source")
+    return jsonify(ok=True, profiles=profiles, tasks={
+        "total": len(tasks),
+        "queued": sum(p.get("status") == "queued" for _, p in tasks),
+        "running": sum(p.get("status") in {"converting", "validating"}
+                        for _, p in tasks),
+        "failed": sum(p.get("status") == "failed" for _, p in tasks),
+    })
+
+
+@app.route("/api/source-ingest/config", methods=["POST"])
+def source_ingest_config_update():
+    payload = request.get_json(silent=True) or {}
+    name = str(payload.get("profile") or "").strip()
+    if name not in {"good_question", "good_paper", "good_material"}:
+        return jsonify(ok=False, error="来源类型无效"), 400
+    try:
+        profile = source_settings.save_profile(
+            name, input_dir=payload.get("input_dir", ""),
+            output_dir=payload.get("output_dir", ""),
+            enabled=bool(payload.get("enabled")))
+        _source_ingest_service.profiles = source_settings.load_profiles()
+        if profile["enabled"]:
+            _source_ingest_service.start()
+        else:
+            _source_ingest_service.pause(name)
+        return jsonify(ok=True, profile=profile)
+    except (OSError, ValueError, source_settings.SourceSettingsCorruptError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/source-ingest/control", methods=["POST"])
+def source_ingest_control():
+    payload = request.get_json(silent=True) or {}
+    action = str(payload.get("action") or "").strip()
+    profile = str(payload.get("profile") or "").strip()
+    if profile and profile not in _source_ingest_service.profiles:
+        return jsonify(ok=False, error="来源类型无效"), 400
+    if action == "start":
+        _source_ingest_service.start()
+    elif action == "stop":
+        _source_ingest_service.stop()
+    elif action == "pause" and profile:
+        _source_ingest_service.pause(profile)
+    elif action == "resume" and profile:
+        _source_ingest_service.resume(profile)
+    else:
+        return jsonify(ok=False, error="控制动作无效"), 400
+    return jsonify(ok=True)
+
+
+@app.route("/api/source-ingest/tasks")
+def source_ingest_tasks():
+    return jsonify(ok=True, tasks=[{"task_id": tid, **payload}
+                                   for tid, payload in task_store.load("source")])
+
+
+@app.route("/api/source-ingest/versions")
+def source_ingest_versions():
+    return jsonify(ok=True, versions=source_versions.list_versions(
+        request.args.get("profile") or None))
 
 
 @app.route("/settings/mineru", methods=["POST"])
@@ -8357,6 +8429,9 @@ def _read_export_params():
         solution_mode=request.form.get("solution_mode", "none"),
         show_source=request.form.get("show_source", "") in ("1", "true", "on"),
         paper_tone=paper_tone,
+        # 字体选择（白名单校验在 exporter._font_variable_args，防任意串进 LaTeX）
+        cjk_font=request.form.get("cjk_font", "").strip()[:80],
+        latin_font=request.form.get("latin_font", "").strip()[:80],
         wimath_logo=request.form.get("wimath_logo", "") in ("1", "true", "on"),
         # 只记录用户明确选择的已启用 Agent 模板；空值继续走内置
         # exam_template.tex，保证旧表单和插件调用完全兼容。
@@ -8519,6 +8594,7 @@ def preview():
             header_footer=p["header_footer"], solution_mode=p["solution_mode"],
             std_opts=p["std_opts"], paper_tone=p["paper_tone"],
             wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
+            cjk_font=p["cjk_font"], latin_font=p["latin_font"],
             entitlement_feature="preview",
             tex_backend=request.form.get("tex_backend", "local"),
             **({"template_path": str(template_path)} if template_path else {}))
@@ -8559,6 +8635,7 @@ def export():
             header_footer=p["header_footer"], solution_mode=p["solution_mode"],
             std_opts=p["std_opts"], paper_tone=p["paper_tone"],
             wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
+            cjk_font=p["cjk_font"], latin_font=p["latin_font"],
             tex_backend=request.form.get("tex_backend", "local"),
             **({"template_path": str(template_path)} if template_path else {}))
     except exporter.ExportError as e:

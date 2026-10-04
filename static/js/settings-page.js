@@ -37,6 +37,30 @@
   tabs.forEach(tab => tab.addEventListener('click', () => showSection(tab.dataset.settingsTab, true)));
   window.addEventListener('hashchange', () => showSection(hashSection() || 'local', false));
 
+  page.querySelectorAll('.source-profile-form').forEach(form => {
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const status = form.querySelector('.source-profile-status');
+      const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
+      const body = {
+        profile: form.dataset.sourceProfile,
+        input_dir: form.elements.input_dir.value,
+        output_dir: form.elements.output_dir.value,
+        enabled: form.elements.enabled.checked,
+      };
+      status.textContent = '保存中…';
+      try {
+        const response = await fetch('/api/source-ingest/config', {
+          method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || '保存失败');
+        status.textContent = '已保存';
+      } catch (error) { status.textContent = error.message || '保存失败'; }
+    });
+  });
+
   const modelForm = page.querySelector('.model-add-form');
   const presetSource = modelForm?.querySelector('[data-llm-presets]');
   const presetSelect = modelForm?.querySelector('[data-llm-preset]');
