@@ -32,9 +32,24 @@ class SourceSettingsTests(unittest.TestCase):
         profiles = source_settings.load_profiles()
         self.assertEqual(set(profiles), {"好题", "好卷", "好资料"})
         for name in profiles:
+            self.assertTrue((config.BANK_DIR / name).is_dir())
             self.assertEqual(profiles[name]["input_dir"], str(config.BANK_DIR / name))
             self.assertEqual(profiles[name]["output_dir"], str(config.BANK_DIR / name))
             self.assertFalse(profiles[name]["enabled"])
+
+    def test_save_profiles_updates_three_paths_and_independent_switches(self):
+        rows = source_settings.load_profiles()
+        rows["好题"]["enabled"] = True
+        rows["好卷"]["input_dir"] = str(self.root / "papers")
+        rows["好卷"]["output_dir"] = str(self.root / "paper-output")
+        saved = source_settings.save_profiles(rows)
+        self.assertTrue(saved["好题"]["enabled"])
+        self.assertFalse(saved["好卷"]["enabled"])
+        self.assertTrue((self.root / "papers").is_dir())
+        self.assertTrue((self.root / "paper-output").is_dir())
+        loaded = source_settings.load_profiles()
+        self.assertEqual(loaded["好卷"]["input_dir"], str(self.root / "papers"))
+        self.assertTrue(loaded["好题"]["enabled"])
 
     def test_custom_local_paths_are_created_and_persisted(self):
         input_dir = self.root / "外接盘" / "输入"

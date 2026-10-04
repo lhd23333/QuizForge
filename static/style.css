@@ -3047,6 +3047,12 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .settings-section h3 { margin: 18px 0 10px; font-size: 13px; }
 .settings-section-title { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-section-title h2 { margin-bottom: 3px; }
+.source-settings-head { margin-bottom: 18px; }
+.source-profile-card { padding: 16px 0; border-top: 1px solid var(--border, rgba(127,127,127,.2)); display: grid; gap: 10px; }
+.source-profile-card-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.source-profile-card h3 { margin: 0; font-size: 16px; }
+.source-watch-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 13px; }
+.source-dir-input { cursor: pointer; }
 .settings-value { color: var(--text); font-size: 14px; font-variant-numeric: tabular-nums; }
 .settings-note { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 .settings-form-grid {
@@ -3145,6 +3151,13 @@ html.desktop-host .settings-page .panel-grid { gap: 10px; }
 .export-runtime-hint {
   display: block; max-width: 260px; margin-top: 5px;
   color: var(--muted); line-height: 1.45;
+}
+.export-font-preview {
+  display: block; max-width: 260px; margin-top: 4px; padding: 4px 9px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: rgba(127, 127, 127, 0.07);
+  font-size: 15px; line-height: 1.5; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
 .product-page { width: min(960px, 100%); margin: 6px auto 44px; }
 .product-hero { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }

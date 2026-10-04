@@ -1382,6 +1382,35 @@ class DesktopApi:
             return {"ok": False, "error": f"所选目录无效：{exc}"}
         return {"ok": True, "bank_dir": str(target)}
 
+    def browse_source_directory(self, current: str = "") -> dict:
+        """为自动导入工作站选择任意本地文件夹，不修改配置。"""
+        import webview
+
+        if self._window is None:
+            return {"ok": False, "error": "桌面窗口尚未就绪"}
+        initial = Path(current).expanduser() if str(current or "").strip() else self.bank_dir
+        if not initial.is_dir():
+            initial = self.bank_dir
+        try:
+            selected = self._window.create_file_dialog(
+                webview.FileDialog.FOLDER, directory=str(initial.resolve()),
+                allow_multiple=False)
+        except Exception:
+            logging.getLogger(__name__).exception("打开自动导入目录选择器失败")
+            return {"ok": False, "error": "无法打开目录选择器"}
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        raw_path = selected if isinstance(selected, str) else selected[0]
+        try:
+            target = Path(raw_path).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            return {"ok": False, "error": "所选目录无效"}
+        if not target.exists():
+            target.mkdir(parents=True, exist_ok=True)
+        if not target.is_dir():
+            return {"ok": False, "error": "所选路径不是文件夹"}
+        return {"ok": True, "path": str(target)}
+
     def browse_agent_directory(self) -> dict:
         """选择 Agent 工作目录，并将结果收敛为当前题库内的相对目录。
 

@@ -37,28 +37,47 @@
   tabs.forEach(tab => tab.addEventListener('click', () => showSection(tab.dataset.settingsTab, true)));
   window.addEventListener('hashchange', () => showSection(hashSection() || 'local', false));
 
-  page.querySelectorAll('.source-profile-form').forEach(form => {
-    form.addEventListener('submit', async event => {
-      event.preventDefault();
-      const status = form.querySelector('.source-profile-status');
-      const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
-      const body = {
-        profile: form.dataset.sourceProfile,
-        input_dir: form.elements.input_dir.value,
-        output_dir: form.elements.output_dir.value,
-        enabled: form.elements.enabled.checked,
+  const sourceStatus = document.getElementById('source-profiles-status');
+  const sourceCards = [...page.querySelectorAll('.source-profile-card')];
+  const desktopApi = () => window.QuizForgeDesktop?.api?.() || null;
+  sourceCards.forEach(card => {
+    const input = card.querySelector('[data-dir-role="input"]');
+    const output = card.querySelector('[data-dir-role="output"]');
+    [input, output].forEach(field => field?.addEventListener('click', async () => {
+      const api = desktopApi();
+      if (!api?.browse_source_directory) {
+        sourceStatus.textContent = '请在桌面版中选择文件夹';
+        return;
+      }
+      const picked = await api.browse_source_directory(field.value);
+      if (!picked?.ok || !picked.path) return;
+      field.value = picked.path;
+      if (field === input && output.dataset.followInput !== 'false') {
+        output.value = picked.path;
+      }
+    }));
+    output?.addEventListener('click', () => { output.dataset.followInput = 'false'; });
+  });
+  document.getElementById('source-profiles-save')?.addEventListener('click', async () => {
+    const profiles = {};
+    sourceCards.forEach(card => {
+      profiles[card.dataset.sourceProfile] = {
+        input_dir: card.querySelector('[name="input_dir"]').value,
+        output_dir: card.querySelector('[name="output_dir"]').value,
+        enabled: card.querySelector('[name="enabled"]').checked,
       };
-      status.textContent = '保存中…';
-      try {
-        const response = await fetch('/api/source-ingest/config', {
-          method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
-          body: JSON.stringify(body),
-        });
-        const data = await response.json();
-        if (!response.ok || !data.ok) throw new Error(data.error || '保存失败');
-        status.textContent = '已保存';
-      } catch (error) { status.textContent = error.message || '保存失败'; }
     });
+    const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
+    sourceStatus.textContent = '保存中…';
+    try {
+      const response = await fetch('/api/source-ingest/config', {
+        method: 'POST', headers: {'Content-Type': 'application/json', 'X-CSRF-Token': token},
+        body: JSON.stringify({profiles}),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) throw new Error(data.error || '保存失败');
+      sourceStatus.textContent = '已保存';
+    } catch (error) { sourceStatus.textContent = error.message || '保存失败'; }
   });
 
   const modelForm = page.querySelector('.model-add-form');

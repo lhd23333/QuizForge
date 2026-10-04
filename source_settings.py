@@ -100,7 +100,7 @@ def validate_local_directory(raw: str | Path, *, create: bool = True) -> Path:
 
 
 def _defaults() -> dict[str, dict]:
-    return {
+    defaults = {
         name: {
             "input_dir": str(Path(config.BANK_DIR) / name),
             "output_dir": str(Path(config.BANK_DIR) / name),
@@ -108,6 +108,9 @@ def _defaults() -> dict[str, dict]:
         }
         for name in _DEFAULT_NAMES
     }
+    for row in defaults.values():
+        Path(row["input_dir"]).mkdir(parents=True, exist_ok=True)
+    return defaults
 
 
 def load_profiles() -> dict[str, dict]:
@@ -155,6 +158,27 @@ def _read_profile_rows() -> dict:
 
 def _save(profiles: dict[str, dict]) -> None:
     _atomic_json(Path(config.SOURCE_SETTINGS_PATH), {"profiles": profiles})
+
+
+def save_profiles(profiles: dict[str, dict]) -> dict[str, dict]:
+    """一次性保存三个 Profile，保留未知/非法条目的原始值。"""
+    if not isinstance(profiles, dict):
+        raise ValueError("来源配置必须是对象")
+    with _lock:
+        raw_rows = _read_profile_rows()
+        merged = dict(raw_rows)
+        for name, row in profiles.items():
+            if name not in _DEFAULT_NAMES:
+                continue
+            if not isinstance(row, dict):
+                raise ValueError("来源配置格式无效")
+            input_dir = validate_local_directory(row.get("input_dir", ""))
+            output_dir = validate_local_directory(row.get("output_dir", ""))
+            merged[name] = {"input_dir": str(input_dir),
+                            "output_dir": str(output_dir),
+                            "enabled": row.get("enabled") is True}
+        _save(merged)
+    return load_profiles()
 
 
 def save_profile(name: str, *, input_dir: str | Path, output_dir: str | Path,

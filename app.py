@@ -7059,16 +7059,29 @@ def source_ingest_config():
 @app.route("/api/source-ingest/config", methods=["POST"])
 def source_ingest_config_update():
     payload = request.get_json(silent=True) or {}
-    name = str(payload.get("profile") or "").strip()
-    if name not in {"good_question", "good_paper", "good_material"}:
-        return jsonify(ok=False, error="来源类型无效"), 400
     try:
+        if isinstance(payload.get("profiles"), dict):
+            saved = source_settings.save_profiles(payload["profiles"])
+            _source_ingest_service.profiles = saved
+            for name, row in saved.items():
+                if row.get("enabled"):
+                    _source_ingest_service.resume(name)
+                    _source_ingest_service.start()
+                else:
+                    _source_ingest_service.pause(name)
+            if not any(row.get("enabled") for row in saved.values()):
+                _source_ingest_service.stop()
+            return jsonify(ok=True, profiles=saved)
+        name = str(payload.get("profile") or "").strip()
+        if name not in {"good_question", "good_paper", "good_material"}:
+            return jsonify(ok=False, error="来源类型无效"), 400
         profile = source_settings.save_profile(
             name, input_dir=payload.get("input_dir", ""),
             output_dir=payload.get("output_dir", ""),
             enabled=bool(payload.get("enabled")))
         _source_ingest_service.profiles = source_settings.load_profiles()
         if profile["enabled"]:
+            _source_ingest_service.resume(name)
             _source_ingest_service.start()
         else:
             _source_ingest_service.pause(name)

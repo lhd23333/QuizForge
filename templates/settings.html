@@ -52,19 +52,21 @@
 
   <section class="settings-category" data-settings-panel="sources" hidden>
     <div class="settings-section">
-      <h2>自动导入工作站</h2>
-      <p class="settings-note">稳定文件才会进入队列；默认监听关闭。成功版本永久保留，源文件完成校验后进入系统回收站。</p>
+      <div class="settings-section-title source-settings-head">
+        <div><h2>自动导入工作站</h2>
+          <p class="settings-note">稳定文件才会进入队列；默认监听关闭。</p></div>
+        <button type="button" class="btn btn-primary" id="source-profiles-save">保存</button>
+      </div>
       {% for key, label in [('good_question', '好题'), ('good_paper', '好卷'), ('good_material', '好资料')] %}
       {% set profile = source_profiles.get(key, {}) %}
-      <form class="source-profile-form settings-form-grid" data-source-profile="{{ key }}">
-        <h3>{{ label }}</h3>
-        <label class="field grow">输入目录<input class="input" name="input_dir" value="{{ profile.get('input_dir', '') }}" required></label>
-        <label class="field grow">输出目录<input class="input" name="output_dir" value="{{ profile.get('output_dir', '') }}" required></label>
-        <label class="field settings-row-control"><input type="checkbox" name="enabled" {% if profile.get('enabled') %}checked{% endif %}> 持续监听</label>
-        <button class="btn btn-primary" type="submit">保存</button>
-        <span class="source-profile-status muted" role="status"></span>
-      </form>
+      <div class="source-profile-card" data-source-profile="{{ key }}">
+        <div class="source-profile-card-head"><h3>{{ label }}</h3>
+          <label class="source-watch-toggle"><input type="checkbox" name="enabled" {% if profile.get('enabled') %}checked{% endif %}> 监控输入目录</label></div>
+        <label class="field">输入目录<input class="input source-dir-input" name="input_dir" value="{{ profile.get('input_dir', '') }}" readonly data-dir-role="input" title="点击选择文件夹"></label>
+        <label class="field">输出目录<input class="input source-dir-input" name="output_dir" value="{{ profile.get('output_dir', '') }}" readonly data-dir-role="output" title="点击选择文件夹"></label>
+      </div>
       {% endfor %}
+      <p id="source-profiles-status" class="settings-note" role="status"></p>
     </div>
   </section>
 
