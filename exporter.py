@@ -3741,9 +3741,9 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
                 cwd=work_dir,
                 step="xelatex",
             )
-        fatal = _xelatex_fatal_log(work_dir)
-        if fatal:
-            raise ExportError(f"[xelatex] 日志检测到致命错误：{fatal}{_tex_error_hint(work_dir)}")
+    fatal = _xelatex_fatal_log(work_dir)
+    if fatal:
+        raise ExportError(f"[xelatex] 日志检测到致命错误：{fatal}{_tex_error_hint(work_dir)}")
     if not pdf_path.exists():
         raise ExportError("xelatex 未生成 PDF，请检查 .log 文件")
     return pdf_path
