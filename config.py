@@ -114,6 +114,11 @@ OFFICIAL_PROMPTS_DIR = BASE_DIR / "prompts"
 # 转换任务快照。插件退出会停止后端，已完成结果与待审核状态必须跨进程保留。
 TASKS_PATH = BANK_STATE_DIR / "conversion_tasks.json"
 
+# 来源接入配置与工作区按题库隔离；来源版本登记保留源文件哈希和输出记录。
+SOURCE_SETTINGS_PATH = BANK_STATE_DIR / "source_settings.json"
+SOURCE_VERSIONS_PATH = BANK_STATE_DIR / "source_versions.json"
+SOURCE_WORKSPACE_DIR = BANK_STATE_DIR / "source_workspace"
+
 # 组卷篮选题状态。题目本身仍在 vault，只在这里保存被选中的题目 id。
 SELECTIONS_PATH = BANK_STATE_DIR / "selections.json"
 

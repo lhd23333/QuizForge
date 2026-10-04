@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 # 任务类型只决定快照顶层的命名空间，不改变 payload 的业务结构。资料库转换
 # 任务沿用同一份原子账本，避免再引入第二个 conversion_tasks.json。
-KINDS = ("job", "batch", "library")
+KINDS = ("job", "batch", "library", "source")
 _KINDS = KINDS
 
 

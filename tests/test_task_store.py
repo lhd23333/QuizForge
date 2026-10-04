@@ -92,6 +92,22 @@ class LibraryTaskStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             task_store.mark_interrupted("library", {"running"}, "")
 
+    def test_source_namespace_coexists_and_legacy_snapshots_are_preserved(self):
+        legacy = {
+            "job": {"j1": {"updated_at": 1, "payload": {"status": "done"}}},
+            "batch": {"b1": {"updated_at": 2, "payload": {"count": 3}}},
+            "library": {"l1": {"updated_at": 3, "payload": {"path": "x.pdf"}}},
+        }
+        self._tasks_path.write_text(
+            __import__("json").dumps(legacy), encoding="utf-8")
+
+        self.assertEqual(task_store.load("job"), [("j1", {"status": "done"})])
+        self.assertEqual(task_store.load("batch"), [("b1", {"count": 3})])
+        self.assertEqual(task_store.load("library"), [("l1", {"path": "x.pdf"})])
+        task_store.save("source", "s1", {"status": "done"})
+        self.assertEqual(task_store.load("source"), [("s1", {"status": "done"})])
+        self.assertEqual(task_store.load("job"), [("j1", {"status": "done"})])
+
 
 if __name__ == "__main__":
     unittest.main()
