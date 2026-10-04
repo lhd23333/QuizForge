@@ -108,6 +108,18 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertIn("invalid_directory", audit)
         self.assertNotIn("host", audit)
 
+    def test_saving_another_profile_preserves_raw_invalid_entry(self):
+        path = config.SOURCE_SETTINGS_PATH
+        path.parent.mkdir(parents=True)
+        raw_entry = {"input_dir": r"\\host\share", "output_dir": "bad", "enabled": True}
+        path.write_text(json.dumps({"profiles": {"unsafe": raw_entry}}), encoding="utf-8")
+        source_settings.save_profile(
+            "new", input_dir=self.root / "input", output_dir=self.root / "output",
+            enabled=True)
+        persisted = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["profiles"]["unsafe"], raw_entry)
+        self.assertIn("new", persisted["profiles"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -116,6 +117,20 @@ class SourceVersionsTests(unittest.TestCase):
         Path(record["path"]).write_text("created", encoding="utf-8")
         with self.assertRaises(ValueError):
             source_versions.cancel_reservation(record["version_id"])
+
+    def test_legacy_reserve_signature_derives_profile_from_settings(self):
+        output = self.root / "custom-output"
+        output.mkdir()
+        settings_path = self.root / "settings.json"
+        settings_path.write_text(json.dumps({"profiles": {
+            "真实档案": {"input_dir": str(output), "output_dir": str(output),
+                         "enabled": True},
+        }}), encoding="utf-8")
+        with mock.patch.object(config, "SOURCE_SETTINGS_PATH", settings_path), \
+                mock.patch.object(config, "SOURCE_WORKSPACE_DIR", self.root / "workspace"):
+            record = source_versions.reserve_version(
+                output, "名称", is_directory=False, source_key="legacy-call")
+        self.assertEqual(record["profile"], "真实档案")
 
 
 if __name__ == "__main__":

@@ -82,17 +82,31 @@ def version_key(profile: str, source_path: Path, source_hash: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _infer_profile(output: Path) -> str:
+    # Legacy callers did not pass profile; use the matching configured output path.
+    import source_settings
+
+    matches = [name for name, row in source_settings.load_profiles().items()
+               if Path(row["output_dir"]).resolve() == output]
+    if len(matches) > 1:
+        raise ValueError("输出目录对应多个来源类型，请显式指定 profile")
+    return matches[0] if matches else output.name
+
+
 def reserve_version(output_dir: Path, base_name: str, *, is_directory: bool,
-                    source_key: str, profile: str) -> dict:
+                    source_key: str, profile: str | None = None) -> dict:
     output = Path(output_dir).expanduser().resolve()
     if not output.is_dir():
         raise ValueError("输出目录不存在")
     base = Path(str(base_name)).name.strip()
     if not base or base in {".", ".."}:
         raise ValueError("版本名称无效")
-    profile = str(profile).strip()
-    if not profile:
-        raise ValueError("来源类型不能为空")
+    if profile is None:
+        profile = _infer_profile(output)
+    else:
+        profile = str(profile).strip()
+        if not profile:
+            raise ValueError("来源类型不能为空")
     with _lock:
         rows = _read()
         for row in rows:

@@ -113,40 +113,44 @@ def _defaults() -> dict[str, dict]:
 def load_profiles() -> dict[str, dict]:
     with _lock:
         profiles = _defaults()
-        path = Path(config.SOURCE_SETTINGS_PATH)
-        if not path.exists():
-            return profiles
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            _quarantine_corrupt(path, "invalid_json")
-        except OSError:
-            logger.error("source settings unreadable; writes blocked")
-            raise SourceSettingsCorruptError("来源配置无法读取，已阻止写入") from None
-        if not isinstance(raw, dict):
-            _quarantine_corrupt(path, "invalid_schema")
-        rows = raw.get("profiles", raw)
-        if isinstance(rows, dict):
-            for name, row in rows.items():
-                if (isinstance(name, str) and name.strip() and isinstance(row, dict)
-                        and isinstance(row.get("input_dir"), str)
-                        and isinstance(row.get("output_dir"), str)):
-                    try:
-                        input_dir = validate_local_directory(row["input_dir"], create=False)
-                        output_dir = validate_local_directory(row["output_dir"], create=False)
-                    except (OSError, ValueError):
-                        _record_invalid_profile(name, "invalid_directory")
-                        logger.warning("source profile rejected: invalid directory configuration")
-                        continue
-                    profiles[name] = {"input_dir": str(input_dir),
-                                      "output_dir": str(output_dir),
-                                      "enabled": row.get("enabled") is True}
-                else:
-                    _record_invalid_profile(str(name), "invalid_schema")
-                    logger.warning("source profile rejected: invalid profile schema")
-        else:
-            _quarantine_corrupt(path, "invalid_profiles")
+        rows = _read_profile_rows()
+        for name, row in rows.items():
+            if (isinstance(name, str) and name.strip() and isinstance(row, dict)
+                    and isinstance(row.get("input_dir"), str)
+                    and isinstance(row.get("output_dir"), str)):
+                try:
+                    input_dir = validate_local_directory(row["input_dir"], create=False)
+                    output_dir = validate_local_directory(row["output_dir"], create=False)
+                except (OSError, ValueError):
+                    _record_invalid_profile(name, "invalid_directory")
+                    logger.warning("source profile rejected: invalid directory configuration")
+                    continue
+                profiles[name] = {"input_dir": str(input_dir),
+                                  "output_dir": str(output_dir),
+                                  "enabled": row.get("enabled") is True}
+            else:
+                _record_invalid_profile(str(name), "invalid_schema")
+                logger.warning("source profile rejected: invalid profile schema")
         return profiles
+
+
+def _read_profile_rows() -> dict:
+    path = Path(config.SOURCE_SETTINGS_PATH)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _quarantine_corrupt(path, "invalid_json")
+    except OSError:
+        logger.error("source settings unreadable; writes blocked")
+        raise SourceSettingsCorruptError("来源配置无法读取，已阻止写入") from None
+    if not isinstance(raw, dict):
+        _quarantine_corrupt(path, "invalid_schema")
+    rows = raw.get("profiles", raw)
+    if not isinstance(rows, dict):
+        _quarantine_corrupt(path, "invalid_profiles")
+    return rows
 
 
 def _save(profiles: dict[str, dict]) -> None:
@@ -165,8 +169,9 @@ def save_profile(name: str, *, input_dir: str | Path, output_dir: str | Path,
             "output_dir": str(validate_local_directory(output_dir)),
             "enabled": bool(enabled),
         }
-        profiles[name] = profile
-        _save(profiles)
+        raw_rows = _read_profile_rows()
+        raw_rows[name] = profile
+        _save(raw_rows)
     return profile
 
 
@@ -181,7 +186,8 @@ def reset_profile(name: str) -> dict:
         "enabled": False,
     })
     with _lock:
-        profiles = load_profiles()
-        profiles[name] = profile
-        _save(profiles)
+        load_profiles()  # Validate and audit other rows before changing this profile.
+        raw_rows = _read_profile_rows()
+        raw_rows[name] = profile
+        _save(raw_rows)
     return profile
