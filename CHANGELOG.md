@@ -6,6 +6,8 @@
 
 ### 新增
 
+- 新增“好题／好卷／好资料”内容导入工作站：三个独立输入／输出目录支持持续监听，稳定文件按内容哈希去重；好题生成单卡，好卷生成带题号的多卡版本，好资料把正文／题目／解析切为独立来源卡片。每次成功转换保留递增版本，输出校验后源文件进入 Windows 系统回收站；设置页、Agent 和交互式 CLI 共用任务与版本状态。当前仍需真实 MinerU 版式和 Windows 回收站验收，默认监听关闭。
+
 - Agent 新增统一 API 配置层：`list_api_configs / get_api_config / upsert_api_config / set_active_api_config / delete_api_config / test_api_config` 六个工具统一管理 Agent 模型、题目处理 LLM 与 MinerU / Doc2X 凭据；聚合视图永不返回明文凭据，写入走审批，需要 Key 的端点由设置页安全输入框完成。
 - Agent 新增批量工具：`filter_questions`（题型 / 难度 / 标签 / 来源 / 星标 / 关键词组合筛选）、`copy_questions`（批量复制成新题）、`bulk_update_questions`（批量改题型 / 难度 / 来源 / 备注 / 星标）。
 - Agent 内容类写操作（修改 / 标签 / 删除 / 批量改）执行前自动快照，新增 `list_snapshots / rollback_snapshot` 工具；回滚前自动创建反向快照；快照保留 30 天或最近 100 个，随启动清理回收。
