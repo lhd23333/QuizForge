@@ -38,7 +38,7 @@ GREEN：
 
 ## 审查修复报告
 
-状态：修复完成，待提交。
+状态：修复完成，提交 `b3cd9b1`。
 
 ### 追加改动
 
@@ -71,3 +71,33 @@ GREEN：
 - 配置非法 profile 的审计日志记录于 `source_settings.audit.jsonl`，只写 profile 名哈希，不包含路径或错误原文。
 
 修复提交：`b3cd9b1`。
+
+## 二次复审修复报告
+
+状态：DONE。
+
+### 修复内容
+
+- `save_profile()` 与 `reset_profile()` 现在只更新被明确编辑的配置档案，并保留其他非法档案的原始 JSON 值；读取时仍跳过非法值、写入固定原因码审计，不会无声删掉损坏证据。
+- `reserve_version()` 恢复任务简报中的旧调用签名：`profile` 改为可选 keyword。旧调用会按输出目录匹配已配置 profile；没有唯一匹配时回退到输出目录名，多个匹配则要求显式传入 profile。显式传入 profile 时仍按该值登记。
+- 新增两个回归测试：非法条目在保存其他档案后仍原样存在；不带 profile 的旧 API 调用可以从来源配置解析真实 profile。
+
+### 验证证据
+
+RED：
+
+命令：`.venv\Scripts\python.exe -m unittest tests.test_source_settings.SourceSettingsTests.test_saving_another_profile_preserves_raw_invalid_entry tests.test_source_versions.SourceVersionsTests.test_legacy_reserve_signature_derives_profile_from_settings -v`
+
+结果：`Ran 2 tests`，`FAILED (errors=2)`。第一项因非法配置记录在另一个档案保存时丢失而触发 `KeyError`；第二项因旧 API 调用缺少必需的 `profile` 参数而触发 `TypeError`。
+
+GREEN：
+
+命令：`.venv\Scripts\python.exe -m unittest tests.test_source_settings tests.test_source_versions tests.test_task_store -v`
+
+结果：`Ran 22 tests in 0.183s`，`OK`，退出码 `0`。测试中出现的固定 corrupt/evidence/recycle 日志为预期诊断，不包含敏感路径或凭据。
+
+语法检查：`.venv\Scripts\python.exe -m py_compile config.py task_store.py source_settings.py source_versions.py tests\test_source_settings.py tests\test_source_versions.py tests\test_task_store.py`，退出码 `0`，无输出。
+
+差异检查：`git diff --check` 退出码 `0`；Git 对部分文件报告 LF/CRLF 自动转换提示。
+
+修复提交：`ba1476f`。
