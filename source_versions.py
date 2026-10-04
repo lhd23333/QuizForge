@@ -115,7 +115,7 @@ def reserve_version(output_dir: Path, base_name: str, *, is_directory: bool,
         n = 1
         while True:
             name = base if n == 1 else f"{base}_{n}"
-            candidate = output / name
+            candidate = output / (name if is_directory else f"{name}.md")
             if not candidate.exists() and not any(
                     Path(row.get("path", "")).resolve() == candidate
                     for row in rows if row.get("status") != "recycled"):

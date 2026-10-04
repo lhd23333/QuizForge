@@ -86,7 +86,7 @@ class SourceVersionsTests(unittest.TestCase):
         self.assertTrue(source_versions.cancel_reservation(record["version_id"]))
         retry = source_versions.reserve_version(
             output, "名称", is_directory=False, source_key="retry", profile="好卷")
-        self.assertEqual(Path(retry["path"]).name, "名称")
+        self.assertEqual(Path(retry["path"]).name, "名称.md")
 
         committed = source_versions.commit_version(retry, {})
         with self.assertRaises(ValueError):
@@ -103,7 +103,7 @@ class SourceVersionsTests(unittest.TestCase):
             source_versions.commit_version(record, {})
         next_record = source_versions.reserve_version(
             output, "名称", is_directory=False, source_key="another", profile="好卷")
-        self.assertEqual(Path(next_record["path"]).name, "名称_2")
+        self.assertEqual(Path(next_record["path"]).name, "名称_2.md")
         persisted = config.SOURCE_VERSIONS_PATH.read_text(encoding="utf-8")
         self.assertNotIn("secret", persisted)
         with self.assertRaises(ValueError):
