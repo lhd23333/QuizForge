@@ -81,7 +81,12 @@ def _ocr(source: Path, workspace: Path, *, ocr_backend: str, engine: str) -> str
     if callable(runner):
         return _result_markdown(runner(source, workspace,
                                        ocr_backend=ocr_backend, engine=engine))
-    raise RuntimeError("自动导入尚未配置 OCR 适配器")
+    import converter
+    import mineru_store
+    return converter.convert_file(
+        source, mineru_store.resolve(), is_image=source.suffix.lower() in
+        {".png", ".jpg", ".jpeg", ".webp", ".bmp"}, include_solution=True,
+        engine=engine, ocr_backend=ocr_backend)
 
 
 def convert_good_question(source: Path, workspace: Path, *, ocr_backend: str,

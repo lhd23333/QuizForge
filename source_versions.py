@@ -207,7 +207,20 @@ def commit_outputs(record: dict, staged_output: Path, manifest: dict) -> dict:
     if not target or target.exists():
         raise FileExistsError(str(target))
     target.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(staged, target)
+    if bool(record.get("is_directory")):
+        top_levels = {Path(item["path"]).parts[0] for item in clean["files"]}
+        if len(top_levels) != 1:
+            raise ValueError("目录版本清单必须只有一个顶层目录")
+        staged_item = staged / next(iter(top_levels))
+        if not staged_item.is_dir() or staged_item.is_symlink():
+            raise ValueError("目录版本输出根无效")
+    else:
+        if len(clean["files"]) != 1:
+            raise ValueError("单卡版本必须只有一个输出文件")
+        staged_item = staged / clean["files"][0]["path"]
+        if staged_item.is_symlink() or not staged_item.is_file():
+            raise ValueError("单卡版本输出无效")
+    os.replace(staged_item, target)
     committed = commit_version(record, clean)
     try:
         source_recycle.send_to_recycle_bin(source)

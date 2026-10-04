@@ -36,20 +36,22 @@ class SourceRecycleTests(unittest.TestCase):
     def test_manifest_requires_existing_hashed_files_and_safe_relative_paths(self):
         staged = self.root / "staged"
         staged.mkdir()
-        card = staged / "card.md"
+        staged_dir = staged / "card"
+        staged_dir.mkdir()
+        card = staged_dir / "card.md"
         card.write_text("# card", encoding="utf-8")
         digest = hashlib.sha256(card.read_bytes()).hexdigest()
         manifest = {"source_path": str(self.root / "source.png"),
-                    "files": [{"path": "card.md", "sha256": digest}]}
+                    "files": [{"path": "card/card.md", "sha256": digest}]}
         self.assertEqual(source_versions.validate_manifest(manifest)["files"][0]["path"],
-                         "card.md")
+                         "card/card.md")
         with self.assertRaises(ValueError):
             source_versions.validate_manifest({**manifest,
                 "files": [{"path": "../escape.md", "sha256": digest}]})
         with self.assertRaises(ValueError):
             source_versions.validate_manifest({**manifest,
-                "files": [{"path": "card.md", "sha256": digest},
-                           {"path": "card.md", "sha256": digest}]})
+                "files": [{"path": "card/card.md", "sha256": digest},
+                           {"path": "card/card.md", "sha256": digest}]})
 
     def test_commit_rejects_symlinked_staged_output(self):
         staged = self.root / "staged"
@@ -74,7 +76,9 @@ class SourceRecycleTests(unittest.TestCase):
         output.mkdir()
         staged = self.root / "staged"
         staged.mkdir()
-        card = staged / "card.md"
+        staged_dir = staged / "card"
+        staged_dir.mkdir()
+        card = staged_dir / "card.md"
         card.write_text("# card", encoding="utf-8")
         source = self.root / "source.png"
         source.write_bytes(b"source")
@@ -82,7 +86,7 @@ class SourceRecycleTests(unittest.TestCase):
         record = source_versions.reserve_version(
             output, "card", is_directory=True, source_key="s1", profile="好题")
         manifest = {"source_path": str(source),
-                    "files": [{"path": "card.md", "sha256": digest}]}
+                    "files": [{"path": "card/card.md", "sha256": digest}]}
         with mock.patch.object(source_recycle, "send_to_recycle_bin",
                                side_effect=OSError("shell failed")):
             result = source_versions.commit_outputs(record, staged, manifest)
