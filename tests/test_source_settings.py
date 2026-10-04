@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,6 +64,49 @@ class SourceSettingsTests(unittest.TestCase):
             self.skipTest("directory symlink is unavailable")
         with self.assertRaises(ValueError):
             source_settings.validate_local_directory(link)
+
+    def test_workspace_symlink_itself_is_rejected(self):
+        target = self.root / "real-workspace"
+        target.mkdir()
+        link = self.root / "workspace-link"
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory symlink is unavailable")
+        with mock.patch.object(config, "SOURCE_WORKSPACE_DIR", link):
+            with self.assertRaises(ValueError):
+                source_settings.validate_local_directory(target / "inside")
+
+    def test_corrupt_settings_are_quarantined_and_never_overwritten(self):
+        path = config.SOURCE_SETTINGS_PATH
+        path.parent.mkdir(parents=True)
+        original = b"{broken"
+        path.write_bytes(original)
+        with self.assertRaises(source_settings.SourceSettingsCorruptError):
+            source_settings.save_profile(
+                "x", input_dir=self.root / "input", output_dir=self.root / "output",
+                enabled=True)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(list(path.parent.glob(path.name + ".corrupt-*")), [
+            mock.ANY
+        ])
+        self.assertFalse((self.root / "input").exists())
+
+    def test_invalid_profile_path_is_skipped_and_audited_without_path_details(self):
+        path = config.SOURCE_SETTINGS_PATH
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"profiles": {
+            "unsafe": {"input_dir": r"\\host\share", "output_dir": str(self.root),
+                       "enabled": True},
+        }}), encoding="utf-8")
+        with self.assertLogs("source_settings", level="WARNING") as captured:
+            profiles = source_settings.load_profiles()
+        self.assertNotIn("unsafe", profiles)
+        self.assertTrue(any("profile rejected" in line for line in captured.output))
+        self.assertNotIn("host", "\n".join(captured.output))
+        audit = path.with_suffix(".audit.jsonl").read_text(encoding="utf-8")
+        self.assertIn("invalid_directory", audit)
+        self.assertNotIn("host", audit)
 
 
 if __name__ == "__main__":

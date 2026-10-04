@@ -43,7 +43,8 @@ class SourceVersionsTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             records = list(pool.map(
                 lambda i: source_versions.reserve_version(
-                    output, "名称", is_directory=True, source_key=f"key-{i}"),
+                    output, "名称", is_directory=True, source_key=f"key-{i}",
+                    profile="好卷"),
                 range(3)))
         self.assertEqual(
             {Path(row["path"]).name for row in records},
@@ -54,14 +55,67 @@ class SourceVersionsTests(unittest.TestCase):
         output = self.root / "out"
         output.mkdir()
         first = source_versions.reserve_version(
-            output, "名称", is_directory=False, source_key="same")
+            output, "名称", is_directory=False, source_key="same", profile="好卷")
         repeated = source_versions.reserve_version(
-            output, "另名", is_directory=False, source_key="same")
+            output, "另名", is_directory=False, source_key="same", profile="好卷")
         self.assertEqual(first["version_id"], repeated["version_id"])
-        self.assertEqual(source_versions.list_versions("out"), [])
+        self.assertEqual(source_versions.list_versions("好卷"), [])
         committed = source_versions.commit_version(first, {"source_hash": "abc"})
         self.assertEqual(committed["status"], "committed")
-        self.assertEqual(len(source_versions.list_versions("out")), 1)
+        self.assertEqual(len(source_versions.list_versions("好卷")), 1)
+        self.assertEqual(source_versions.list_versions("好题"), [])
+
+    def test_corrupt_registry_is_quarantined_and_write_is_blocked(self):
+        path = config.SOURCE_VERSIONS_PATH
+        original = b"not-json"
+        path.write_bytes(original)
+        with self.assertRaises(source_versions.SourceVersionsCorruptError):
+            source_versions.reserve_version(
+                self.root, "name", is_directory=False, source_key="key", profile="好卷")
+        self.assertEqual(path.read_bytes(), original)
+        backups = list(path.parent.glob(path.name + ".corrupt-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), original)
+
+    def test_cancel_releases_only_uncommitted_absent_target(self):
+        output = self.root / "out"
+        output.mkdir()
+        record = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="failed", profile="好卷")
+        self.assertTrue(source_versions.cancel_reservation(record["version_id"]))
+        retry = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="retry", profile="好卷")
+        self.assertEqual(Path(retry["path"]).name, "名称")
+
+        committed = source_versions.commit_version(retry, {})
+        with self.assertRaises(ValueError):
+            source_versions.cancel_reservation(committed["version_id"])
+
+    def test_recycle_pending_committed_version_keeps_its_reserved_path(self):
+        output = self.root / "out"
+        output.mkdir()
+        record = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="recycled", profile="好卷")
+        source_versions.commit_version(record, {})
+        source_versions.mark_recycle_pending(record["version_id"], "private path C:/secret")
+        with self.assertRaises(ValueError):
+            source_versions.commit_version(record, {})
+        next_record = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="another", profile="好卷")
+        self.assertEqual(Path(next_record["path"]).name, "名称_2")
+        persisted = config.SOURCE_VERSIONS_PATH.read_text(encoding="utf-8")
+        self.assertNotIn("secret", persisted)
+        with self.assertRaises(ValueError):
+            source_versions.cancel_reservation(record["version_id"])
+
+    def test_cancel_refuses_a_reserved_path_that_already_exists(self):
+        output = self.root / "out"
+        output.mkdir()
+        record = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="existing", profile="好卷")
+        Path(record["path"]).write_text("created", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            source_versions.cancel_reservation(record["version_id"])
 
 
 if __name__ == "__main__":

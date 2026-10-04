@@ -4,23 +4,50 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import shutil
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 
 import config
 
 _lock = threading.RLock()
+logger = logging.getLogger(__name__)
+
+
+class SourceVersionsCorruptError(RuntimeError):
+    """版本账本无法安全读取；写入必须停止以保全原件。"""
+
+
+def _quarantine_corrupt(path: Path, reason: str) -> None:
+    backup = path.with_name(f"{path.name}.corrupt-{time.time_ns()}")
+    try:
+        shutil.copy2(path, backup)
+    except OSError:
+        logger.error("source versions corrupt; preservation failed (%s)", reason)
+        raise SourceVersionsCorruptError("来源版本账本损坏，已阻止写入") from None
+    logger.error("source versions corrupt; evidence copy created (%s)", reason)
+    raise SourceVersionsCorruptError("来源版本账本损坏，已阻止写入")
 
 
 def _read() -> list[dict]:
-    try:
-        rows = json.loads(Path(config.SOURCE_VERSIONS_PATH).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    path = Path(config.SOURCE_VERSIONS_PATH)
+    if not path.exists():
         return []
-    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        _quarantine_corrupt(path, "invalid_json")
+    except OSError:
+        logger.error("source versions unreadable; writes blocked")
+        raise SourceVersionsCorruptError("来源版本账本无法读取，已阻止写入") from None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        _quarantine_corrupt(path, "invalid_schema")
+    return rows
 
 
 def _write(rows: list[dict]) -> None:
@@ -56,13 +83,16 @@ def version_key(profile: str, source_path: Path, source_hash: str) -> str:
 
 
 def reserve_version(output_dir: Path, base_name: str, *, is_directory: bool,
-                    source_key: str) -> dict:
+                    source_key: str, profile: str) -> dict:
     output = Path(output_dir).expanduser().resolve()
     if not output.is_dir():
         raise ValueError("输出目录不存在")
     base = Path(str(base_name)).name.strip()
     if not base or base in {".", ".."}:
         raise ValueError("版本名称无效")
+    profile = str(profile).strip()
+    if not profile:
+        raise ValueError("来源类型不能为空")
     with _lock:
         rows = _read()
         for row in rows:
@@ -79,7 +109,7 @@ def reserve_version(output_dir: Path, base_name: str, *, is_directory: bool,
             n += 1
         row = {
             "version_id": uuid.uuid4().hex,
-            "profile": output.name,
+            "profile": profile,
             "source_key": str(source_key),
             "path": str(candidate),
             "is_directory": bool(is_directory),
@@ -101,6 +131,8 @@ def commit_version(record: dict, manifest: dict) -> dict:
             if row.get("version_id") == record["version_id"]:
                 if row.get("status") == "committed":
                     return dict(row)
+                if row.get("status") != "reserved":
+                    raise ValueError("仅可提交有效的版本预留")
                 row.update({"manifest": manifest, "status": "committed"})
                 _write(rows)
                 return dict(row)
@@ -112,11 +144,34 @@ def mark_recycle_pending(version_id: str, error: str) -> dict:
         rows = _read()
         for row in rows:
             if row.get("version_id") == version_id:
+                if row.get("status") != "committed":
+                    raise ValueError("仅可标记已提交版本的回收失败")
                 row["status"] = "recycle_pending"
-                row["recycle_error"] = str(error)
+                # 外部错误文本可能带本地路径或凭据，只留受控错误码。
+                row["recycle_error"] = "SOURCE_RECYCLE_FAILED"
+                if error:
+                    logger.warning("source recycle failed; details omitted")
                 _write(rows)
                 return dict(row)
     raise ValueError("版本记录不存在")
+
+
+def cancel_reservation(version_id: str) -> bool:
+    """只释放仍未提交且输出目标尚不存在的预留。"""
+    with _lock:
+        rows = _read()
+        for index, row in enumerate(rows):
+            if row.get("version_id") != version_id:
+                continue
+            if row.get("status") != "reserved":
+                raise ValueError("仅可释放未提交的版本预留")
+            target = Path(row.get("path", ""))
+            if target.exists():
+                raise ValueError("版本目标已存在，不能释放预留")
+            del rows[index]
+            _write(rows)
+            return True
+    return False
 
 
 def list_versions(profile: str | None = None) -> list[dict]:
