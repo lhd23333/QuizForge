@@ -15,7 +15,11 @@ from pathlib import Path, PureWindowsPath
 import config
 
 _lock = threading.RLock()
-_DEFAULT_NAMES = ("好题", "好卷", "好资料")
+_DEFAULT_PROFILES = {
+    "good_question": "好题",
+    "good_paper": "好卷",
+    "good_material": "好资料",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -102,11 +106,11 @@ def validate_local_directory(raw: str | Path, *, create: bool = True) -> Path:
 def _defaults() -> dict[str, dict]:
     defaults = {
         name: {
-            "input_dir": str(Path(config.BANK_DIR) / name),
-            "output_dir": str(Path(config.BANK_DIR) / name),
+            "input_dir": str(Path(config.BANK_DIR) / label),
+            "output_dir": str(Path(config.BANK_DIR) / label),
             "enabled": False,
         }
-        for name in _DEFAULT_NAMES
+        for name, label in _DEFAULT_PROFILES.items()
     }
     for row in defaults.values():
         Path(row["input_dir"]).mkdir(parents=True, exist_ok=True)
@@ -117,7 +121,9 @@ def load_profiles() -> dict[str, dict]:
     with _lock:
         profiles = _defaults()
         rows = _read_profile_rows()
-        for name, row in rows.items():
+        aliases = {label: name for name, label in _DEFAULT_PROFILES.items()}
+        for raw_name, row in rows.items():
+            name = aliases.get(raw_name, raw_name)
             if (isinstance(name, str) and name.strip() and isinstance(row, dict)
                     and isinstance(row.get("input_dir"), str)
                     and isinstance(row.get("output_dir"), str)):
@@ -168,7 +174,7 @@ def save_profiles(profiles: dict[str, dict]) -> dict[str, dict]:
         raw_rows = _read_profile_rows()
         merged = dict(raw_rows)
         for name, row in profiles.items():
-            if name not in _DEFAULT_NAMES:
+            if name not in _DEFAULT_PROFILES:
                 continue
             if not isinstance(row, dict):
                 raise ValueError("来源配置格式无效")
@@ -205,8 +211,8 @@ def reset_profile(name: str) -> dict:
         raise ValueError("来源类型不能为空")
     defaults = _defaults()
     profile = defaults.get(name, {
-        "input_dir": str(Path(config.BANK_DIR) / name),
-        "output_dir": str(Path(config.BANK_DIR) / name),
+        "input_dir": str(Path(config.BANK_DIR) / _DEFAULT_PROFILES.get(name, name)),
+        "output_dir": str(Path(config.BANK_DIR) / _DEFAULT_PROFILES.get(name, name)),
         "enabled": False,
     })
     with _lock:

@@ -5742,18 +5742,33 @@ main:has(.bulk-action-stack:not([hidden])) .layout { padding-right: 48px; }
 
 .collection-split-pane.is-focused { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-ring); }
 
-/* Obsidian 风格两级侧栏折叠：保留窄边缘按钮，避免折叠后找不到恢复入口。 */
+/* Obsidian 风格两级侧栏折叠：保留窄边缘按钮，避免折叠后找不到恢复入口。
+   按钮一律以侧栏自身为定位基准（absolute + right:-24px）：折叠后侧栏宽 0，
+   按钮自然贴到折叠后的左边缘。**不能**改成 position:fixed + left:var(--app-nav-width)
+   —— 桌面壳里的业务页跑在同源 iframe（embedded-view 隐藏 app 侧栏、main 从 0 开始），
+   但 --app-nav-width 仍是 216px，按钮会凭空浮到题卡区上方（2026-10 修复）。 */
 html.desktop-host.app-sidebar-collapsed { --app-nav-width: 0px !important; }
 html.desktop-host.app-sidebar-collapsed .app-sidebar { width: 0; padding: 0; border-right: 0; overflow: visible; }
 html.desktop-host.app-sidebar-collapsed .app-sidebar > nav, html.desktop-host.app-sidebar-collapsed .app-nav-resizer { display: none; }
 html.desktop-host.question-sidebar-collapsed #question-layout { --question-sidebar-width: 0px !important; }
 html.desktop-host.question-sidebar-collapsed #question-sidebar { width: 0; min-width: 0; padding: 0; border-right: 0; overflow: visible; }
 html.desktop-host.question-sidebar-collapsed #question-sidebar > :not(.question-sidebar-collapse), html.desktop-host.question-sidebar-collapsed .question-sidebar-resizer { display: none; }
+/* 拖动预览收起期间 resizer 必须保持有盒子：元素 display:none 会让 pointer capture
+   中断、拖拽中途丢失，也就无法“不松手回拉展开”。预览结束后再回到上一条的隐藏。 */
+html.desktop-host.sidebar-collapse-dragging .app-nav-resizer,
+html.desktop-host.sidebar-collapse-dragging .question-sidebar-resizer { display: block; }
+/* 收起后的展开按钮都贴着左边缘，会与总任务栏的收起按钮（同样贴左边缘，z-index 更大）
+   叠在一起，被盖掉一半。把题集栏的展开按钮右移一个按钮宽度：
+   - 桌面壳 iframe 内（embedded-view）：总任务栏按钮在外层文档、会越界压进 iframe 左缘
+     （展开时到 23px、收起时 0..24px），iframe 看不到外层状态，统一偏移最稳；
+   - 独立桌面页：只在两个侧栏都收起时才有第二个按钮需要避让。 */
+html.desktop-host.embedded-view.question-sidebar-collapsed #question-sidebar > .question-sidebar-collapse,
+html.desktop-host:not(.embedded-view).app-sidebar-collapsed.question-sidebar-collapsed #question-sidebar > .question-sidebar-collapse { transform: translateX(26px); }
 .sidebar-collapse-button { position: absolute; z-index: 45; display: grid; place-items: center; width: 24px; height: 42px; padding: 0; border: 1px solid var(--border); border-left: 0; border-radius: 0 8px 8px 0; background: var(--surface); color: var(--text-2); font-size: 22px; line-height: 1; cursor: pointer; }
 .app-sidebar > .sidebar-collapse-button { right: -24px; top: 50%; }
-.question-sidebar > .question-sidebar-collapse { right: -24px; top: 50%; }
+#question-sidebar > .question-sidebar-collapse { right: -24px; top: 50%; }
 .sidebar-collapse-button:hover { color: var(--primary); background: var(--surface-2); }
-html.desktop-host.app-sidebar-collapsed .app-sidebar > .sidebar-collapse-button, html.desktop-host.question-sidebar-collapsed #question-sidebar > .question-sidebar-collapse { position: fixed; }
-html.desktop-host.app-sidebar-collapsed .app-sidebar > .sidebar-collapse-button { left: 0; top: 50%; }
-html.desktop-host.question-sidebar-collapsed #question-sidebar > .question-sidebar-collapse { left: var(--app-nav-width, 0px); top: 50%; }
+/* 浏览器 / Obsidian 插件没有桌面壳的折叠布局（折叠类全部以 html.desktop-host 限定），
+   按钮点了只会翻图标、边栏不动，属于“点了没反应”的死控件，直接不显示。 */
+html:not(.desktop-host) .sidebar-collapse-button { display: none; }
 @media (max-width: 760px) { .sidebar-collapse-button { display: none; } }

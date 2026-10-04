@@ -30,26 +30,27 @@ class SourceSettingsTests(unittest.TestCase):
 
     def test_defaults_use_bank_categories_and_are_disabled(self):
         profiles = source_settings.load_profiles()
-        self.assertEqual(set(profiles), {"好题", "好卷", "好资料"})
+        self.assertEqual(set(profiles), {"good_question", "good_paper", "good_material"})
+        labels = {"good_question": "好题", "good_paper": "好卷", "good_material": "好资料"}
         for name in profiles:
-            self.assertTrue((config.BANK_DIR / name).is_dir())
-            self.assertEqual(profiles[name]["input_dir"], str(config.BANK_DIR / name))
-            self.assertEqual(profiles[name]["output_dir"], str(config.BANK_DIR / name))
+            self.assertTrue((config.BANK_DIR / labels[name]).is_dir())
+            self.assertEqual(profiles[name]["input_dir"], str(config.BANK_DIR / labels[name]))
+            self.assertEqual(profiles[name]["output_dir"], str(config.BANK_DIR / labels[name]))
             self.assertFalse(profiles[name]["enabled"])
 
     def test_save_profiles_updates_three_paths_and_independent_switches(self):
         rows = source_settings.load_profiles()
-        rows["好题"]["enabled"] = True
-        rows["好卷"]["input_dir"] = str(self.root / "papers")
-        rows["好卷"]["output_dir"] = str(self.root / "paper-output")
+        rows["good_question"]["enabled"] = True
+        rows["good_paper"]["input_dir"] = str(self.root / "papers")
+        rows["good_paper"]["output_dir"] = str(self.root / "paper-output")
         saved = source_settings.save_profiles(rows)
-        self.assertTrue(saved["好题"]["enabled"])
-        self.assertFalse(saved["好卷"]["enabled"])
+        self.assertTrue(saved["good_question"]["enabled"])
+        self.assertFalse(saved["good_paper"]["enabled"])
         self.assertTrue((self.root / "papers").is_dir())
         self.assertTrue((self.root / "paper-output").is_dir())
         loaded = source_settings.load_profiles()
-        self.assertEqual(loaded["好卷"]["input_dir"], str(self.root / "papers"))
-        self.assertTrue(loaded["好题"]["enabled"])
+        self.assertEqual(loaded["good_paper"]["input_dir"], str(self.root / "papers"))
+        self.assertTrue(loaded["good_question"]["enabled"])
 
     def test_custom_local_paths_are_created_and_persisted(self):
         input_dir = self.root / "外接盘" / "输入"
@@ -138,3 +139,4 @@ class SourceSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
