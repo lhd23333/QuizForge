@@ -210,3 +210,14 @@ class SourceIngestService:
                             dict(payload, status="failed", error=type(exc).__name__))
         finally:
             self._active.discard(payload.get("source_key", ""))
+
+
+_default_service: SourceIngestService | None = None
+
+
+def default_service() -> SourceIngestService:
+    """GUI、Agent 与 CLI 共用的进程级监听服务。"""
+    global _default_service
+    if _default_service is None:
+        _default_service = SourceIngestService()
+    return _default_service

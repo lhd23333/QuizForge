@@ -39,6 +39,9 @@ import providers
 import qrender
 import service_ports
 import task_store
+import source_ingest
+import source_settings
+import source_versions
 from search_query import SearchQueryError
 
 logger = logging.getLogger(__name__)
@@ -871,6 +874,29 @@ def _agent_stage_selection(args: dict, session: dict):
             list(exam_extra) + list(solution_extra))
 
 
+def _ocr_backend_options() -> list[dict]:
+    """识别后端选项表；「本地 MinerU」带实时可用性探测。
+
+    服务未启动时 label 注明（model 层可据此约束推荐），探测异常不阻断选项
+    渲染。探测走本地回环 HTTP，毫秒级；最坏 1.5s 超时。
+    """
+    options = [
+        {"id": "mineru", "label": "MinerU"},
+        {"id": "doc2x", "label": "Doc2X"},
+    ]
+    try:
+        import mineru_local
+        available = bool(mineru_local.probe_server().get("available"))
+    except Exception:  # noqa: BLE001 —— 探测失败只降级为「未启动」标注
+        available = False
+    options.append({
+        "id": "mineru_local",
+        "label": "本地 MinerU" if available else "本地 MinerU（未启动）",
+        "available": available,
+    })
+    return options
+
+
 def _agent_start_conversion(args: dict, session: dict) -> dict:
     args = dict(args or {})
     sid = _agent_require_bank(session)
@@ -884,8 +910,7 @@ def _agent_start_conversion(args: dict, session: dict) -> dict:
             "choice_required": True,
             "choices": [
                 {"id": "ocr_backend", "title": "请选择识别后端", "required": True,
-                 "options": [{"id": "mineru", "label": "MinerU"},
-                              {"id": "doc2x", "label": "Doc2X"}]},
+                 "options": _ocr_backend_options()},
                 {"id": "engine", "title": "请选择导入方式", "required": True,
                  "options": [{"id": "block", "label": "逐题切分（推荐）"},
                               {"id": "whole", "label": "整篇规范化"}]},
@@ -900,8 +925,8 @@ def _agent_start_conversion(args: dict, session: dict) -> dict:
         raise agent_tools.ToolError("规范化方式必须是 mechanical、llm 或 review")
     if engine_value not in {"block", "whole"}:
         raise agent_tools.ToolError("导入方式必须是 block 或 whole")
-    if ocr_value not in {"mineru", "doc2x"}:
-        raise agent_tools.ToolError("识别后端必须是 mineru 或 doc2x")
+    if ocr_value not in {"mineru", "doc2x", "mineru_local"}:
+        raise agent_tools.ToolError("识别后端必须是 mineru、doc2x 或 mineru_local")
     stage_id = str(args.get("stage_id") or "").strip()
     (manifest, stage_id, exam_path, exam_name, exam_pages,
      solution_path, solution_name, solution_pages, extra_paths) = _agent_stage_selection(
@@ -1509,3 +1534,68 @@ def register_all() -> None:
     agent_tools.register_service("export_questions", _agent_export_questions)
     agent_tools.register_service("apply_review_fixes", _agent_apply_review_fixes)
     agent_tools.register_service("enable_template", _agent_enable_template)
+    agent_tools.register_service("list_source_profiles", _agent_list_source_profiles)
+    agent_tools.register_service("update_source_profile", _agent_update_source_profile)
+    agent_tools.register_service("control_source_ingest", _agent_control_source_ingest)
+    agent_tools.register_service("list_source_tasks", _agent_list_source_tasks)
+    agent_tools.register_service("list_source_versions", _agent_list_source_versions)
+    agent_tools.register_service("retry_source_task", _agent_retry_source_task)
+    agent_tools.register_service("retry_source_recycle", _agent_retry_source_recycle)
+
+
+_source_service = source_ingest.default_service()
+
+
+def _agent_list_source_profiles(args: dict, session: dict) -> dict:
+    return {"ok": True, "profiles": source_settings.load_profiles()}
+
+
+def _agent_update_source_profile(args: dict, session: dict) -> dict:
+    profile = source_settings.save_profile(
+        args.get("profile", ""), input_dir=args.get("input_dir", ""),
+        output_dir=args.get("output_dir", ""), enabled=bool(args.get("enabled")))
+    _source_service.profiles = source_settings.load_profiles()
+    if profile["enabled"]:
+        _source_service.start()
+    return {"ok": True, "profile": profile}
+
+
+def _agent_control_source_ingest(args: dict, session: dict) -> dict:
+    action = str(args.get("action") or "")
+    profile = str(args.get("profile") or "")
+    if action == "start":
+        _source_service.start()
+    elif action == "stop":
+        _source_service.stop()
+    elif action == "pause":
+        _source_service.pause(profile)
+    elif action == "resume":
+        _source_service.resume(profile)
+    else:
+        raise agent_tools.ToolError("自动导入控制动作无效")
+    return {"ok": True, "action": action, "profile": profile}
+
+
+def _agent_list_source_tasks(args: dict, session: dict) -> dict:
+    profile = str(args.get("profile") or "")
+    status = str(args.get("status") or "")
+    tasks = [{"task_id": tid, **payload} for tid, payload in task_store.load("source")]
+    if profile:
+        tasks = [row for row in tasks if row.get("profile") == profile]
+    if status:
+        tasks = [row for row in tasks if row.get("status") == status]
+    return {"ok": True, "tasks": tasks}
+
+
+def _agent_list_source_versions(args: dict, session: dict) -> dict:
+    return {"ok": True, "versions": source_versions.list_versions(
+        str(args.get("profile") or "") or None)}
+
+
+def _agent_retry_source_task(args: dict, session: dict) -> dict:
+    return {"ok": True, "task": _source_service.retry(str(args.get("task_id") or ""))}
+
+
+def _agent_retry_source_recycle(args: dict, session: dict) -> dict:
+    return {"ok": True, "version": source_versions.retry_recycle(
+        str(args.get("version_id") or ""))}

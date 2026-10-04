@@ -43,6 +43,13 @@ TOOLS = [
     {"name": "create_folder", "description": "新建题库目录（标准模式需要确认）", "parameters": {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}, "parent": {"type": "string"}}}},
     {"name": "tag_questions", "description": "批量追加题目标签（标准模式需要确认）", "parameters": {"type": "object", "required": ["ids", "tags"], "properties": {"ids": {"type": "array", "items": {"type": "string"}}, "tags": {"type": "array", "items": {"type": "string"}}}}},
     {"name": "delete_questions", "description": "将题目移入回收站（标准模式需要确认）", "parameters": {"type": "object", "required": ["ids"], "properties": {"ids": {"type": "array", "items": {"type": "string"}}}}},
+    {"name": "list_source_profiles", "description": "查看好题、好卷、好资料自动导入目录与监听状态", "parameters": {"type": "object", "properties": {}}},
+    {"name": "update_source_profile", "description": "修改自动导入 Profile 的输入输出目录和监听开关（需确认）", "parameters": {"type": "object", "required": ["profile", "input_dir", "output_dir"], "properties": {"profile": {"type": "string", "enum": ["good_question", "good_paper", "good_material"]}, "input_dir": {"type": "string"}, "output_dir": {"type": "string"}, "enabled": {"type": "boolean"}}}},
+    {"name": "control_source_ingest", "description": "启动、停止、暂停或恢复自动导入监听（需确认）", "parameters": {"type": "object", "required": ["action"], "properties": {"action": {"type": "string", "enum": ["start", "stop", "pause", "resume"]}, "profile": {"type": "string"}}}},
+    {"name": "list_source_tasks", "description": "查看自动导入任务状态", "parameters": {"type": "object", "properties": {"profile": {"type": "string"}, "status": {"type": "string"}}}},
+    {"name": "list_source_versions", "description": "查看好题、好卷、好资料已提交的永久版本", "parameters": {"type": "object", "properties": {"profile": {"type": "string"}}}},
+    {"name": "retry_source_task", "description": "重试失败或中断的自动导入任务（需确认）", "parameters": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
+    {"name": "retry_source_recycle", "description": "重试把已提交版本的源文件送入系统回收站（需确认）", "parameters": {"type": "object", "required": ["version_id"], "properties": {"version_id": {"type": "string"}}}},
     {"name": "restore_question", "description": "从回收站恢复题目（标准模式需要确认）", "parameters": {"type": "object", "required": ["id"], "properties": {"id": {"type": "string"}}}},
     {"name": "inspect_conversion", "description": "查看识别任务状态和可导入题目预览", "parameters": {"type": "object", "required": ["job_id"], "properties": {"job_id": {"type": "string"}}}},
     {"name": "start_conversion", "description": "在用户明确选择识别后端、导入方式和规范化方式后，启动已安全暂存文件的 OCR 识别任务；缺少选择时必须先询问用户", "parameters": {"type": "object", "required": ["stage_id"], "properties": {"stage_id": {"type": "string"}, "files": {"type": "array", "items": {"type": "string"}}, "solution": {"type": "string"}, "ocr_backend": {"type": "string", "enum": ["mineru", "doc2x"]}, "engine": {"type": "string", "enum": ["block", "whole"]}, "normalization_mode": {"type": "string", "enum": ["mechanical", "llm", "review"]}, "include_solution": {"type": "boolean"}, "folder": {"type": "string"}}}},
@@ -469,6 +476,9 @@ API_WRITE_TOOLS = {
 SERVICE_TOOLS = frozenset({
     "inspect_conversion", "start_conversion", "import_conversion",
     "export_questions", "apply_review_fixes", "enable_template",
+    "list_source_profiles", "update_source_profile", "control_source_ingest",
+    "list_source_tasks", "list_source_versions", "retry_source_task",
+    "retry_source_recycle",
 })
 
 #: 权限档位。GUI 只用 standard / danger；CLI 额外提供只读档。
@@ -1028,5 +1038,4 @@ def dispatch(name: str, args: dict | None = None, *, session: dict | None = None
         return _json_value(result)
 
     raise ToolError(f"未注册的 Agent 工具：{name}")
-
 

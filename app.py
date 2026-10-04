@@ -174,7 +174,7 @@ agent_approval_store = agent_approval_module.ApprovalStore()
 agent_services.configure(runtime=agent_runtime,
                          approvals=agent_approval_store,
                          url_builder=url_for)
-_source_ingest_service = source_ingest.SourceIngestService()
+_source_ingest_service = source_ingest.default_service()
 _agent_danger_lock = threading.Lock()
 _agent_danger_grants: dict[str, str] = {}
 
@@ -7107,6 +7107,22 @@ def source_ingest_tasks():
 def source_ingest_versions():
     return jsonify(ok=True, versions=source_versions.list_versions(
         request.args.get("profile") or None))
+
+
+@app.route("/api/source-ingest/retry/<task_id>", methods=["POST"])
+def source_ingest_retry(task_id):
+    try:
+        return jsonify(ok=True, task=_source_ingest_service.retry(task_id))
+    except (ValueError, OSError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/source-ingest/recycle/<version_id>", methods=["POST"])
+def source_ingest_recycle(version_id):
+    try:
+        return jsonify(ok=True, version=source_versions.retry_recycle(version_id))
+    except (ValueError, OSError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
 
 
 @app.route("/settings/mineru", methods=["POST"])
