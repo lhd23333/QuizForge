@@ -9,6 +9,8 @@
 """
 
 import base64
+import functools
+import logging
 import re
 import shutil
 import subprocess
@@ -18,6 +20,8 @@ import zipfile
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import config
 import export_tables
@@ -199,13 +203,21 @@ _ANSWER_BRACKET = ""
 #      （中括号、无「分」）等含数字但非分值的内容。
 _LEAD_NUM_RE = re.compile(r"^\s*\d{1,3}\s*[.．、,，)）](?!\d)\s*")
 _LEAD_SCORE_RE = re.compile(r"^\s*[（(]\s*\d+\s*分\s*[)）]\s*")
+# 残留「（N）」题号（N≥2，2026-10-04 审查：306 道真实题以此开头，渲染出
+# 「1.（10）…」双题号；解答题还会被当首个 \qsubopen 多缩进一级）。要求数字后
+# 紧跟右括号，天然不咬分值形态「（10 分）」；N==1 保留（无法与合法「（1）」小问
+# 起始区分，宁可少剥）。
+_LEAD_PAREN_NUM_RE = re.compile(r"^\s*[（(]\s*(\d{1,3})\s*[)）]\s*")
 
 
 def _strip_leading_label(body: str) -> str:
-    """剥掉题干开头残留的原始题号与分值（见上方两条正则的说明）。"""
+    """剥掉题干开头残留的原始题号与分值（见上方三条正则的说明）。"""
     s = body.lstrip()
     s = _LEAD_NUM_RE.sub("", s, count=1)
     s = _LEAD_SCORE_RE.sub("", s, count=1)
+    m = _LEAD_PAREN_NUM_RE.match(s)
+    if m and int(m.group(1)) >= 2:
+        s = s[m.end():]
     return s
 
 # 图片位置哨兵：staging 阶段（_stage_images._rewrite）把每个图引用**原位**换成
@@ -235,14 +247,18 @@ _CMD_WIDTH = {
     "sqrt": 1, "cdot": 1, "times": 1, "div": 1, "pm": 1, "mp": 1,
 }
 _FRAC_RE = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+# 关系/二元运算符字符：displaystyle 下两侧各带 ~0.5 字符的粗间距，计宽时 +1。
+_OP_CHARS = "=<>+\u2212\u00b1\u2213"
 
 
 def _frac_width(m) -> str:
-    """把 \\frac{分子}{分母} 折成一个宽度约为 max(分子,分母) 的占位串。
-    分式上下堆叠，水平宽度取分子/分母较宽者，而非两者相加。
+    """把 \\frac{分子}{分母} 折成一个宽度约为 max(分子,分母)+1 的占位串。
+    分式上下堆叠，水平宽度取分子/分母较宽者，而非两者相加；再 +1 计分数线
+    与两侧的竖直留白，且下限 3——旧写法把 \\dfrac{1}{2} 估成 1 个字符宽，
+    displaystyle 分式密集的选项被误判「短」排成 4 列后溢出（2026-10-04 审查）。
     返回等宽占位（用 'x' 填充），供外层继续计可见字符。"""
     num, den = m.group(1), m.group(2)
-    return "x" * max(_visible_len(num), _visible_len(den), 1)
+    return "x" * max(max(_visible_len(num), _visible_len(den), 1) + 1, 3)
 
 
 def _visible_len(text: str) -> int:
@@ -272,10 +288,15 @@ def _visible_len(text: str) -> int:
     for name in re.findall(r"\\([a-zA-Z]+)", s):
         width += _CMD_WIDTH.get(name, 1)
     s = re.sub(r"\\[a-zA-Z]+", "", s)
-    # 3-4. 逐字符计宽：全角×2，花括号/空白不计，其余×1
+    # 3-4. 逐字符计宽：全角×2，花括号/空白不计，其余×1；关系/二元运算符
+    # 额外 +1——displaystyle 下两侧的 \thickmuskip/\medmuskip 粗间距约一个字符
+    # 宽（2026-10-04 审查：`R<P<Q` 式选项原估 5、实际排版 ~7，4 列格互相压字）。
     s = re.sub(r"[{}\s]", "", s)
     for ch in s:
-        width += 2 if ord(ch) > 0x2E7F else 1   # CJK/全角起点之后按 2 宽
+        w = 2 if ord(ch) > 0x2E7F else 1   # CJK/全角起点之后按 2 宽
+        if ch in _OP_CHARS:
+            w += 1
+        width += w
     return width
 
 
@@ -307,14 +328,25 @@ def _practice_choice_cols(parts: list[str]) -> int:
 
     普通试卷的阈值面向整页版心，直接复用会把部分中等选项误判成 4 列；随后即使
     用不可换行盒保护完整选项，也只会变成越过单元格边界。双栏按最长可见宽度
-    <=7 排 4 列、<=18 排 2 列，其余排 1 列，让“多列不换行”与“不溢出”同时成立。
+    <=6 排 4 列、<=18 排 2 列，其余排 1 列，让“多列不换行”与“不溢出”同时成立。
+    4 列阈值 2026-10-04 由 7 收紧到 6：`R<P<Q` 类不等式选项计宽修正后为 7，
+    恰卡旧阈值放行 4 列并实测互相压字（审查：300 题样本 45 个 tasks 块溢出）。
     """
     longest = max((_visible_len(p) for p in parts), default=0)
-    if longest <= 7:
+    if longest <= 6:
         return 4
     if longest <= 18:
         return 2
     return 1
+
+
+def _escape_choice_option(text: str) -> str:
+    """转义进入 raw ``tasks`` 环境的选项文本，保护其中的普通 TeX 字符。"""
+    parts = _MATH_SPLIT_RE.split(str(text or ""))
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            parts[i] = _tex_text(part)
+    return "".join(parts)
 
 
 def split_choice_options(body: str) -> tuple[str, list[str], str] | None:
@@ -367,6 +399,24 @@ def _choice_spans(body: str) -> tuple[int, list[tuple[int, int]], int] | None:
     seq = _label_hits(body, _label_pattern(body))
     if len({s[0] for s in seq}) < 2:
         return None
+    # 题干里可能出现「图象 C.」「论断 B.」这类假标签：从"第一个标签"切会把题干
+    # 截断、把提问句当第一个选项（2026-10-04 审查实测 2007 安徽理卷第 6 题）。
+    # 选项区的真标签必然构成字母**严格递增**序列——取最长递增段的起点作切点，
+    # 它之前的假标签留给题干。无任何递增段（散点/重号等坏数据）则放弃切分，
+    # 整题按原文渲染比切歪更稳。
+    best_from, best_len = 0, 1
+    run_from, run_len = 0, 1
+    for i in range(1, len(seq)):
+        if seq[i][0] > seq[i - 1][0]:
+            run_len += 1
+        else:
+            run_from, run_len = i, 1
+        if run_len > best_len:
+            best_from, best_len = run_from, run_len
+    if best_len < 2:
+        return None
+    if best_from > 0:
+        seq = seq[best_from:]
 
     # 末选项到本行末为止，行以后的内容归尾部（见 split_choice_options 的 docstring）
     last_start = seq[-1][1]
@@ -376,7 +426,10 @@ def _choice_spans(body: str) -> tuple[int, list[tuple[int, int]], int] | None:
     # 一个标签后紧邻图片哨兵，就把后续内容视为该选项，题干/解析已在调用
     # 方切开，不会吞掉下一题。
     continuation = body[last_start:] if nl < 0 else body[nl:]
-    image_option_tail = bool(re.search(r"\n\s*QFIGSLOT\d+\b", continuation))
+    # 续接仅当"标签行之后无空行"——旧版 `\s*` 跨空行，会把「选项区之后空一行
+    # 再放的题末图」也吞进末选项，误触发四图配对、整题版式被推倒重排
+    # （2026-10-04 审查）。(?<!\n) 保证哨兵所在行之前没有空行（"\n\nQS" 不续）。
+    image_option_tail = bool(re.search(r"(?<!\n)\n[ \t]*QFIGSLOT\d+\b", continuation))
     opts_end = len(body) if nl < 0 or image_option_tail else nl
 
     spans: list[tuple[int, int]] = []
@@ -426,11 +479,22 @@ def _choice_tasks(body: str, want_parts: bool = False,
         formatted = _format_options(body)
         return (None, formatted, "") if want_parts else formatted
     stem, opts, tail_text = parts
+    # 尾部若以「答案/解析/解法/评析」开头：解析混进题干的污染形态，从渲染中
+    # 撤下（题库原文不动，便于按日志回捞修正），避免整段答案印在选项下方。
+    if tail_text and _TAIL_SOLUTION_LEAD_RE.match(tail_text):
+        logger.warning("[导出] 选择题尾部文本疑似解析混入，已从渲染撤下：%.60s…",
+                       tail_text.replace("\n", " "))
+        tail_text = ""
 
     cols = (_practice_choice_cols(opts) if nowrap_multicol
             else choice_cols(opts, width_fraction))
-    rendered_opts = ([f"\\mbox{{{p}}}" for p in opts]
-                     if nowrap_multicol and cols > 1 else opts)
+    # tasks 环境进入 raw LaTeX；选项文本不再经过 Pandoc 的普通文本转义，
+    # 因此必须自行保护 TeX 特殊字符（尤其百分号会注释掉剩余题项并触发
+    # ``Runaway argument ... environment tasks``）。数学区由
+    # ``_escape_choice_option`` 保持原样，普通文本只转义 TeX specials。
+    rendered_opts = [_escape_choice_option(p) for p in opts]
+    rendered_opts = ([f"\\mbox{{{p}}}" for p in rendered_opts]
+                     if nowrap_multicol and cols > 1 else rendered_opts)
     tasks_body = "\n".join(f"  \\task {p}" for p in rendered_opts)
     tasks_env = f"\\begin{{tasks}}({cols})\n{tasks_body}\n\\end{{tasks}}"
 
@@ -483,8 +547,12 @@ def _slot_mode_latex(rel: str) -> str:
     return f"```{{=latex}}\n\\qslotpagerel{rel}\n```\n\n"
 # 半页块里原位图的限高（\textheight 倍数）。块高锁死 0.5\textheight，题干文字、
 # 选项、作答空间都要从这里面出，故给图留约三成、剩下的够排 8~10 行正文。
-# 全页上限是 \qfigmaxh 的默认 0.4（见 exam_template.tex），半页块单独压到这个值。
+# 全页上限是 \qfigmaxh 的默认 0.4（\qhcapdefault），半页块单独压到这个值。
 _HALF_INLINE_HCAP = 0.15
+# practice 尾图/切片图下发的 \qfigmaxh 局部覆盖。与模板 \qhcappractice(0.22) 同值：
+# 模板 qpracticebegin 里也设 0.22，两处都是真相源，改动必须同步。
+# （图片高度上限全景见 exam_template.tex 顶部「图片高度上限全景」块。）
+_PRACTICE_IMG_HCAP = 0.22
 
 # 题型归类
 # 单选、多选在导出里是两个独立大题，但渲染层（ABCD 选项 + 作答括号）完全一致，
@@ -671,7 +739,8 @@ def _q_md(num: int | None, body: str, qtype: str = None, img_align: str = None,
           img_files: list[str] = None,
           plan_body: str = None, inline_hcap: float = None,
           choice_nowrap_multicol: bool = False,
-          practice_image_wrap: bool = False) -> str:
+          practice_image_wrap: bool = False,
+          box_context: bool = False) -> str:
     """单题 Markdown：题号 + 正文。选择题用 tasks 环境分列排选项 + 作答括号，
     其余题型按原逻辑把挤行选项拆成空行分段。
 
@@ -701,7 +770,8 @@ def _q_md(num: int | None, body: str, qtype: str = None, img_align: str = None,
     # img_split 传原始值（不经 _norm_split）：plan_figs 要靠 NULL/"off" 的区别判
     # 配对的默认值，见它的 docstring
     plan = plan_figs(_strip_leading_label(plan_body) if plan_body else body,
-                     qtype, img_layouts, img_split)
+                     qtype, img_layouts, img_split,
+                     practice=choice_nowrap_multicol)
 
     # 四图配选项：一图配一选项的 minipage 网格，不走 tasks，也不走图文分栏
     if plan["pair"] and qtype in _CHOICE:
@@ -783,7 +853,7 @@ def _q_md(num: int | None, body: str, qtype: str = None, img_align: str = None,
                 full = split_mode == "full"
                 return _place_choice_split(
                     num, stem, tasks_env, split_unit, marks, layouts, tail,
-                    full=full, width=w0, opt_tail=opt_tail)
+                    full=full, width=w0, opt_tail=opt_tail, hcap=inline_hcap)
             core = tasks_env  # 识别不到选项区，tasks_env 此时是已处理正文（回退用法）
         else:
             core = _choice_tasks(
@@ -805,7 +875,7 @@ def _q_md(num: int | None, body: str, qtype: str = None, img_align: str = None,
         if parts is not None:
             return _place_solve_split(
                 num, parts[0], parts[1], split_unit, marks, layouts, tail,
-                width=w0)
+                width=w0, hcap=inline_hcap)
         core = _render_subquestions(_format_options(_break_subquestions(body)))
     elif qtype in _SOLVE:
         # 解答题：多级小问（（1）（2）… 顶层 / （i）（ii）… 嵌套）渲染成多级缩进列表
@@ -815,7 +885,9 @@ def _q_md(num: int | None, body: str, qtype: str = None, img_align: str = None,
         core = _format_options(_break_subquestions(body))
     return _place_image(_num_wrap(num, core), marks, qtype, img_align,
                         img_width, split_mode in ("opts", "full", "sub"),
-                        layouts, tail_ids, plan)
+                        layouts, tail_ids, plan,
+                        boxed=box_context or practice_image_wrap,
+                        hcap=inline_hcap)
 
 
 # block 上带图片本地文件名列表的键（题干 / 解析各一份）。下标即 QFIGSLOT 哨兵编号。
@@ -930,7 +1002,7 @@ def _rest_is_blank(body: str, start: int, end: int) -> bool:
 
 
 def plan_figs(body: str, qtype: str = None, img_layouts=None,
-              img_split=None) -> dict:
+              img_split=None, practice: bool = False) -> dict:
     """图片编排计划：每张图排在哪、哪几张并排、是否四图配选项。
 
     img_split 收的是 **questions.img_split 的原始列值**，不是 _norm_split 的结果 ——
@@ -953,6 +1025,8 @@ def plan_figs(body: str, qtype: str = None, img_layouts=None,
       groups 连续图分组（中间只有空白的相邻图归一组，每组最多 2 张），
              每项 {"ids": [图序号...], "row": 是否并排}
       pair / pair_cols / pair_map  四图配选项：是否启用、列数、每个选项对应的图序号
+             （practice=True 时 4 列判定改用双栏半页阈值 _practice_choice_cols，
+             与题面列数同源；页面卡片路径不传该参数、保持整页阈值）
       has_tail / has_any  供 resolve_split 判默认分栏用
 
     识别不出结构时一律退化成「全部当尾图」——与旧版行为等价，绝不因为编排判定
@@ -1024,6 +1098,17 @@ def plan_figs(body: str, qtype: str = None, img_layouts=None,
               and all(s["pos"] == "tail" for s in plan["slots"])):
             pair_ok = True
             pair_slots = list(plan["slots"])
+        elif (len(plan["slots"]) == 4
+              and sorted(s["opt"] for s in plan["slots"]
+                         if s["opt"] is not None) == [0, 1, 2]
+              and any(s["opt"] is None and s["pos"] == "tail"
+                      for s in plan["slots"])):
+            # A~C 已各配一图、第 4 张落在最后标签之后（MinerU 四图卷实测形态
+            # `D.$\n\nQFIGSLOT3`，空行分隔）：第 4 张按正文顺序补为 D 的图。
+            # 全库 284 道「4 图单选题」均为选项配图型（2026-10-04 抽样核验），
+            # 误配风险限于「3 个选项图 + 恰在第 4 位的题干示意图」罕见形态。
+            pair_ok = True
+            pair_slots = sorted(plan["slots"], key=lambda s: s["i"])
     # 默认开、可显式关：NULL（没设过）→ 开，"pair" → 开，其余（"off"/分栏模式）→ 关。
     # 判 `is None` 而不是走 _norm_split，理由见 docstring。
     if pair_ok and (img_split is None or img_split == "pair"):
@@ -1038,10 +1123,14 @@ def plan_figs(body: str, qtype: str = None, img_layouts=None,
         widths = [(layouts.get(s["i"]) or {}).get("w") or _PAIR_DEFAULT_W
                   for s in pair_slots]
         opts_text = [body[s:e] for s, e in spans[1]]
-        # 4 列要求「图够窄」且「选项文字本身也排得下 4 列」（choice_cols 同一套
-        # 阈值）。任一条不满足退回 2 列 —— 不退到 1 列：单列摆四张图太高，撑页。
+        # 4 列要求「图够窄」且「选项文字本身也排得下 4 列」。阈值与题面同源：
+        # 双栏刷题（practice）用半栏的 _practice_choice_cols——整页阈值在窄栏里
+        # 会放过 `R<P<Q` 类选项，4 列格必然过窄（2026-10-04 审查）。任一条不满足
+        # 退回 2 列 —— 不退到 1 列：单列摆四张图太高，撑页。
+        cols_ok = (_practice_choice_cols(opts_text) if practice
+                   else choice_cols(opts_text))
         plan["pair_cols"] = 4 if (max(widths) <= _PAIR_4COL_MAX_W
-                                  and choice_cols(opts_text) == 4) else 2
+                                  and cols_ok == 4) else 2
         paired = set(plan["pair_map"])
         for s in plan["slots"]:
             if s["i"] in paired:
@@ -1275,7 +1364,10 @@ def _fig_stack_latex(items: list[tuple[str, str, float, str]],
                  f"height=\\qfigmaxh,keepaspectratio]{{{name}}}")
     body += "\\end{minipage}\\hfill\\par\\vspace{0.3em}"
     if hcap is not None:
-        body = f"{{\\setlength{{\\qfigmaxh}}{{{hcap}\\textheight}}{body}}}"
+        # 组内总高预算按张数摊分：hcap 是"整组的图片高度预算"，旧实现把它当
+        # 每张的限高，N 张竖排 = N×hcap 直接撑破半页块（2026-10-04 审查）。
+        per = hcap / max(1, len(items))
+        body = f"{{\\setlength{{\\qfigmaxh}}{{{per:.4f}\\textheight}}{body}}}"
     return _raw(body)
 
 
@@ -1293,7 +1385,7 @@ def _fig_unit_latex(unit: dict, marks: list[tuple[str, str]],
 
 def _figs_latex_planned(ids: list[int], marks: list[tuple[str, str]],
                         layouts: dict[int, dict], plan: dict = None,
-                        width=None, align=None) -> str:
+                        width=None, align=None, hcap: float = None) -> str:
     """一批图（按序号）→ raw LaTeX，行的划分照 plan_figs 的分组。
 
     width/align 是首图的兜底值（旧的 img_width/img_align 两列），只对 ids[0] 用。
@@ -1306,7 +1398,8 @@ def _figs_latex_planned(ids: list[int], marks: list[tuple[str, str]],
                         align if i == ids[0] else None) for i in ids]
     if not plan:
         return _figs_latex(items0)
-    return "".join(_fig_unit_latex(unit, marks, layouts, ids[0], width, align)
+    return "".join(_fig_unit_latex(unit, marks, layouts, ids[0], width, align,
+                                   hcap=hcap)
                    for unit in _plan_units(ids, plan))
 
 
@@ -1401,7 +1494,8 @@ def _split_fracs(width) -> tuple[float, float]:
 def _place_image(numbered_md: str, marks: list[tuple[str, str]],
                   qtype: str = None, align: str = None, width=None,
                   split=False, layouts: dict[int, dict] = None,
-                  ids: list[int] = None, plan: dict = None) -> str:
+                  ids: list[int] = None, plan: dict = None,
+                  boxed: bool = False, hcap: float = None) -> str:
     """把**尾图**按题卡设置拼到题干上，决定优先级：
 
       1. split 且题型为填空/解答题 → 整题左右对半两栏（文字左、图右）。
@@ -1430,18 +1524,21 @@ def _place_image(numbered_md: str, marks: list[tuple[str, str]],
     cap = cap or ""
     # 首图的宽度/对齐：img_layouts 里有就用它，退回旧的 img_width/img_align 两列
     width, align = _layout_at(layouts, first, width, align)
-    tail = _figs_latex_planned(ids[1:], marks, layouts, plan)
+    tail = _figs_latex_planned(ids[1:], marks, layouts, plan, hcap=hcap)
     multi = len(ids) > 1
 
     if split and qtype in (_BLANK | _SOLVE):
         return _place_text_figure_split(
-            numbered_md, ids, marks, layouts, plan or {}, width)
+            numbered_md, ids, marks, layouts, plan or {}, width, hcap=hcap)
 
     # 多图时也走这条：所有尾图交给 _figs_latex_planned 统一排（同组的并排成一行）。
     # 旧的 \qfigwrap（绕排）与 \qfig（固定小图靠右下）都只容得下一张图。
-    if align or width or multi:
+    # boxed（测量盒/minipage/samepage 上下文：half/slot/slides/practice 栏）：
+    # wrapfig 在这些环境里被强制浮动、图文分离（2026-10-04 审查三处实测），
+    # 降级为题末自定义图（flexbox，无浮动体，语义等价）。
+    if align or width or multi or boxed:
         return numbered_md + _figs_latex_planned(ids, marks, layouts, plan,
-                                                 width, align)
+                                                 width, align, hcap=hcap)
 
     if qtype in _BLANK:
         fig_latex = f"\\qfigwrap{{{name}}}{{{cap}}}"
@@ -1454,12 +1551,15 @@ def _place_image(numbered_md: str, marks: list[tuple[str, str]],
 def _place_text_figure_split(markdown: str, ids: list[int],
                              marks: list[tuple[str, str]],
                              layouts: dict[int, dict], plan: dict,
-                             width=None) -> str:
-    """把一段 Markdown 与首个题末图片视觉组排成左文右图，剩余图片续排。"""
+                             width=None, hcap: float = None) -> str:
+    """把一段 Markdown 与首个题末图片视觉组排成左文右图，剩余图片续排。
+
+    hcap：所在盒子（半页/槽位）的图片高度预算——右栏限高不得超出它，
+    否则半页槽里单靠右图就能把题干挤出版心（2026-10-04 审查）。"""
     unit, rest_ids = _split_first_unit(ids, plan)
     unit_width = _split_unit_width(unit, layouts, width)
     txt_frac, img_frac = _split_fracs(unit_width)
-    img_side = _choice_unit_side(unit, marks, layouts, img_frac)
+    img_side = _choice_unit_side(unit, marks, layouts, img_frac, hcap=hcap)
     open_block = (f"\n\n```{{=latex}}\n\\noindent\\begin{{minipage}}[t]"
                   f"{{{txt_frac}\\linewidth}}"
                   "\\setlength{\\parskip}{0pt}\\vspace{0pt}\n```\n")
@@ -1540,6 +1640,9 @@ def _split_img_hcap(frac: float) -> float:
     （拖动“看不出效果”）。改为跟列宽成比例——让“宽度”成为主导缩放维度，横图/
     方图大小由列宽决定，只有极端竖图才触及此上限做溢出保护。系数 0.72 使方图在
     列宽内由宽度绑定；封顶 0.6\\textheight 防竖图撑破版面。
+
+    高度上限全景见 exam_template.tex 顶部「图片高度上限全景」块；本函数的两项
+    参数（系数、封顶）是分栏场景专属的 Python 侧决策，模板没有对应宏。
     """
     return min(0.6, round(frac * 0.72, 3))
 
@@ -1603,7 +1706,8 @@ def _place_practice_wrap(num: int | None, core: str, unit: dict,
     """
     _txt_frac, img_frac = _split_fracs(width)
     img_frac = min(0.46, img_frac)
-    figure = _choice_unit_side(unit, marks, layouts, frac=1.0, hcap=0.22)
+    figure = _choice_unit_side(unit, marks, layouts, frac=1.0,
+                               hcap=_PRACTICE_IMG_HCAP)
     # wrapfig 与 list 环境不兼容：若沿用 _num_wrap 的 qopen 列表，宏包会发出
     # "Stationary wrapfigure forced to float" 并把图片漂到后页。题号因此改成紧跟浮图
     # 的 Markdown 加粗前缀，与题干由 pandoc 写成**同一个段落**；若把题号也塞进前面
@@ -1623,7 +1727,7 @@ def _place_practice_wrap(num: int | None, core: str, unit: dict,
 def _place_choice_split(num: int, stem: str, tasks_env: str, unit: dict,
                         marks: list[tuple[str, str]], layouts: dict[int, dict],
                         tail: str, full: bool = False, width=None,
-                        opt_tail: str = "") -> str:
+                        opt_tail: str = "", hcap: float = None) -> str:
     """选择题图文分栏。两种模式（题号仍经 _num_wrap 独占一列，见下方包裹）：
 
     - full=False（opts，默认）：题干整题宽渲染（走 pandoc 正常段落），另起一段后
@@ -1645,7 +1749,7 @@ def _place_choice_split(num: int, stem: str, tasks_env: str, unit: dict,
     txt_frac, img_frac = _split_fracs(width)
     # 两栏之后、其余图片之前：附注是对选项的补充，应紧跟选项区
     tail = (f"\n\n{opt_tail}\n" if opt_tail else "") + tail
-    right = _choice_unit_side(unit, marks, layouts, img_frac)
+    right = _choice_unit_side(unit, marks, layouts, img_frac, hcap=hcap)
 
     if full:
         open_block = (f"\n\n```{{=latex}}\n\\noindent\\begin{{minipage}}[t]{{{txt_frac}\\linewidth}}"
@@ -1707,14 +1811,14 @@ def _split_stem_subs(body: str) -> tuple[str, str] | None:
 
 def _place_solve_split(num: int, stem: str, subs: str, unit: dict,
                        marks: list[tuple[str, str]], layouts: dict[int, dict],
-                       tail: str, width=None) -> str:
+                       tail: str, width=None, hcap: float = None) -> str:
     """解答题“仅小问分栏”：题干整行宽渲染，之后把小问（左栏）与图片（右栏）左右
     分栏（题号仍经 _num_wrap 独占一列，见下方包裹）。题干走 pandoc 正常段落，
     小问含数学式/换行同样交给 pandoc（借用选择题 full 同款“交错”手法：raw 开左栏
     → 小问 markdown → raw 补收左栏 + 拼右图栏）。width 经 _split_fracs 决定两列
     占比；小问经 _render_subquestions 渲染出多级缩进（（1）（i）（ii）嵌套）。"""
     txt_frac, img_frac = _split_fracs(width)
-    right = _choice_unit_side(unit, marks, layouts, img_frac)
+    right = _choice_unit_side(unit, marks, layouts, img_frac, hcap=hcap)
     open_block = (f"\n\n```{{=latex}}\n\\par\\vspace{{0.3em}}\\noindent"
                   f"\\begin{{minipage}}[t]{{{txt_frac}\\linewidth}}"
                   "\\setlength{\\parskip}{0pt}\\vspace{0pt}\n```\n")
@@ -1785,7 +1889,9 @@ def paginate(questions: list[dict], mode: str = "list", keypoints: str = "",
     std_opts: 标准试卷（exam_std）的分值说明等选项。
     """
     _validate_export_options(mode=mode, solution_mode=solution_mode)
-    fullpage_ids = set(fullpage_ids or [])
+    # 与 Word 侧一致做 str 归一：Agent/插件可能按文档传数字 id，裸比较会让
+    # 「独占整页」静默失效（2026-10-04 审查）。
+    fullpage_ids = {str(v) for v in (fullpage_ids or [])}
 
     if mode == "exam_std":
         pages = _paginate_exam_std(questions, std_opts or {}, bank_subject)
@@ -1897,7 +2003,7 @@ def _paginate_practice(questions, bank_subject="math"):
 
 
 def _paginate_two(questions, fullpage_ids, start_num=1):
-    """讲义/笔记模式：选择题与填空题一页四题（各 1/4 页），解答题一页两题（各半页）。
+    """讲义/笔记模式：每题目标半页（一页两题，所有题型统一）。
 
     题号按传入顺序连续编号，**不按题型分桶重排**——这两个模式是「按自己的顺序过
     题」的场景，重排会打乱用户在题库里的排序（试卷模式才分大题）。故同一页上可能
@@ -1921,8 +2027,10 @@ def _paginate_two(questions, fullpage_ids, start_num=1):
             page = _new_page(pages)
             continue
         qtype = q.get("type")
-        # 选择题/填空题目标 1/4 页，解答题（及其他题型）目标半页
-        layout = ("slot_quarter" if qtype in _CHOICE | _BLANK else "slot_half")
+        # 一页两题（用户规格）：所有题型统一目标半页。曾按「选择/填空各 1/4
+        # 页、解答半页」细分，与 UI 文案「笔记（一页两题）」不符（2026-10-04
+        # 用户反馈「一页两题失效」）；超半页自动升级整页的兜底不变。
+        layout = "slot_half"
         page.append({"kind": "question", "num": num, "body": q["body"],
                      "layout": layout, "solution": q.get("solution"),
                      "type": qtype, **_img_fields(q)})
@@ -2139,13 +2247,16 @@ def _heading_latex(text: str, points: str = "", colon: bool = False) -> str:
             label = f"{text}{p}"
         else:
             label = f"{text}（{p}）"
+    # \nobreak（=\penalty10000）：禁止标题与其后首题之间断页——页数一多时
+    # 「三、解答题」会孤零零留在页底（2026-10-04 审查实测）。
     return (f"\\par\\noindent{{\\large\\bfseries {label}}}"
-            f"\\par\\vspace{{0.4em}}")
+            f"\\par\\nobreak\\vspace{{0.4em}}")
 
 
 def _half_block(num: int, body: str, heading: str = "", qtype: str = None,
                 img_align: str = None, img_width=None, img_split=False,
-                img_layouts=None, img_files: list[str] = None) -> str:
+                img_layouts=None, img_files: list[str] = None,
+                solution_md: str = "") -> str:
     """把一题包进固定半页高的 minipage；可在题前嵌入大题标题（随题绑定）。
 
     原位图仍**留在文字中间**（这是本功能在试卷模式下唯一的落地点：exam/two 模式
@@ -2155,17 +2266,22 @@ def _half_block(num: int, body: str, heading: str = "", qtype: str = None,
     尾图不受影响：分栏/绕排的既有优先级与尺寸都与改动前逐字一致。
     """
     inner = _q_md(num, body, qtype, img_align, img_width, img_split, img_layouts,
-                  img_files, inline_hcap=_HALF_INLINE_HCAP)
+                  img_files, inline_hcap=_HALF_INLINE_HCAP, box_context=True)
     if heading:
         # 标题的 raw-LaTeX 直接拼进 minipage 顶部，再接题目 Markdown
         inner = _raw(_heading_latex(heading)).strip("\n") + "\n\n" + inner
+    if solution_md:
+        # inline 解析进盒：纯文字解析没有 wrapfig 冲突（含图解析在 _render_block
+        # 已改走 natural 分支不进槽盒），题+解析一起参与槽位高度决策——旧版
+        # 「有解析就整体退出槽位」使「一页两题」在有解析的题上失效（2026-10-04 审查）。
+        inner = inner + "\n\n" + solution_md
     return (_HALF_OPEN + inner + _HALF_CLOSE)
 
 
 def _slot_block(num: int, body: str, frac: float, heading: str = "",
                 qtype: str = None, img_align: str = None, img_width=None,
                 img_split=False, img_layouts=None,
-                img_files: list[str] = None) -> str:
+                img_files: list[str] = None, solution_md: str = "") -> str:
     """把一题包进自适应槽位（frac = 目标高度占版心比例）。
 
     与 _half_block 的差别只在盒子：这里内容超出目标就升级到更大的槽位，且断页
@@ -2174,9 +2290,12 @@ def _slot_block(num: int, body: str, frac: float, heading: str = "",
     撑破槽位；升级机制只保证内容不丢，不代表可以让图任意大。
     """
     inner = _q_md(num, body, qtype, img_align, img_width, img_split, img_layouts,
-                  img_files, inline_hcap=_HALF_INLINE_HCAP)
+                  img_files, inline_hcap=_HALF_INLINE_HCAP, box_context=True)
     if heading:
         inner = _raw(_heading_latex(heading)).strip("\n") + "\n\n" + inner
+    if solution_md:
+        # inline 解析进槽：同 _half_block——纯文字解析参与槽位高度与分页决策。
+        inner = inner + "\n\n" + solution_md
     return (_slot_open(frac) + inner + _SLOT_CLOSE)
 
 
@@ -2282,6 +2401,12 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
         head = _raw(f"\\qslidehead{{第 {b['num']} 题解析}}")
         return _expand_tables(head + sol_body)
     # question
+    if kind != "question":
+        # 未知 kind 旧行为是"掉进 question 分支"静默渲染/KeyError（2026-10-04
+        # 审查）；显式报出来源，避免新 block 类型被错渲。
+        raise ExportError(
+            f"未知的排版块类型 {kind!r}：可能是新版 paginate 新增的 block kind，"
+            "_render_block 缺少对应分支")
     layout = b.get("layout", "flow")
     body = b["body"]
     sol = b.get("solution")
@@ -2301,8 +2426,12 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
         inline_solution = _solution_md(
             sol, b.get(_SOL_IMG_FILES_KEY), b.get("sol_img_layouts"),
             b.get("sol_img_split"))
+    # 仅当解析**含图**才退出槽位：wrapfig 进不了测量盒/list（见下方注释）。
+    # 纯文字解析留在槽内参与分页决策（2026-10-04 审查：旧版一刀切使三种模式的
+    # 「一页两题」承诺在有解析的题上整体失效）。
     natural_inline = bool(
-        inline_solution and layout in _INLINE_NATURAL_LAYOUTS)
+        inline_solution and layout in _INLINE_NATURAL_LAYOUTS
+        and b.get(_SOL_IMG_FILES_KEY))
 
     if layout == "slide":
         # 课件页的题号放进顶部色条，正文不再重复显示「1.」。_q_md 仍负责选择题
@@ -2310,7 +2439,7 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
         head = _raw(f"\\qslidehead{{第 {b['num']} 题}}")
         md = _slide_left_content(
             head + _q_md(None, body, b.get("type"), img_align, img_width,
-                         img_split, img_layouts, img_files)
+                         img_split, img_layouts, img_files, box_context=True)
             + ("\n\n" + inline_solution if inline_solution else "")
         )
     elif layout == "half":
@@ -2326,7 +2455,8 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
                 b["num"], body, heading=b.get("heading", ""),
                 qtype=b.get("type"), img_align=img_align,
                 img_width=img_width, img_split=img_split,
-                img_layouts=img_layouts, img_files=img_files)
+                img_layouts=img_layouts, img_files=img_files,
+                solution_md=inline_solution)
     elif layout in ("slot_half", "slot_quarter"):
         if natural_inline:
             md = (_natural_question_block(
@@ -2343,7 +2473,8 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
                 b["num"], body, frac, heading=b.get("heading", ""),
                 qtype=b.get("type"), img_align=img_align,
                 img_width=img_width, img_split=img_split,
-                img_layouts=img_layouts, img_files=img_files)
+                img_layouts=img_layouts, img_files=img_files,
+                solution_md=inline_solution)
     elif layout == "practice":
         practice_solve = bool(b.get("practice_solve"))
         md = _q_md(b["num"], body, b.get("type"), img_align, img_width,
@@ -2406,12 +2537,17 @@ def _render_practice_pages(pages: list[list[dict]],
                            solution_mode: str = "none") -> str:
     """双栏刷题页：每个显式分页段各自开启双栏，避免 clearpage 留在环境内部。
 
-    `multicols*` 不平衡末页：先填满左栏再流向右栏，正好对应刷题册的阅读顺序；
-    separate 解析页也复用双栏，但会在题目区之后先正常结束环境再另起一页。
+    `multicols*` 不平衡末页：先填满左栏再流向右栏，正好对应刷题册的阅读顺序。
+    解题页（separate 解析）不套多栏：解析图文混排含 wrapfigure，而 wrapfig 与
+    multicols 冲突（图会被抛到栏末、位置全乱）；解析整页宽单栏排也更便读
+    （2026-10-04 P1-9）。
     """
     wrapped = []
     for page in pages:
         blocks = "\n\n".join(_render_block(b, solution_mode) for b in page)
+        if any(b.get("kind") == "solution_head" for b in page):
+            wrapped.append(blocks)
+            continue
         wrapped.append(
             _raw("\\qpracticebegin").strip("\n") + "\n\n" + blocks
             + "\n\n" + _raw("\\qpracticeend").strip("\n")
@@ -2448,62 +2584,68 @@ def _validate_export_options(*, mode: str, solution_mode: str,
     if fmt is not None and (not isinstance(fmt, str) or fmt not in SUPPORTED_FORMATS):
         raise ExportError(f"不支持的导出格式：{fmt}")
 
-# 标准试卷解答题：每题正文后预留的作答空白（连续紧凑排，非半页）。
-# 每多一个小问多留的高度，与基础高度（对应 1 问的题）——线性给，不做精细的
-# 题干长度/公式高度估算（那是一整套高度估算引擎的活，本次只治「固定值不看
-# 题目内容」这一个具体问题）。封顶 12em 避免小问堆多的题把纸撑得过于稀疏。
-# 标准试卷不是用来作答的（考试用答题卡），故留白只为卷面呼吸感、不留作答位：
-# 仍按小问数递增（多问的题看着不至于挤在一起），但整体压缩——基础 2 行、每多
-# 一个小问加 0.5 行、封顶 4 行，约等于用户要求的「统一间隔三到四行」。
-# 简单试卷（exam）相反：那是直接印给学生写的作业，作答空间由半页/整页槽位给足。
-_SOLVE_SPACE_BASE_EM = 2.0
-_SOLVE_SPACE_PER_SUB_EM = 0.5
-_SOLVE_SPACE_MAX_EM = 4.0
-
-# 双栏刷题的解答题作答区按「难度 + 一级小问数」计算，单位是正文行高。
-# 用户实打样后确认初版太少，四个参数统一乘二：难度 1 从 3 行起，每升一级加
-# 1 行，每多一个一级小问加 1.5 行，封顶 12 行。四项一起翻倍才能保证所有难度、
-# 小问数量下都严格保持原公式的两倍，而不是只让简单题变长、难题仍撞旧封顶。
-_PRACTICE_SPACE_BASE_LINES = 3.0
-_PRACTICE_SPACE_PER_DIFFICULTY = 1.0
-_PRACTICE_SPACE_PER_SUB = 1.5
-_PRACTICE_SPACE_MAX_LINES = 12.0
+# —— 作答空间统一规则（2026-10-04 P1-10 收敛）——
+# 此前 solve_compact/exam_std 与 practice 各有一套公式：单位不同（em vs
+# \baselineskip）、小问口径不同（所有小问行 vs 一级小问）、且都不可配置。
+# 现收敛为一张声明表 + 一个计算函数 _answer_space：
+#   * 单位一律正文行高 \baselineskip；
+#   * 小问口径统一为「一级小问」（_SUBQ_TOP_RE 识别，(i) 这类次级小问不单独加行）；
+#   * 两模式仅在参数上不同——练习册额外按难度线性加行（用户打样确认过的效果）；
+#   * 运行时可经 config.ANSWER_SPACE（按 scope 的字段子集）覆写，供设置面板
+#     或测试注入；无覆写时即下表默认值。
+# solve 旧值 2em/0.5em/4em 按 1em≈0.8\baselineskip 折算为 1.6/0.4/3.2（视觉
+# 差 <1%）；口径改为一问后，带 (i) 次问的题留白略减——这正是要治的不一致。
+# 标准试卷不是用来作答的（考试用答题卡），留白只为卷面呼吸感；练习册相反，
+# 是直接印给学生写的，作答区由本表按难度足额给。简单试卷（exam）的作答空间
+# 由半页/整页槽位给足，不经过本表。
+_ANSWER_SPACE_DEFAULT = {
+    "solve":    {"base": 1.6, "per_sub": 0.4, "per_difficulty": 0.0, "max": 3.2},
+    "practice": {"base": 3.0, "per_sub": 1.5, "per_difficulty": 1.0, "max": 12.0},
+}
 
 
-def _solve_answer_space(body: str) -> str:
-    """按小问数量算 solve_compact 的作答留白，替代固定 5.5em。
+def _answer_space_spec(scope: str) -> dict:
+    """取某个场景的作答空间参数：内置默认表 + config.ANSWER_SPACE 覆写合并。"""
+    spec = dict(_ANSWER_SPACE_DEFAULT[scope])
+    overrides = getattr(config, "ANSWER_SPACE", None) or {}
+    spec.update(overrides.get(scope) or {})
+    return spec
 
-    数 body 里能被 _SUBQ_LINE_RE 识别的小问行数（(1)(2).../(i)(ii)... 都算，
-    与 _render_subquestions 识别的是同一套序号）；识别不到任何小问（整题
-    一段）时按 1 问计——不能给 0，没有作答空间无法写字。
+
+def _answer_space(body: str, scope: str, difficulty=None) -> str:
+    """统一作答留白计算（正文行高倍数，随难度与一级小问数线性增长）。
+
+    body 先经 _break_subquestions 归一，再数「一级小问」行（(1)(2)... 与 (i)(ii)
+    ... 同属一级，见 _SUBQ_TOP_RE 注释）；识别不到任何小问（整题一段）时按 1 问
+    计——不能给 0，没有作答空间无法写字。
     """
-    normalized = _break_subquestions(body)
-    n = sum(1 for line in normalized.splitlines()
-            if _SUBQ_LINE_RE.match(line.lstrip(" \t　")))
-    n = max(n, 1)
-    em = min(_SOLVE_SPACE_BASE_EM + _SOLVE_SPACE_PER_SUB_EM * (n - 1),
-             _SOLVE_SPACE_MAX_EM)
-    return f"{em:.1f}em"
-
-
-def _practice_answer_space(body: str, difficulty) -> str:
-    """按难度和一级小问数量计算双栏刷题解答题作答区。"""
-    try:
-        level = max(1, min(5, int(difficulty)))
-    except (TypeError, ValueError):
-        level = 3
+    spec = _answer_space_spec(scope)
     normalized = _break_subquestions(body)
     sub_count = sum(
         1 for line in normalized.splitlines()
         if _SUBQ_TOP_RE.match(line.lstrip(" \t　"))
     )
     sub_count = max(sub_count, 1)
+    try:
+        level = max(1, min(5, int(difficulty)))
+    except (TypeError, ValueError):
+        level = 3
     lines = (
-        _PRACTICE_SPACE_BASE_LINES
-        + _PRACTICE_SPACE_PER_DIFFICULTY * (level - 1)
-        + _PRACTICE_SPACE_PER_SUB * (sub_count - 1)
+        spec["base"]
+        + spec["per_sub"] * (sub_count - 1)
+        + spec["per_difficulty"] * (level - 1)
     )
-    return f"{min(lines, _PRACTICE_SPACE_MAX_LINES):.2f}\\baselineskip"
+    return f"{min(lines, spec['max']):.2f}\\baselineskip"
+
+
+def _solve_answer_space(body: str) -> str:
+    """标准试卷解答题作答留白（solve 场景，规则见 _ANSWER_SPACE_DEFAULT）。"""
+    return _answer_space(body, "solve")
+
+
+def _practice_answer_space(body: str, difficulty) -> str:
+    """双栏刷题解答题作答留白（practice 场景，规则见 _ANSWER_SPACE_DEFAULT）。"""
+    return _answer_space(body, "practice", difficulty)
 
 
 # 标准试卷各题型的大题说明尾句（跟在「本题共 x 小题，每小题 y 分，共 z 分。」后）。
@@ -2816,10 +2958,21 @@ _ORPHAN_NOT_SCRIPT_RE = re.compile(r"\^\s*\{\s*\\not\s*\}")
 # 强调标记。只认连续三个及以上，避免碰到 ``a_1`` 这类正常下标。
 _FILL_BLANK_RE = re.compile(r"(?:\\_\s*){2,}\\_|_{3,}")
 _FILL_BLANK_TEX = r"\underline{\hspace{2cm}}"
+# 行内 `$` 与内容之间的边界空白（见 _sanitize_export_text）：`f  $` / `$ f` 这类
+# 写歪的边界让 pandoc 不认开/闭合（要求右侧/左侧紧贴非空白），该 `$` 落单被转义
+# 成 `\$`，配对崩坏后 xelatex 报 `! Missing $ inserted.` 令整卷导出失败。
+# `$$`（display 允许两侧空白）与空公式 `$ $` 不动。
+_DOLLAR_TRAIL_GAP_RE = re.compile(r"(?<=[^\s$])[ \t\n]+\$(?!\$)")
+_DOLLAR_LEAD_GAP_RE = re.compile(r"(?<!\$)\$(?!\$)[ \t\n]+(?=[^\s$])")
 _SOLUTION_LEADING_LABEL_RE = re.compile(
     r"\A\s*(?:#{1,6}\s*)?(?:【\s*解析\s*】|解析\s*[：:])\s*",
     re.I,
 )
+# 选择题「尾部文本」（选项区之后、见 split_choice_options）以这些词开头时视为
+# 解析混进题干的污染数据，从渲染中撤下；「参考公式：…」这类正常附注不受影响
+# （2026-10-04 审查：线上联考卷实测 tail 为 1686 字的「答案 BC…解法一」整段解析，
+# 原样会印在选项下方）。
+_TAIL_SOLUTION_LEAD_RE = re.compile(r"^\s*(?:【\s*)?(?:答案|解析|解法|评析)")
 
 
 def _strip_solution_leading_label(text: str) -> str:
@@ -2840,6 +2993,11 @@ def _sanitize_export_text(text: str) -> str:
     # 新的行内数学式，避免 U+0338 落进普通文本字体而消失。
     # 闭合美元后留空格：Pandoc 要求行内数学的闭合 `$` 后不能紧跟数字，`$\neq$0`
     # 会被误判成普通文本；写成 `$\neq$ 0` 才会稳定生成 `\(\neq\) 0`。
+    # 行内 `$` 边界空白归一（`$\displaystyle f  $` → `$\displaystyle f$`）：
+    # 写歪的边界让该 `$` 落单、被转义成 `\$`，配对崩坏后整卷 xelatex 失败
+    # （2026-10-04 审查实测样例：希望联盟夏令营 2024-2 第 3 题）。
+    cleaned = _DOLLAR_TRAIL_GAP_RE.sub("$", cleaned)
+    cleaned = _DOLLAR_LEAD_GAP_RE.sub("$", cleaned)
     return cleaned.replace("$\u0338=", r"$ $\neq$ ")
 
 
@@ -3021,6 +3179,57 @@ def _escape_stray_backslash(text: str) -> str:
         if i % 2 == 0:  # 偶数下标：非数学段；奇数下标是数学式，原样保留
             parts[i] = part.replace("\\", "\\\\")
     return "".join(parts)
+
+
+def _merge_inline_math_newlines(text: str) -> str:
+    """把行内公式（``$...$``）内部的换行合并为空格；``$$...$$`` 不动。
+
+    为什么需要：``_MATH_SPLIT_RE`` 的行内数学约定「限制在单行内」（见其注
+    释），而题库里有从上游 LaTeX 折行带进来的跨行行内公式（实测 2025 北京
+    卷第 20 题解答的 ``$\\frac{2a-x_1-x_2}{x_2-x_1}\\n=\\frac{...}$``）。跨
+    行的 ``$...$`` 认不出 → 一切「按数学区切段」的环节都把它当普通文本 →
+    ``_escape_stray_backslash`` 把公式里的反斜杠全部双写 → PDF 里整段公式
+    碎成「in / left( / frac1mathrm e」逐行文字（2026-10-04 真实导出故障）。
+    在预处理链最前面把行内公式规范化为单行，下游全部既有假设（含 pandoc）
+    即可自然成立。
+
+    配对规则与 ``_MATH_SPLIT_RE`` 一致：``\\$`` 不算定界；``$$`` 成对跳过
+    （块公式跨行合法）；未闭合的落单 ``$`` 之后不处理（保守，不火上浇油）。
+    """
+    if not text or "$" not in text:
+        return text
+    n = len(text)
+    spans: list[tuple[int, int]] = []
+    i = 0
+    open_at = None
+    while i < n:
+        ch = text[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if ch == "$":
+            if text.startswith("$$", i):
+                j = text.find("$$", i + 2)
+                i = n if j < 0 else j + 2
+                continue
+            if open_at is None:
+                open_at = i
+            else:
+                spans.append((open_at, i))
+                open_at = None
+        i += 1
+    if not spans:
+        return text
+    out: list[str] = []
+    last = 0
+    for a, b in spans:
+        out.append(text[last:a])
+        inner = text[a:b + 1]
+        inner = inner.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+        out.append(inner)
+        last = b + 1
+    out.append(text[last:])
+    return "".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -3304,6 +3513,10 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
     def _prep(text: str) -> tuple[str, list[str]]:
         """staging 阶段的正文预处理，顺序不能反：
 
+        0. _merge_inline_math_newlines 把行内公式内部的换行合并为空格（跨行
+           行内公式会让 _MATH_SPLIT_RE 认不出它，随后 _escape_stray_backslash
+           把公式里的反斜杠全部双写，PDF 里公式碎成「in / left( / frac」逐行
+           文字；2026-10-04 真实导出故障）；
         1. _sanitize_export_text 清掉不可见控制码与无语义的私用区括号碎片；
         2. _normalize_fill_blank_markers 把连续下划线转成合法的 TeX 填空线；
         3. _repair_nested_dollar_math 去掉「块公式内又嵌行内公式」的无效外壳；
@@ -3320,7 +3533,8 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
         10. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
         11. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
         """
-        repaired = _sanitize_export_text(text)
+        repaired = _merge_inline_math_newlines(text)
+        repaired = _sanitize_export_text(repaired)
         repaired = _normalize_fill_blank_markers(repaired)
         repaired = _repair_nested_dollar_math(repaired)
         repaired = _normalize_unicode_math_symbols(repaired)
@@ -3424,8 +3638,9 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
            header_footer: dict = None, solution_mode: str = "none",
            std_opts: dict = None, paper_tone: str = "white",
            wimath_logo: bool = False, bank_subject: str = "math",
-           template_path: str | Path | None = None) -> Path:
-    """在有界编译槽内导出；公开签名保持不变。"""
+           template_path: str | Path | None = None,
+           cjk_font: str = "", latin_font: str = "") -> Path:
+    """在有界编译槽内导出；公开签名向后兼容（新增可选字体参数）。"""
     _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
     with _EXPORT_SLOTS:
         return _export_unlocked(
@@ -3434,6 +3649,7 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
             solution_mode=solution_mode, std_opts=std_opts,
             paper_tone=paper_tone, wimath_logo=wimath_logo,
             bank_subject=bank_subject, template_path=template_path,
+            cjk_font=cjk_font, latin_font=latin_font,
         )
 
 
@@ -3444,7 +3660,8 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
                      paper_tone: str = "white",
                      wimath_logo: bool = False,
                      bank_subject: str = "math",
-                     template_path: str | Path | None = None) -> Path:
+                     template_path: str | Path | None = None,
+                     cjk_font: str = "", latin_font: str = "") -> Path:
     """导出为 tex / pdf / zip（tex + 插图打包），返回产物路径。
 
     questions: dict 列表，每项含 id/body/type/solution。
@@ -3498,6 +3715,7 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     if logo_name:
         cmd += ["-V", f"wimath_logo={logo_name}"]
     cmd += _paper_tone_variable_args(paper_tone)
+    cmd += _font_variable_args(cjk_font, latin_font)
     cmd += _hf_variable_args(header_footer, title)
     _run(cmd, cwd=work_dir, step="pandoc")
     if fmt == "tex":
@@ -3523,6 +3741,9 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
                 cwd=work_dir,
                 step="xelatex",
             )
+        fatal = _xelatex_fatal_log(work_dir)
+        if fatal:
+            raise ExportError(f"[xelatex] 日志检测到致命错误：{fatal}{_tex_error_hint(work_dir)}")
     if not pdf_path.exists():
         raise ExportError("xelatex 未生成 PDF，请检查 .log 文件")
     return pdf_path
@@ -3548,6 +3769,84 @@ def _paper_tone_variable_args(paper_tone: str) -> list[str]:
     和 tex+图片压缩包都在生成的 tex 里固化同一背景；预览与正式导出也天然同源。
     """
     return ["-V", "paper_cream=1"] if paper_tone == "cream" else []
+
+
+# —— 导出面板字体选项（2026-10-04 新增）——
+# value 为 fontspec 族名（连同 "-V cjk_font"/"latin_font" 进 pandoc 模板变量），
+# label 供 UI 下拉直接渲染。"" 表示跟随默认（中文=下方三档自动回落链；英文=
+# Latin Modern）。本机可用性经 Windows 字体注册表过滤；FandolSong 随 TeX 分发
+# （MiKTeX 自带）不在系统注册表，单列在 TeX 专属区。
+_EXPORT_CJK_FONT_CHOICES = (
+    ("", "默认（自动：思源黑体 → 微软雅黑 → Fandol）"),
+    ("Noto Sans SC", "思源黑体 Noto Sans SC"),
+    ("Noto Serif SC", "思源宋体 Noto Serif SC"),
+    ("Microsoft YaHei", "微软雅黑"),
+    ("SimSun", "宋体"),
+    ("SimHei", "黑体"),
+    ("KaiTi", "楷体"),
+    ("FangSong", "仿宋"),
+)
+_EXPORT_CJK_TEX_ONLY = (
+    ("FandolSong", "Fandol 宋体（TeX 自带；少数阅读器中文可能空白）"),
+)
+_EXPORT_LATIN_FONT_CHOICES = (
+    ("", "默认（Latin Modern）"),
+    ("Times New Roman", "Times New Roman"),
+    ("Arial", "Arial"),
+    ("Georgia", "Georgia"),
+    ("Cambria", "Cambria"),
+    ("Calibri", "Calibri"),
+    ("Garamond", "Garamond"),
+)
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_font_names() -> frozenset:
+    """本机已安装字体注册表键名集合（非 Windows / 读取失败时为空集）。"""
+    names: set = set()
+    try:
+        import winreg
+        with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts") as key:
+            index = 0
+            while True:
+                try:
+                    name, _value, _type = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                names.add(str(name))
+                index += 1
+    except OSError:
+        pass
+    return frozenset(names)
+
+
+def _font_installed(family: str) -> bool:
+    """注册表键名形如 `Noto Sans SC (TrueType)` / `SimSun & NSimSun (TrueType)`。"""
+    return any(key.startswith(family) for key in _windows_font_names())
+
+
+def available_export_fonts() -> dict:
+    """导出面板的中/英文字体清单（只含本机可用项，供页面下拉渲染）。"""
+    cjk = [(fid, label) for fid, label in _EXPORT_CJK_FONT_CHOICES
+           if not fid or _font_installed(fid)]
+    cjk += list(_EXPORT_CJK_TEX_ONLY)
+    latin = [(fid, label) for fid, label in _EXPORT_LATIN_FONT_CHOICES
+             if not fid or _font_installed(fid)]
+    return {"cjk": cjk, "latin": latin}
+
+
+def _font_variable_args(cjk_font: str, latin_font: str) -> list[str]:
+    """字体选择 → pandoc -V 变量；只认清单内的名字（防任意串拼进 LaTeX 模板）。"""
+    allowed_cjk = {fid for fid, _ in available_export_fonts()["cjk"] if fid}
+    allowed_latin = {fid for fid, _ in available_export_fonts()["latin"] if fid}
+    args: list[str] = []
+    if cjk_font in allowed_cjk:
+        args += ["-V", f"cjk_font={cjk_font}"]
+    if latin_font in allowed_latin:
+        args += ["-V", f"latin_font={latin_font}"]
+    return args
 
 
 def _zip_tex(tex_path: Path, stem: str, work_dir: Path) -> Path:
@@ -3582,6 +3881,51 @@ def _zip_tex(tex_path: Path, stem: str, work_dir: Path) -> Path:
     return zip_path
 
 
+def _tex_error_hint(work_dir: Path) -> str:
+    """xelatex 失败时从日志定位首个错误的 tex 行号，并映射到最近的题号。
+
+    映射手法：MiKTeX 日志的错误位置形如 ``l.519``；在该行向上找最近的
+    ``\\qopen{...}``（题号所在行），即可把「! Missing $ inserted.」这类
+    无上下文的报错落到具体某道题（2026-10-04 审查：单题坏 $ 让整卷失败，
+    用户只看到一长串 LaTeX 日志、无法知道是哪一题）。
+    """
+    logs = sorted(work_dir.glob("*.log"),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    if not logs:
+        return ""
+    text = logs[0].read_text(encoding="utf-8", errors="replace")
+    m = re.search(r"(?m)^l\.(\d+)", text)
+    if not m:
+        return ""
+    line_no = int(m.group(1))
+    texs = sorted(work_dir.glob("*.tex"),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    if not texs:
+        return ""
+    lines = texs[0].read_text(encoding="utf-8", errors="replace").splitlines()
+    for i in range(min(line_no, len(lines)) - 1, -1, -1):
+        qm = re.search(r"\\qopen\{([^}]*)\}", lines[i])
+        if qm:
+            return (f"\n[定位] 错误出现在 tex 第 {line_no} 行，向上最近的题号是"
+                    f"「{qm.group(1)}」——请对照该题检查未闭合的 $ 或非法字符。")
+    return f"\n[定位] 错误出现在 tex 第 {line_no} 行（未能定位到具体题号）。"
+
+
+def _xelatex_fatal_log(work_dir: Path) -> str:
+    """识别 nonstopmode 下仍生成残缺 PDF 的致命 TeX 日志。"""
+    logs = sorted(work_dir.glob("*.log"),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    if not logs:
+        return ""
+    text = logs[0].read_text(encoding="utf-8", errors="replace")
+    if re.search(r"(?m)^!\s+(?:File ended while scanning|Emergency stop|Fatal error|Runaway)", text):
+        for line in text.splitlines():
+            if line.startswith("! "):
+                return line[2:].strip()[:240]
+        return "TeX 致命错误"
+    return ""
+
+
 def _run(cmd: list[str], cwd: Path, step: str):
     """跑外部命令，失败抛 ExportError（参数列表形式，避免注入）。"""
     try:
@@ -3605,4 +3949,5 @@ def _run(cmd: list[str], cwd: Path, step: str):
 
     if proc.returncode != 0:
         tail = (proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]
-        raise ExportError(f"[{step}] 退出码 {proc.returncode}: {tail}")
+        hint = _tex_error_hint(cwd) if step == "xelatex" else ""
+        raise ExportError(f"[{step}] 退出码 {proc.returncode}: {tail}{hint}")

@@ -350,6 +350,22 @@ class PracticeExportTests(unittest.TestCase):
             "短选项\nA. 1 B. 2 C. 3 D. 4")
         self.assertNotIn(r"\task \mbox{", normal_exam)
 
+    def test_choice_options_escape_percent_in_raw_tasks_latex(self):
+        rendered = exporter._choice_tasks(
+            "某比例题\nA. 62% B. 56% C. 46% D. 42%")
+        self.assertNotIn("62%", rendered)
+        self.assertIn(r"62\%", rendered)
+        self.assertIn(r"56\%", rendered)
+
+    def test_xelatex_fatal_log_is_not_accepted_because_pdf_exists(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "x.log").write_text(
+                "Output written on x.pdf.\nRunaway argument?\n"
+                "! File ended while scanning use of \\environment tasks .\n",
+                encoding="utf-8")
+            self.assertIn("File ended", exporter._xelatex_fatal_log(root))
+
     def test_practice_uses_narrower_column_thresholds(self):
         medium = ["A. abcdefghijkl", "B. bcdefghijklm"]
         self.assertEqual(exporter.choice_cols(medium), 2)
