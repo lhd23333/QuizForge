@@ -102,6 +102,17 @@ Free code signing provided by SignPath.io, certificate by SignPath Foundation
 
 SignPath Foundation 审核尚未完成。当前 GitHub Actions 只构建短期保留的未签名候选供来源验证，不创建 Release；公开安装包必须在签名、哈希复验和覆盖升级验收全部完成后发布。角色、构建来源和隐私声明见 [完整代码签名政策](docs/CODE_SIGNING_POLICY.md)。
 
+## 导出效果
+
+下面是两份由 QuizForge 导出的真实试卷首页（本机 XeLaTeX 编译，仅展示首页）：
+
+<p align="center">
+  <img src="docs/images/quizforge-sample-1.png" width="46%" alt="近五年北京卷选：A4 双栏试卷首页，共 3 页">
+  <img src="docs/images/quizforge-sample-2.png" width="46%" alt="历年预赛-紧凑版：紧凑双栏刷题册首页，共 58 页">
+</p>
+
+左：**近五年北京卷选**——A4 双栏试卷，共 3 页。右：**历年预赛-紧凑版**——紧凑双栏刷题册，共 58 页。
+
 <details>
 <summary><strong>开发、构建与实现细节</strong></summary>
 

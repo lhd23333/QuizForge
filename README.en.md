@@ -97,6 +97,17 @@ Provider links: [SignPath.io](https://signpath.io/) · [SignPath Foundation](htt
 
 SignPath Foundation approval is pending. GitHub Actions currently creates only a short-retention unsigned candidate for build verification and SignPath onboarding; it does not create a Release. Public installers require completed signing, digest verification, and in-place upgrade testing. See the [complete code signing policy](docs/CODE_SIGNING_POLICY.md) for build provenance, team roles, manual approval, and privacy details.
 
+## Export samples
+
+First pages of two papers exported by QuizForge and compiled with a local XeLaTeX setup (only the first page is shown):
+
+<p align="center">
+  <img src="docs/images/quizforge-sample-1.png" width="46%" alt="Beijing paper selection: first page of an A4 two-column paper, 3 pages total">
+  <img src="docs/images/quizforge-sample-2.png" width="46%" alt="Past preliminary contests, compact edition: first page of a compact two-column practice book, 58 pages total">
+</p>
+
+Left: **Beijing paper selection** — an A4 two-column exam paper, 3 pages. Right: **past preliminary contests, compact edition** — a compact two-column practice book, 58 pages.
+
 <details>
 <summary><strong>Development, build, and implementation details</strong></summary>
 
