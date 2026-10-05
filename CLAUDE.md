@@ -140,6 +140,8 @@ tex_sandbox.py      外部 TeX 资源检查与受限 XeLaTeX 进程执行
 ui_prefs.py         界面外观偏好（深浅色/主题色/壁纸）
 static/js/text-preview.js
                     编辑页、导入校对和拆题审核的轻量实时表格/图片预览
+static/js/export-drawer.js
+                    题库页右缘导出抽屉：预设↔四维联动、自定义回退、色卡与回填
 ```
 
 ### 导入链路的两个正交维度
@@ -217,7 +219,7 @@ data/
 - 批量线程池默认 12 个 worker，只负责把组送入统一 OCR 队列；多个批次共享进程级槽位
 - `ocr_pool` 按每个 OCR 文档任务调度：总并发 12、MinerU 6、Doc2X 8；题干+解析双文件也分别取凭证和槽位
 - 服务端并发/队列限制触发后端冷却并用原凭证重试；只有凭证失效或额度不足才换另一份凭证一次
-- 导出并发由 `config.EXPORT_CONCURRENCY`（默认 1）控制，用 `BoundedSemaphore`
+- 导出并发由 `config.EXPORT_CONCURRENCY`（config.py 默认 2）控制：`export_service` 开同数 worker，`exporter._EXPORT_SLOTS` 用同值 `BoundedSemaphore` 让 PDF／DOCX／讲义局部编译三条路共用同一进程内编译槽
 - `converter.py` 里中间产物路径全都绝对化了——`os.chdir` 是进程级的，并发时会串台
 - `filestore._write_lock` 保护「取名 + 算 order + 落盘」的读-改-写原子性
 - 已加载题卡的单题操作必须优先命中 `filestore._cache` 并只重读该 Markdown；`invalidate_scan_cache(folder_structure=True)` 只用于真实目录结构变化，frontmatter 更新不得清空完整目录树缓存
@@ -235,6 +237,12 @@ data/
 `None`（从未设过→给默认值）、`"off"`（明确关掉→不给默认）、`"opts"/"full"/"sub"/"pair"`（显式模式）。空字符串不能压成 `""`——会把前两种合并。同一套语义在 `_to_record`/`set_img_layout`/`_KNOWN_DEFAULTS` 三处，改一处必须改三处。
 
 解析图片使用独立字段 `sol_img_split`，当前只接受 `None`／`"off"`／`"full"`；页面按钮请求必须携带 `field="solution"`，题目快照、局部预览、整份导出也要分别透传，不能借用题干的 `img_split`。题卡和导出只在显示层剥掉解析字段开头的结构性“【解析】”或“解析：”，不得改写原题 Markdown，也不得误删“解析如下”等正文；“参考解析”和“第 N 题解析”仍是分区／页面标题。
+
+### 导出四维组合与右缘抽屉
+
+- 题库页导出入口是勾选题目后出现的右缘「导出」竖排标签（`static/js/export-drawer.js`，显隐挂 `setBulkCountDisplay`，选题归零自动收抽屉），点击向左展开非模态 fixed 抽屉——**不能用 `dialog.showModal()`**：inert 会让 `custom-select` 追加到 body 的下拉菜单点不动（`#bulkbar` 内无 select 是刻意绕开）。保留 `#export-panel` id 与 `.hidden` 开合语义；抽屉 CSS 开合规则必须写 `.export-panel.export-drawer:not(.hidden)`——与 `.hidden{display:none}` 同权重 (0,1,0) 时 flex 会压过 none、抽屉关不上。
+- 版面 = 四维正交参数（`layout`/`grouped`/`columns`/`ratio`）＋ `std_exam` 布尔。**四维全空（None）逐字节走旧 mode 路径**（旧插件／Agent／旧任务快照 retry 零感知）；命中 `exporter._DIMS_TO_LEGACY` 等价表（6 条）整体复用 legacy，其余 8 组合走 4 个薄分页函数、只产出 layout 标记——渲染层与 `exam_template.tex` 零改动。`resolve_export_layout` 的 clamp（wide 强制 one/单栏；双栏下 one/two 回落单栏）是 UI 禁用之外的第二道保险。**绝不扩 mode 枚举**（`template_pipeline.SUPPORTED_MODES` 硬编码 8 值）；app 层 `"custom"` 只是过渡值，在 `_read_export_params` 归一化掉。payload 里 `std_exam` 是 bool，grouped/columns 是字符串。
+- 三处入口（`/preview`、`_start_export_task`、retry）共用 `_payload_to_export_kwargs`（app.py）——参数只在这一处折算，别在入口各写一遍。纸张底色白名单 `white`／`cream`／严格 `#RRGGBB`（非法回落 white）；Word 链路非白即拒（`word_exporter`）。导出任务面板经 `modeSummary()`（export-tasks.js）显示预设名或四维摘要。
 
 ### 讲义与横版／双栏导出版式
 
