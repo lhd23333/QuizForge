@@ -1539,18 +1539,6 @@ select option { background: var(--surface); color: var(--text); }
 .btn-danger { background: var(--danger); color: var(--qf-on-danger); border-color: var(--danger); }
 .btn-danger:hover { background: #b91c1c; border-color: #b91c1c; }
 .btn-sm { padding: 3px 10px; font-size: 12px; }
-.export-toggle-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  width: fit-content;
-  min-width: 0;
-  white-space: nowrap;
-}
-.export-toggle-icon { width: 14px; height: 14px; transition: transform .14s ease; }
-.export-toggle-button[aria-expanded="true"] .export-toggle-icon { transform: rotate(180deg); }
-
 .llm-quick-switch {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border);
@@ -1570,27 +1558,11 @@ select option { background: var(--surface); color: var(--text); }
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
   padding: var(--sp-4); margin-bottom: var(--sp-4); box-shadow: var(--shadow-sm);
   display: block;
-  container: export-panel / inline-size;
 }
 .export-panel form { width: 100%; min-width: 0; }
 .export-panel label { min-width: 0; font-size: 13px; color: var(--text-2); }
-.export-primary-grid {
-  display: grid;
-  grid-template-columns: minmax(190px, 1.35fr) minmax(140px, .85fr) minmax(150px, 1fr)
-                         minmax(140px, .8fr) minmax(140px, .8fr) auto;
-  gap: 10px;
-  align-items: end;
-}
-.export-primary-grid > label,
-.export-advanced-grid > label { display: flex; flex-direction: column; gap: 5px; }
-.export-primary-grid > *,
-.export-advanced-grid > *,
 .hf-grid > *,
 .export-panel :is(input, select, textarea) { min-width: 0; }
-.export-primary-grid .qf-select,
-.export-advanced-grid .qf-select { width: 100%; }
-.export-primary-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.export-primary-actions .btn { white-space: nowrap; }
 .export-advanced {
   width: 100%;
   margin-top: 12px;
@@ -1605,36 +1577,9 @@ select option { background: var(--surface); color: var(--text); }
   font-size: 12px;
   font-weight: 650;
 }
-.export-advanced-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(145px, 1fr));
-  gap: 11px;
-  margin-top: 10px;
-}
-.export-advanced-grid .export-check {
-  align-self: end;
-  min-height: 34px;
-  flex-direction: row;
-  align-items: center;
-}
 .sort-label .qf-select { width: 155px; margin-left: var(--sp-1); }
 .hidden { display: none; }
 
-@container export-panel (max-width: 980px) {
-  .export-primary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .export-primary-actions { justify-content: flex-start; }
-}
-@container export-panel (max-width: 700px) {
-  .export-advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-@container export-panel (max-width: 560px) {
-  .export-primary-grid { grid-template-columns: minmax(0, 1fr); }
-  .export-primary-actions { display: grid; grid-template-columns: 1fr 1fr; }
-  .export-primary-actions .btn { justify-content: center; }
-}
-@container export-panel (max-width: 420px) {
-  .export-advanced-grid { grid-template-columns: minmax(0, 1fr); }
-}
 @media (max-width: 640px) {
   .export-panel { padding: 12px; }
   .sort-label { display: flex; align-items: center; gap: 5px; width: 100%; }
@@ -5826,3 +5771,192 @@ html:not(.desktop-host) .sidebar-collapse-button { display: none; }
 .export-viewer-head b { min-width: 0; overflow: hidden; text-overflow: ellipsis;
   white-space: nowrap; }
 #export-viewer-frame { flex: 1; width: 100%; border: 0; background: #fff; }
+
+/* ---------- 导出抽屉（2026-10-05 导出界面重构） ----------
+   从题库页顶部工具区迁到右缘：勾选题目后 .bulk-action-stack 出现「导出」标签
+   （复用 .bulk-drawer-trigger 的外观，无新增轨道样式），点击向左展开本抽屉。
+
+   用非模态 aside 而不是 dialog：custom-select.js 把下拉菜单 appendChild 到
+   body，模态 dialog 的 inert 会把抽屉里的模板/格式/字体下拉点死。
+
+   定位基准：.bulk-action-stack 是 fixed 右缘 40px 宽的轨道（style.css 的
+   「选题操作列」段），抽屉 right:48px 恰好从轨道左侧展开。 */
+.export-panel.export-drawer {
+  position: fixed;
+  top: 50%;
+  right: 48px;
+  transform: translateY(-50%);
+  z-index: 68;
+  width: min(440px, calc(100vw - 64px));
+  max-height: min(84vh, 880px);
+  /* 覆盖 .export-panel 旧的内联式面板形态（内边距由 head/body/foot 分段给）。 */
+  margin: 0;
+  padding: 0;
+  box-shadow: var(--shadow-lg);
+}
+/* display 必须带 :not(.hidden)：.export-panel.export-drawer (0,2,0) 会压过全局
+   .hidden (0,1,0)，否则 display:flex 永远胜出、抽屉关不上。 */
+.export-panel.export-drawer:not(.hidden) {
+  display: flex;
+  flex-direction: column;
+}
+.export-panel.export-drawer form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.export-drawer-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.export-drawer-head h2 { margin: 0; font-size: 14px; font-weight: 700; }
+.export-drawer-note { color: var(--muted); font-size: 11.5px; }
+.export-drawer-head .icon-btn { margin-left: auto; }
+.export-drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 16px 16px;
+}
+.export-drawer-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.export-drawer-foot .btn { justify-content: center; min-width: 96px; }
+
+/* 抽屉内的字段排版：一层一个 fieldset/label，纵向堆叠。 */
+.export-drawer .export-field { display: flex; flex-direction: column; gap: 5px; }
+.export-drawer .export-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.export-drawer .export-fieldset legend,
+.export-drawer .export-field-label {
+  padding: 0 0 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text-2);
+}
+.export-field-block { display: flex; flex-direction: column; }
+
+/* 胶囊 radio 组（解析行为 / 预设 / 四维度 / 纸色）：input 视觉隐藏但占满
+   label 的可点区域，键盘焦点环落在 span 上。 */
+.export-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.export-pill { position: relative; display: inline-flex; }
+.export-pill input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.export-pill input:disabled { cursor: not-allowed; }
+.export-pill span {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 12.5px;
+  white-space: nowrap;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+.export-pill input:checked + span {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+.export-pill input:focus-visible + span {
+  outline: 3px solid var(--primary-ring);
+  outline-offset: 1px;
+}
+.export-pill input:disabled + span { opacity: .38; }
+.export-pill:hover input:not(:disabled):not(:checked) + span {
+  border-color: var(--muted);
+}
+
+/* 纸张颜色自定义色卡：内置浅色系 + 任意取色（input[type=color]）。 */
+.tone-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.tone-swatch {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--tone, #fff);
+  cursor: pointer;
+  transition: transform .1s ease, box-shadow .1s ease;
+}
+.tone-swatch:hover { transform: translateY(-1px); box-shadow: var(--shadow-sm); }
+.tone-swatch:focus-visible,
+.tone-picker:focus-within {
+  outline: 3px solid var(--primary-ring);
+  outline-offset: 1px;
+}
+.tone-picker {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  border: 1px dashed var(--border-strong);
+  overflow: hidden;
+  cursor: pointer;
+}
+.tone-picker input[type="color"] {
+  position: absolute;
+  inset: -6px;
+  width: calc(100% + 12px);
+  height: calc(100% + 12px);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+/* 高级设置：垂直堆叠（旧 4 列 grid 在抽屉宽度下会挤扁）。 */
+.export-advanced-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.export-advanced-stack > label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.export-advanced-stack .export-check {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+
+@media (max-width: 720px) {
+  .export-panel.export-drawer {
+    right: 44px;
+    width: calc(100vw - 56px);
+  }
+}

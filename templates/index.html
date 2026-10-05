@@ -343,78 +343,112 @@
         <input type="hidden" name="all" value="{{ '1' if show_all else '' }}">
         <button type="submit" class="btn">全选</button>
       </form>
-      <button type="button" class="btn btn-primary export-toggle-button" id="export-toggle"
-              aria-controls="export-panel" aria-expanded="false" aria-haspopup="true">
-        <span>导出选项</span>{{ icon('chevron-down', 'export-toggle-icon') }}
-      </button>
     </div>
 
-    <!-- 导出面板 -->
-    <div id="export-panel" class="export-panel hidden">
+    <!-- 导出抽屉（2026-10-05 重构）：勾选题目后从右缘「导出」标签向左展开。
+         用非模态 aside 而不是 dialog——custom-select.js 把下拉菜单挂到 body，
+         模态 dialog 的 inert 会让抽屉里的模板/格式/字体下拉点不动。
+         表单保留 id="export-form"：题卡上「独占整页」复选框靠 form 属性关联。 -->
+    <aside id="export-panel" class="export-panel export-drawer hidden" aria-label="导出设置">
       <form method="post" action="{{ url_for('export') }}" id="export-form">
         <input type="hidden" name="tags" value="{{ active_tags|join(',') }}">
         <input type="hidden" name="match" value="{{ match }}">
         <input type="hidden" name="type" value="{{ active_type or '' }}">
-        <div class="export-primary-grid">
-          <label>模式
-            <select name="mode" id="export-mode">
-              <option value="exam">试卷（题型分组，解答题一页两题）</option>
-              <option value="exam_std">标准试卷形式（仿国标考卷版式）</option>
-              <option value="note">笔记（一页两题）</option>
-              <option value="lecture">讲解（一页一题）</option>
-              <option value="slides">横版课件（16:9，PPT 式一页一题）</option>
-              <option value="practice">双栏刷题（题型分组，解答题按难度与小问留白）</option>
-              <option value="list">清单（紧凑无间隔）</option>
-              <option value="handout">讲义（知识要点+可标独占整页）</option>
-            </select>
+        <!-- 标准试卷卷头开关（与四维度正交）：选「标准试卷」预设或任务回填时
+             置 1；之后改版式卷头不消失。非标准试卷组合提交空值。 -->
+        <input type="hidden" name="std_exam" id="export-std-exam" value="">
+        <!-- 预设胶囊的真实值源：保留原 mode 下拉（模板兼容过滤、任务回填、
+             专属面板判断都经既有逻辑走它），UI 上隐藏、由预设胶囊驱动。 -->
+        <select name="mode" id="export-mode" hidden aria-hidden="true" tabindex="-1">
+          <option value="exam">试卷（题型分组，解答题一页两题）</option>
+          <option value="exam_std">标准试卷形式（仿国标考卷版式）</option>
+          <option value="note">笔记（一页两题）</option>
+          <option value="lecture">讲解（一页一题）</option>
+          <option value="slides">横版课件（16:9，PPT 式一页一题）</option>
+          <option value="practice">双栏刷题（题型分组，解答题按难度与小问留白）</option>
+          <option value="list">清单（紧凑无间隔）</option>
+          <option value="handout">讲义（知识要点+可标独占整页）</option>
+        </select>
+
+        <header class="export-drawer-head">
+          <h2>导出</h2>
+          <span class="export-drawer-note">仅导出已勾选题目</span>
+          <button type="button" class="icon-btn" id="export-drawer-close"
+                  aria-label="收起导出设置" title="收起">{{ icon('x') }}</button>
+        </header>
+
+        <div class="export-drawer-body">
+          <label class="export-field">试卷标题
+            <input type="text" name="title" value="试卷" class="input">
           </label>
-          <label>格式
+
+          <fieldset class="export-fieldset">
+            <legend>解析行为</legend>
+            <div class="export-pill-row">
+              <label class="export-pill"><input type="radio" name="solution_mode" value="none" checked><span>不带解析</span></label>
+              <label class="export-pill"><input type="radio" name="solution_mode" value="inline"><span>题后跟解析</span></label>
+              <label class="export-pill"><input type="radio" name="solution_mode" value="separate"><span>解析另起页</span></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="export-fieldset">
+            <legend>预设</legend>
+            <div class="export-pill-row">
+              <label class="export-pill"><input type="radio" name="preset" value="custom" checked><span>自定义</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="exam"><span>试卷</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="exam_std"><span>标准试卷</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="note"><span>笔记</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="lecture"><span>讲解</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="slides"><span>横版课件</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="practice"><span>双栏刷题</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="list"><span>清单</span></label>
+              <label class="export-pill"><input type="radio" name="preset" value="handout"><span>讲义</span></label>
+            </div>
+            <small class="export-runtime-hint">预设会把下方版式一键配好；改动任一版式选项自动切回「自定义」。</small>
+          </fieldset>
+
+          <fieldset class="export-fieldset">
+            <legend>版式</legend>
+            <div class="export-pill-row">
+              <label class="export-pill" title="选填紧凑流排，解答题占半页、放不下自动升整页"><input type="radio" name="layout" value="flow" checked><span>流式</span></label>
+              <label class="export-pill" title="全体紧凑流排，不留作答空位"><input type="radio" name="layout" value="compact"><span>紧凑</span></label>
+              <label class="export-pill"><input type="radio" name="layout" value="one"><span>一页一题</span></label>
+              <label class="export-pill"><input type="radio" name="layout" value="two"><span>一页两题</span></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="export-fieldset">
+            <legend>分类模式</legend>
+            <div class="export-pill-row">
+              <label class="export-pill"><input type="radio" name="grouped" value="1" checked><span>分题型</span></label>
+              <label class="export-pill"><input type="radio" name="grouped" value="0"><span>不分题型</span></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="export-fieldset">
+            <legend>页面模式</legend>
+            <div class="export-pill-row">
+              <label class="export-pill"><input type="radio" name="columns" value="1" checked><span>单栏</span></label>
+              <label class="export-pill"><input type="radio" name="columns" value="2"><span>双栏</span></label>
+            </div>
+          </fieldset>
+
+          <fieldset class="export-fieldset">
+            <legend>比例</legend>
+            <div class="export-pill-row">
+              <label class="export-pill"><input type="radio" name="ratio" value="a4" checked><span>A4</span></label>
+              <label class="export-pill"><input type="radio" name="ratio" value="wide"><span>横版 16:9</span></label>
+            </div>
+          </fieldset>
+
+          <label class="export-field">格式
             <select name="fmt" id="export-format">
               <option value="pdf">PDF</option>
               <option value="docx">Word 文档（.docx，可继续编辑）</option>
-              <option value="tex">LaTeX 源码（.tex）</option>
               <option value="zip">LaTeX 源码包（.tex + 图片，.zip）</option>
             </select>
             <small class="export-runtime-hint" id="word-export-hint" hidden>Word 保留可编辑内容并由 Word/WPS 自行重排；底色与现有 WIMath 标志仅用于 PDF/TeX。</small>
           </label>
-          <label>中文字体
-            <select name="cjk_font" id="export-cjk-font">
-              {% for fid, label in export_fonts.cjk %}
-              <option value="{{ fid }}">{{ label }}</option>
-              {% endfor %}
-            </select>
-            <small class="export-font-preview" id="cjk-font-preview" title="实际字体会在导出 PDF/TeX 时应用">数学试题：函数与导数 0123</small>
-          </label>
-          <label>英文字体
-            <select name="latin_font" id="export-latin-font">
-              {% for fid, label in export_fonts.latin %}
-              <option value="{{ fid }}">{{ label }}</option>
-              {% endfor %}
-            </select>
-            <small class="export-font-preview" id="latin-font-preview" title="影响正文西文与数字；数学公式字体不变">The quick brown fox jumps 0123</small>
-          </label>
-          <label>试卷标题
-            <input type="text" name="title" value="试卷" class="input">
-          </label>
-          <label>范围
-            <select name="scope">
-              <option value="selected">已勾选题目</option>
-              <option value="filtered">当前筛选结果</option>
-              <option value="all">全部题目</option>
-            </select>
-          </label>
-          <label>解析
-            <select name="solution_mode">
-              <option value="none">不带解析</option>
-              <option value="inline">题后附解析</option>
-              <option value="separate">解析另起页</option>
-            </select>
-          </label>
-          <div class="export-primary-actions">
-            <button type="button" class="btn" id="preview-btn">预览分页</button>
-            <button type="submit" class="btn btn-primary">导出</button>
-          </div>
-        </div>
 
         <!-- 标准试卷（exam_std）专属：保密说明/卷首须知/科目/信息栏/各大题分值 -->
         <details class="hf-block" id="std-fields" style="display:none">
@@ -451,7 +485,23 @@
 
         <details class="export-advanced">
           <summary>高级导出设置</summary>
-          <div class="export-advanced-grid">
+          <div class="export-advanced-stack">
+            <label>中文字体
+              <select name="cjk_font" id="export-cjk-font">
+                {% for fid, label in export_fonts.cjk %}
+                <option value="{{ fid }}">{{ label }}</option>
+                {% endfor %}
+              </select>
+              <small class="export-font-preview" id="cjk-font-preview" title="实际字体会在导出 PDF/TeX 时应用">数学试题：函数与导数 0123</small>
+            </label>
+            <label>英文字体
+              <select name="latin_font" id="export-latin-font">
+                {% for fid, label in export_fonts.latin %}
+                <option value="{{ fid }}">{{ label }}</option>
+                {% endfor %}
+              </select>
+              <small class="export-font-preview" id="latin-font-preview" title="影响正文西文与数字；数学公式字体不变">The quick brown fox jumps 0123</small>
+            </label>
             <label id="export-template-field">模板
               <select name="template_id" id="export-template">
                 <option value="">内置模板（exam_template.tex）</option>
@@ -476,12 +526,27 @@
                 <option value="html">HTML/KaTeX 近似预览</option>
               </select>
             </label>
-            <label id="paper-tone-field">纸张底色
-              <select name="paper_tone">
-                <option value="white">纯白</option>
-                <option value="cream">米黄护眼</option>
-              </select>
-            </label>
+            <div id="paper-tone-field" class="export-field-block">
+              <span class="export-field-label">纸张颜色</span>
+              <div class="export-pill-row" id="paper-tone-choices">
+                <label class="export-pill"><input type="radio" name="paper_tone_choice" value="white" checked><span>纯白</span></label>
+                <label class="export-pill"><input type="radio" name="paper_tone_choice" value="cream"><span>米黄护眼</span></label>
+                <label class="export-pill"><input type="radio" name="paper_tone_choice" value="custom"><span>自定义</span></label>
+              </div>
+              <!-- 实际提交值：white / cream / #RRGGBB（由 export-drawer.js 同步）。 -->
+              <input type="hidden" name="paper_tone" id="paper-tone-value" value="white">
+              <div class="tone-swatches hidden" id="tone-swatches">
+                <button type="button" class="tone-swatch" data-tone="#ADD8E6" style="--tone:#ADD8E6" title="浅蓝" aria-label="浅蓝"></button>
+                <button type="button" class="tone-swatch" data-tone="#DFF5E1" style="--tone:#DFF5E1" title="浅绿" aria-label="浅绿"></button>
+                <button type="button" class="tone-swatch" data-tone="#FFF7E6" style="--tone:#FFF7E6" title="浅黄" aria-label="浅黄"></button>
+                <button type="button" class="tone-swatch" data-tone="#FDE7EA" style="--tone:#FDE7EA" title="浅粉" aria-label="浅粉"></button>
+                <button type="button" class="tone-swatch" data-tone="#EDE7FB" style="--tone:#EDE7FB" title="浅紫" aria-label="浅紫"></button>
+                <button type="button" class="tone-swatch" data-tone="#F1F3F5" style="--tone:#F1F3F5" title="浅灰" aria-label="浅灰"></button>
+                <label class="tone-picker" title="任意取色">
+                  <input type="color" id="tone-color" value="#ADD8E6" aria-label="自定义纸张颜色">
+                </label>
+              </div>
+            </div>
             <label class="export-check" id="wimath-logo-field"><input type="checkbox" name="wimath_logo" value="1"> 添加 WIMath 标志</label>
             <label class="export-check"><input type="checkbox" name="show_source" value="1"> 显示题源</label>
           </div>
@@ -501,8 +566,14 @@
             </div>
           </details>
         </details>
+        </div>
+
+        <footer class="export-drawer-foot">
+          <button type="button" class="btn" id="preview-btn">预览分页</button>
+          <button type="submit" class="btn btn-primary">导出</button>
+        </footer>
       </form>
-    </div>
+    </aside>
 
     <!-- PDF 与 HTML 近似预览共用同源 iframe 弹层。 -->
     <div id="preview-overlay" class="preview-overlay hidden">
@@ -575,6 +646,16 @@
           aria-controls="bulkbar" aria-expanded="false">
     {{ icon('check') }}
     <span>已选 <b id="bulk-trigger-count">{{ selected_count }}</b> 题</span>
+  </button>
+
+  {# 「导出」标签共用 bulk-drawer-trigger 的外观类（右缘竖排轨道）：样式零新增，
+     显隐随 .bulk-action-stack 由选题数天然驱动；开合与联动由 export-drawer.js
+     接管（该模块只按 id 查元素，不按类名，共用类名无副作用）。 #}
+  <button type="button" class="bulk-drawer-trigger export-drawer-trigger"
+          id="export-drawer-trigger"
+          aria-controls="export-panel" aria-expanded="false">
+    {{ icon('download') }}
+    <span>导出</span>
   </button>
 
   <div class="bulk-action-rail" id="bulk-action-rail"
@@ -693,6 +774,9 @@
 {% endblock %}
 
 {% block scripts %}
+{# 导出抽屉交互（题库页专属）：defer 于内联脚本之后执行，可直接用 window.flashToast
+   等既有全局；QFSelect 引用经 window.QFSelect?.refresh 兜底。 #}
+<script src="{{ static_v('js/export-drawer.js') }}" defer></script>
 <script>
 // 勾选切换只改变选题篮状态，不改变题卡顺序。
 const listEl = document.getElementById('q-list');
@@ -980,6 +1064,9 @@ function syncBulkbar(count) {
   if (normalized < 1) {
     renderBulkSelectedQuestions([]);
     closeBulkDrawer(false);
+    // 选题清空时右缘轨道整体隐藏，开着的导出抽屉不能留在原地（它的触发标签
+    // 已经不存在了）。defer 脚本尚未加载时可选链自动跳过。
+    window.QFExportDrawer?.closeIfOpen();
   } else if (bulkbar?.open) {
     void refreshBulkSelectedQuestions();
   }
@@ -1895,246 +1982,13 @@ tagCloud?.addEventListener('click', async event => {
   }
 });
 
-// 导出字体预览：下拉直接作用到预览行的 font-family（浏览器用本机同名系统
-// 字体渲染；FandolSong 等 TeX 专属字体在本机无系统字形时回退衬线近似）。
-const cjkFontSel = document.getElementById('export-cjk-font');
-const latinFontSel = document.getElementById('export-latin-font');
-const cjkFontPreview = document.getElementById('cjk-font-preview');
-const latinFontPreview = document.getElementById('latin-font-preview');
-function syncExportFontPreviews() {
-  if (cjkFontPreview) {
-    cjkFontPreview.style.fontFamily =
-      `"${cjkFontSel?.value || 'Noto Sans SC'}", "Microsoft YaHei", serif`;
-  }
-  if (latinFontPreview) {
-    latinFontPreview.style.fontFamily =
-      `"${latinFontSel?.value || 'Latin Modern Roman'}", "Times New Roman", serif`;
-  }
-}
-cjkFontSel?.addEventListener('change', syncExportFontPreviews);
-latinFontSel?.addEventListener('change', syncExportFontPreviews);
-syncExportFontPreviews();
+// 导出交互（字体预览 / 模式与格式联动 / 预览 / 提交 / 配置回填 / 抽屉与预设联动）
+// 已整体迁出为 static/js/export-drawer.js（2026-10-05 导出抽屉重构）：迁出后可用
+// jsdom 独立测试，题库页内嵌脚本不再携带导出逻辑。
 
-// 导出模式切换：讲义模式显示「知识要点」文本域 + 每题「独占整页」勾选框；
-// 标准试卷形式显示保密说明/卷首说明/分值说明面板
-const modeSel = document.getElementById('export-mode');
-const keypointsField = document.getElementById('keypoints-field');
-const stdFields = document.getElementById('std-fields');
-const exportToggle = document.getElementById('export-toggle');
-const exportPanel = document.getElementById('export-panel');
-function setExportPanelOpen(open) {
-  if (!exportPanel) return;
-  exportPanel.classList.toggle('hidden', !open);
-  exportToggle?.setAttribute('aria-expanded', String(open));
-}
-exportToggle?.addEventListener('click', () => {
-  setExportPanelOpen(exportPanel.classList.contains('hidden'));
-});
-function syncModeUI() {
-  const isHandout = modeSel && modeSel.value === 'handout';
-  if (keypointsField) keypointsField.classList.toggle('hidden', !isHandout);
-  document.querySelectorAll('.fullpage-box').forEach(el => {
-    el.classList.toggle('hidden', !isHandout);
-  });
-  if (stdFields) stdFields.style.display = (modeSel && modeSel.value === 'exam_std') ? 'block' : 'none';
-}
-if (modeSel) {
-  modeSel.addEventListener('change', syncModeUI);
-  syncModeUI();  // 初始化
-}
-
-// Word 以可编辑语义为目标；底色打印行为和现有 PDF 标志资源在 Office 中不稳定。
-// 禁用控件可避免把 PDF 专属参数静默传给后端，切回其他格式时原选择仍保留。
-const exportFormatSel = document.getElementById('export-format');
-const paperToneField = document.getElementById('paper-tone-field');
-const wimathLogoField = document.getElementById('wimath-logo-field');
-const exportTemplateField = document.getElementById('export-template-field');
-const exportTemplateSel = document.getElementById('export-template');
-const wordExportHint = document.getElementById('word-export-hint');
-function syncExportTemplateOptions() {
-  if (!exportTemplateSel) return;
-  const mode = modeSel?.value || 'exam';
-  Array.from(exportTemplateSel.options).forEach((option, index) => {
-    if (index === 0) return;
-    const supported = String(option.dataset.supportedModes || '')
-      .split(',').map(value => value.trim()).filter(Boolean);
-    option.hidden = supported.length > 0 && !supported.includes(mode);
-    option.disabled = option.hidden;
-  });
-  if (exportTemplateSel.selectedOptions[0]?.hidden) exportTemplateSel.value = '';
-  window.QFSelect?.refresh(exportTemplateSel);
-}
-function syncExportFormatUI() {
-  const isWord = exportFormatSel && exportFormatSel.value === 'docx';
-  [paperToneField, wimathLogoField].forEach(field => {
-    if (!field) return;
-    field.querySelectorAll('input, select').forEach(control => { control.disabled = isWord; });
-  });
-  if (exportTemplateSel) exportTemplateSel.disabled = isWord;
-  if (exportTemplateField) exportTemplateField.classList.toggle('is-disabled', isWord);
-  if (wordExportHint) wordExportHint.hidden = !isWord;
-}
-if (exportFormatSel) {
-  exportFormatSel.addEventListener('change', syncExportFormatUI);
-  syncExportFormatUI();
-}
-if (modeSel) modeSel.addEventListener('change', syncExportTemplateOptions);
-syncExportTemplateOptions();
-
-// —— 真实 PDF 预览 / 导出 ——
-// 预览是「POST 拿一个取件地址，再由地址去取文件」，不再直接收文件流。原因是本页
-// 会被 Obsidian 插件嵌在 iframe 里（Electron 渲染进程），那里 blob: URL 赋给
-// iframe 的 src 永远显示空白；换成普通 http 地址后预览就是同源 iframe 的一次
-// 正常加载。导出则不再当场取件——提交登记为后台任务（见下方提交处理器）。
-const previewBtn = document.getElementById('preview-btn');
-const overlay = document.getElementById('preview-overlay');
-const frame = document.getElementById('preview-frame');
-const previewTitle = document.getElementById('preview-title');
-const previewInfo = document.getElementById('preview-info');
-const previewOpen = document.getElementById('preview-open');
-
-function closePreview() {
-  overlay.classList.add('hidden');
-  frame.src = 'about:blank';
-  if (previewOpen) { previewOpen.style.display = 'none'; previewOpen.href = '#'; }
-}
-
-// 后端出错时回的是 JSON（{ok:false,error}），网络层出错时连 JSON 都没有；
-// 统一收成一句话，免得每个调用点各写一遍 try。
-async function postForExport(url, fd) {
-  const res = await fetch(url, {method: 'POST', body: fd});
-  let data = null;
-  try { data = await res.json(); } catch (e) { data = null; }
-  if (!res.ok || !data || !data.ok) {
-    throw new Error((data && data.error) || ('请求失败（HTTP ' + res.status + '）'));
-  }
-  return data;
-}
-
-if (previewBtn) {
-  previewBtn.addEventListener('click', async () => {
-    const form = document.getElementById('export-form');
-    const fd = new FormData(form);
-    // 预览固定不受导出格式下拉影响；HTML 近似预览不启动 TeX。
-    fd.set('fmt', 'pdf');
-    const previewKind = document.getElementById('preview-kind')?.value || 'pdf';
-    fd.set('preview_kind', previewKind);
-    const previewLabel = previewKind === 'html' ? 'HTML/KaTeX 近似预览' : 'PDF 预览';
-    previewTitle.textContent = previewLabel;
-    frame.title = previewLabel;
-    previewInfo.textContent = previewKind === 'html' ? '正在生成 HTML/KaTeX 预览…' : '正在生成 PDF…';
-    overlay.classList.remove('hidden');
-    frame.src = 'about:blank';
-    try {
-      const data = await postForExport('/preview', fd);
-      frame.src = data.url;
-      if (previewOpen) {
-        previewOpen.href = data.url;
-        previewOpen.style.display = 'inline-block';
-      }
-      previewInfo.textContent = previewKind === 'html' ? 'HTML/KaTeX 近似预览（不等同 PDF 分页）' : '所见即所得（与导出一致）';
-    } catch (e) {
-      previewInfo.textContent = '';
-      alert('预览失败：' + e.message);
-      closePreview();
-    }
-  });
-  document.getElementById('preview-close').addEventListener('click', closePreview);
-  overlay.addEventListener('click', e => { if (e.target === overlay) closePreview(); });
-}
-
-// 导出：接管表单提交 —— 提交只登记后台任务（编译交给「导出任务」面板），
-// 立即把焦点还给题库。原先这里是同步等待整卷编译（十几分钟），页面全程卡着；
-// 现在连点几次导出会按导出并发槽排队，用户还能继续选题、整理别的卷子。
-// 产出后从左侧「导出任务」面板打开 PDF / 打开文件夹 / 下载。
-const exportForm = document.getElementById('export-form');
-if (exportForm) {
-  exportForm.addEventListener('submit', async e => {
-    e.preventDefault();
-    const btn = exportForm.querySelector('button[type="submit"]');
-    const label = btn ? btn.textContent : '';
-    if (btn) { btn.disabled = true; btn.textContent = '正在创建任务…'; }
-    try {
-      await postForExport('/export', new FormData(exportForm));
-      flashToast('已创建导出任务，进度见左侧「导出任务」面板');
-    } catch (err) {
-      alert('导出失败：' + err.message);
-    } finally {
-      if (btn) { btn.disabled = false; btn.textContent = label; }
-    }
-  });
-}
-
-// 「修改配置重新导出」：导出任务面板跳转时携带 ?export_task=<id>，这里把原
-// 任务的完整配置回填到表单。pinned_ids 用隐藏域固定当初那批题目——回填时
-// 用户的选题篮可能已经完全变了，重导出必须还是原来那批题。
-async function prefillExportFromTask() {
-  const taskId = new URL(window.location.href).searchParams.get('export_task');
-  if (!taskId || !exportForm) return;
-  let payload;
-  try {
-    const res = await fetch('/export-tasks/' + encodeURIComponent(taskId) + '/config');
-    const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || '读取配置失败');
-    payload = data.payload || {};
-  } catch (err) {
-    flashToast('读取导出配置失败：' + err.message, 'err');
-    return;
-  }
-  const setValue = (name, value) => {
-    if (value === undefined || value === null) return;
-    const el = exportForm.elements[name];
-    if (el && typeof el.value !== 'undefined') el.value = String(value);
-  };
-  // 先设模式再设模板：模板下拉按模式过滤选项，顺序反了 compatible 模板会被清掉。
-  setValue('mode', payload.mode);
-  setValue('tags', (payload.tags || []).join(','));
-  setValue('match', payload.match);
-  setValue('type', payload.type);
-  ['fmt', 'title', 'scope', 'solution_mode', 'keypoints', 'paper_tone',
-   'cjk_font', 'latin_font', 'tex_backend'
-  ].forEach(name => setValue(name, payload[name]));
-  const check = (name, value) => {
-    const el = exportForm.elements[name];
-    if (el && typeof el.checked !== 'undefined') el.checked = !!value;
-  };
-  check('wimath_logo', payload.wimath_logo);
-  check('show_source', payload.show_source);
-  const hf = payload.header_footer || {};
-  Object.keys(hf).forEach(name => setValue(name, hf[name]));
-  const so = payload.std_opts || {};
-  setValue('subject', so.subject);
-  check('info_bar', so.info_bar);
-  setValue('secret_notice', so.secret_notice);
-  setValue('exam_notes', so.exam_notes);
-  const points = so.section_points || {};
-  setValue('points_single', points.single);
-  setValue('points_multi', points.multi);
-  setValue('points_blank', points.blank);
-  setValue('points_solve', points.solve);
-  // 固定当初那批题目（仅 scope=selected 使用；后端优先于实时选题篮）。
-  exportForm.querySelectorAll('input[name="pinned_ids"]').forEach(el => el.remove());
-  (payload.pinned_ids || []).forEach(id => {
-    const hidden = document.createElement('input');
-    hidden.type = 'hidden';
-    hidden.name = 'pinned_ids';
-    hidden.value = id;
-    exportForm.appendChild(hidden);
-  });
-  setValue('template_id', payload.template_id);
-  // 手动过一遍各联动：模板兼容过滤、Word 禁用项、讲义/标准试卷专属面板。
-  syncModeUI();
-  syncExportTemplateOptions();
-  syncExportFormatUI();
-  syncExportFontPreviews();
-  setExportPanelOpen(true);
-  flashToast('已载入任务配置，确认后点「导出」重新生成');
-  // 参数只用于一次性回填；留在地址栏会让之后每次刷新都跳回同一个旧任务。
-  const url = new URL(window.location.href);
-  url.searchParams.delete('export_task');
-  history.replaceState(null, '', url.toString());
-}
-void prefillExportFromTask();
+// 「修改配置重新导出」的 ?export_task=<id> 回填、预览、提交 handler 均随导出
+// 逻辑迁至 static/js/export-drawer.js（postForExport 仍是全局函数，本页单题
+// TeX ZIP 按钮继续复用）。
 
 // —— 文件夹树：展开/折叠、新建（顶级/子）、改名、移动、删除 ——
 const folderTree = document.getElementById('folder-tree');

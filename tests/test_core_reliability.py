@@ -1933,7 +1933,15 @@ class PageTests(unittest.TestCase):
         self.assertIn(b'class="search-bar hidden"', page.data)
         self.assertIn(b'class="toolbar hidden"', page.data)
         self.assertIn(b'<option value="practice">', page.data)
-        self.assertIn(b'<select name="paper_tone">', page.data)
+        # 纸张颜色自 2026-10-05 起是「radio 视觉组 + hidden 真值」：hidden 是
+        # 唯一提交字段（white / cream / #RRGGBB），radio 只驱动高亮。
+        self.assertIn(b'name="paper_tone" id="paper-tone-value"', page.data)
+        self.assertIn(b'id="paper-tone-choices"', page.data)
+        # 导出从顶部面板改为右缘抽屉：触发标签 + 初始隐藏的抽屉都要渲染出来。
+        self.assertIn(b'id="export-drawer-trigger"', page.data)
+        self.assertIn(b'class="export-panel export-drawer hidden"', page.data)
+        # 抽屉交互脚本（预设↔四维联动/回填/预览/提交）必须随页面加载。
+        self.assertIn(b'js/export-drawer.js', page.data)
         self.assertIn('米黄护眼'.encode("utf-8"), page.data)
         self.assertIn('页眉与页脚'.encode("utf-8"), page.data)
 
