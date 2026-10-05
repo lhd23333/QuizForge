@@ -49,7 +49,8 @@
 
 ### 修复
 
-- 修复高考真题全库（16282 题）双栏刷题导出必然失败：`qpracticesolve` 题盒此前按高度二分为「能放进单栏就用不可分盒 `\box` 放出」，该不可分盒与题间 `\columnbreak` 交互，让 multicol 输出例程从第 767 页起进入死循环（`Output loop---100 consecutive dead cycles`，全量重编译复现 1416 次），此后 box255 失去分割能力、每次 shipout 都超满 1.6 万 pt，整份 PDF 报废并被导出器的致命日志检查拒绝。模板改为整题一律 `\unvbox` 放出（不再按高度二分）；单变量全量对照证明死循环归零，且修复前后全部健康页（前 767 页）的 PDF 内容流逐字节一致——对能正常排版的版面零影响。`tests/test_exporter_practice.py` 新增回归钉防止把不可分盒改回来。发货模板文本全量直传复核（3335 页）零错误，输出与修复版全篇逐页内容流一致；回归钉同时钉住测高寄存器（`\qpracticesolveheight` / `\qpracticecolumnheight`）不得再被引用——它们随测高代码删除，悬空赋值会报 `Undefined control sequence` 并破坏首页排版。
+- 修复「历年预赛题」等含表格类公式的导出必然失败：这类题目的 `array` 列格式有两种写法会让 XeLaTeX 硬停——① `:`（arydshln 宏包的虚线竖线语法，内置模板未加载该宏包，报 `Illegal pream-token`）② 声明列数少于表体单元格数（报 `Extra alignment tab`）；两者在网页 KaTeX 与 Obsidian 预览里都正常渲染（它们比 LaTeX 宽容），只有 PDF 导出会暴露（「历年预赛题」实测在第 29 页硬停、整份 PDF 报废）。导出前现在机械化修复：列格式顶层 `:` 换成 `|`、列数不足时末尾补 `c`（只改本次导出的内存副本，题库文件不动）；题库实测 2 道题共 3 处（2021 四川第 8 题、2024 吉林第 9 题），修复后真实 pandoc+XeLaTeX 编译通过。
+`qpracticesolve` 题盒此前按高度二分为「能放进单栏就用不可分盒 `\box` 放出」，该不可分盒与题间 `\columnbreak` 交互，让 multicol 输出例程从第 767 页起进入死循环（`Output loop---100 consecutive dead cycles`，全量重编译复现 1416 次），此后 box255 失去分割能力、每次 shipout 都超满 1.6 万 pt，整份 PDF 报废并被导出器的致命日志检查拒绝。模板改为整题一律 `\unvbox` 放出（不再按高度二分）；单变量全量对照证明死循环归零，且修复前后全部健康页（前 767 页）的 PDF 内容流逐字节一致——对能正常排版的版面零影响。`tests/test_exporter_practice.py` 新增回归钉防止把不可分盒改回来。发货模板文本全量直传复核（3335 页）零错误，输出与修复版全篇逐页内容流一致；回归钉同时钉住测高寄存器（`\qpracticesolveheight` / `\qpracticecolumnheight`）不得再被引用——它们随测高代码删除，悬空赋值会报 `Undefined control sequence` 并破坏首页排版。
 
 - 修复实时监控任务完成后导航红心计数不减少的问题，根因有两个：① 徽标只在整页渲染时计算，而桌面壳导航只换 iframe、外层文档永不重载，面板轮询也只改行——现在徽标由持有它的顶层文档每 10 秒轮询轻量端点 `/nav/count` 实时刷新（iframe 内不轮询；`base.html` 徽标常渲染并按 `hidden` 隐藏，同步补 `.nav-badge[hidden]{display:none}`，否则作者样式的 `display` 会压过 UA 规则、红底 0 常驻）；② 失败/中断的监控记录此前永久计入红心且没有清理入口——面板新增「忽略」动作，把记录标为 `dismissed` 移出红心与默认列表，同时保留防重放指纹（重启后同内容源文件不会被自动重跑 OCR），可在「连已完成一起看」里重试恢复。
 

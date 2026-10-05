@@ -183,6 +183,57 @@ class SlidesExportTests(unittest.TestCase):
         keep = "$\\displaystyle \\dfrac12$ 与 $\\displaystyle \\frac{1}{2}$"
         self.assertEqual(exporter._repair_incomplete_math_commands(keep), keep)
 
+    def test_array_colon_preamble_becomes_solid_bars(self):
+        # 2026-10-05「历年预赛题」导出在第 29 页硬停：array 列格式里的 `:` 是
+        # arydshln 语法，内置模板未加载该宏包，xelatex 报 Illegal pream-token。
+        source = (
+            "$\\displaystyle \\def\\arraystretch{2} \\begin{array}{c:c:c} "
+            "\\hline 1&2&3\\\\ \\hline\\end{array}$"
+        )
+
+        repaired = exporter._repair_array_preambles(source)
+
+        self.assertIn(r"\begin{array}{c|c|c}", repaired)
+        self.assertNotIn("c:c", repaired)
+
+    def test_array_with_fewer_columns_than_body_gets_extra_column(self):
+        # 2021 四川第 8 题：preamble `{c:c}` 只有 2 列，表体却是 3×3 九宫格；
+        # `:` 修成 `|` 后 xelatex 会以 Extra alignment tab 硬停，末尾补一列。
+        source = ("$\\begin{array}{c:c}\\hline 1&2&3\\\\\\hline4&5&6\\\\"
+                  "\\hline7&8&9\\\\\\hline\\end{array}$")
+
+        repaired = exporter._repair_array_preambles(source)
+
+        self.assertIn(r"\begin{array}{c|cc}", repaired)
+        self.assertNotIn("c:c", repaired)
+
+    def test_array_repair_counts_ampersands_inside_braces_not(self):
+        # `\text{a&b}` 里的 `&` 是文本内容不是列分隔，不能把列数数多。
+        source = r"$\begin{array}{c:c} \text{a&b}&c \end{array}$"
+
+        repaired = exporter._repair_array_preambles(source)
+
+        self.assertIn(r"\begin{array}{c|c}", repaired)
+
+    def test_array_colon_repair_keeps_at_groups_and_plain_text(self):
+        # `@{...}` 参数组里的冒号是列间插入的真实内容，不能改；
+        # 数学区外的 `c:c` 普通文本也不能碰。
+        source = r"$\begin{array}{c@{\quad:\quad}c} a&b \end{array}$ 与文本 c:c"
+
+        repaired = exporter._repair_array_preambles(source)
+
+        self.assertIn(r"\begin{array}{c@{\quad:\quad}c}", repaired)
+        self.assertIn("文本 c:c", repaired)
+
+    def test_array_colon_repair_handles_position_option_and_keeps_clean(self):
+        # `[t]` 位置参数与本来就合法的 `|` 竖线：前者要能匹配，后者逐字不动。
+        source = r"$\begin{array}[t]{l:l} a&b \end{array}$ 与 $\begin{array}{r|l} c&d \end{array}$"
+
+        repaired = exporter._repair_array_preambles(source)
+
+        self.assertIn(r"\begin{array}[t]{l|l}", repaired)
+        self.assertIn(r"\begin{array}{r|l}", repaired)
+
     def test_unicode_math_symbols_become_latex_and_ocr_junk_is_removed(self):
         source = "\x01条件 $α∈A，θ⩾π，①．f′′$\uf8f3，且 $a$\u0338=0"
 

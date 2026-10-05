@@ -3236,6 +3236,95 @@ def _repair_incomplete_math_commands(text: str) -> str:
     return text
 
 
+# `array` 列格式里有两类会硬停 XeLaTeX 的写法，都是 2026-10-05「历年预赛题」
+# 导出实测暴露的（预览全程正常，只有 PDF 导出炸——网页 KaTeX 与 Obsidian 的
+# MathJax 都比 LaTeX 宽容，看清这个差异，这是第二次因此类假象吃亏）：
+# ① `:` 是 arydshln 宏包的「虚线竖线」语法，内置模板没有加载该宏包，xelatex
+#    报 `Illegal pream-token (:)` 当场停住（2024 吉林第 9 题，编译在第 29 页
+#    硬停、整份 PDF 报废）；
+# ② preamble 列数少于表体单元格数（2021 四川第 8 题：`{c:c}` 2 列配 3×3
+#    九宫格），-halt-on-error 下报 `Extra alignment tab` 同样硬停。
+# 修法一律机械化、只改本次导出的内存副本：顶层 `:` 换成 `|`（虚线画成实线），
+# 列数不足时在末尾补 `c`（给多出的单元格合法位置，不动任何可见内容）。
+# 不给模板加载 arydshln——它与 longtable/colortbl 的兼容性是出名的坑。
+# `@{...}` 参数组内的字符与嵌套 `*{n}{c}` 形式一律不碰（后者整段不匹配、跳过）。
+_ARRAY_ENV_RE = re.compile(
+    r"(\\begin\{array\}(?:\s*\[[^\]]*\])?\s*\{)([^{}]*)(\})(.*?)(\\end\{array\})",
+    re.S,
+)
+
+
+def _fix_array_preamble(preamble: str, needed_cols: int = 0) -> str:
+    """列格式顶层的 `:` 换 `|`；列数不足时末尾补 `c`。"""
+    depth = 0
+    cols = 0
+    chars: list[str] = []
+    for ch in preamble:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            if ch == ":":
+                ch = "|"
+            if ch in "clr":
+                cols += 1
+        chars.append(ch)
+    if needed_cols > cols:
+        chars.append("c" * (needed_cols - cols))
+    return "".join(chars)
+
+
+def _array_body_cols(body: str) -> int:
+    """数 array 表体单行最多的顶层 `&` 数 +1；嵌套花括号里的 `&` 不计。
+
+    `\\text{a&b}` 里的 `&` 是文本内容而不是列分隔，必须靠花括号深度排除，
+    否则会把列数数多、给正常表格补出多余的列。
+    """
+    depth = 0
+    best = 0
+    current = 0
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\":
+            if i + 1 < n and body[i + 1] == "\\":  # 行结束符：结算本行
+                best = max(best, current)
+                current = 0
+                i += 2
+                continue
+            i += 2  # 跳过命令首字符（\hline / \text / \times …）
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth = max(0, depth - 1)
+        elif ch == "&" and depth == 0:
+            current += 1
+        i += 1
+    best = max(best, current)
+    return best + 1 if best else 0
+
+
+def _repair_array_preambles(text: str) -> str:
+    """只在数学区修复 array 列格式（`:`→`|`、列数不足补 `c`）；不改 vault 原文。"""
+    if not text or "\\begin{array}" not in text:
+        return text
+
+    def _sub(m):
+        body = m.group(4)
+        return (m.group(1)
+                + _fix_array_preamble(m.group(2), _array_body_cols(body))
+                + m.group(3) + body + m.group(5))
+
+    parts = _MATH_SPLIT_RE.split(text)
+    for i in range(1, len(parts), 2):
+        if "\\begin{array}" in parts[i]:
+            parts[i] = _ARRAY_ENV_RE.sub(_sub, parts[i])
+    return "".join(parts)
+
+
 def _escape_stray_backslash(text: str) -> str:
     """把数学区（$...$ / $$...$$）之外孤立的反斜杠转成 pandoc 安全转义 \\\\。
 
@@ -3600,17 +3689,20 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
         6. _repair_invalid_math_font_wrappers 修复会吞掉 Δ/Ξ 的错误粗体包裹与孤立 not；
         7. _repair_duplicate_math_scripts 修复数学区的连续同类脚标；
         8. _repair_incomplete_math_commands 给数学区末尾缺分母的 frac 补空参数；
-           两者都只改本次导出的内存副本，不改题库文件，也不丢 OCR 识别出的内容；
-        9. _normalize_inline_math_boundaries 复核行内 `$` 边界 —— 上面几步（填空线
+        9. _repair_array_preambles 修 array 列格式：`:`（arydshln 虚线语法）
+           换 `|`，列数少于表体单元格数时末尾补 `c`（两种写法都会让 xelatex
+           以 Illegal pream-token / Extra alignment tab 硬停）；
+           以上几步都只改本次导出的内存副本，不改题库文件，也不丢 OCR 识别出的内容；
+        10. _normalize_inline_math_boundaries 复核行内 `$` 边界 —— 上面几步（填空线
            转成行内公式、文本区符号包成行内数学）都可能新造出「闭 `$`
            紧跟数字」的非法边界，这里统一收口，保证交给 pandoc 的每一对行内数学
            都满足它的三条边界要求；
-        10. _stash_tables 把内联 HTML <table> 换成 base64 令牌 —— 必须在
+        11. _stash_tables 把内联 HTML <table> 换成 base64 令牌 —— 必须在
            _escape_stray_backslash 之前，否则表格里的反斜杠会先被双写成字面反斜杠，
            而表格单元格的转义由 _cell_tex/_tex_text 自己负责（两套转义会打架）；
            令牌本身只含 A-Za-z0-9-_=，不含反斜杠，后一步碰不到它。
-        11. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
-        12. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
+        12. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
+        13. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
         """
         repaired = _merge_inline_math_newlines(text)
         repaired = _sanitize_export_text(repaired)
@@ -3621,6 +3713,7 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
         repaired = _repair_invalid_math_font_wrappers(repaired)
         repaired = _repair_duplicate_math_scripts(repaired)
         repaired = _repair_incomplete_math_commands(repaired)
+        repaired = _repair_array_preambles(repaired)
         repaired = _normalize_inline_math_boundaries(repaired)
         return _rewrite(_escape_stray_backslash(_stash_tables(repaired)))
 
