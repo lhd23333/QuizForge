@@ -4428,13 +4428,18 @@ def _paper_tone_variable_args(paper_tone: str) -> list[str]:
     return []
 
 
-# —— 导出面板字体选项（2026-10-04 新增）——
+# —— 导出面板字体选项（2026-10-04 新增；2026-10-05 默认改 Fandol）——
 # value 为 fontspec 族名（连同 "-V cjk_font"/"latin_font" 进 pandoc 模板变量），
-# label 供 UI 下拉直接渲染。"" 表示跟随默认（中文=下方三档自动回落链；英文=
-# Latin Modern）。本机可用性经 Windows 字体注册表过滤；FandolSong 随 TeX 分发
-# （MiKTeX 自带）不在系统注册表，单列在 TeX 专属区。
+# label 供 UI 下拉直接渲染。第一项即下拉默认选中：FandolSong 随 TeX 分发
+# （MiKTeX 自带、不在 Windows 字体注册表），任何机器导出都渲染同一套字——
+# 用户 2026-10-05 明确要求默认 Fandol，换取跨机一致性；它缺 /ToUnicode、
+# 个别阅读器可能显示空白，由导出面板备注提示“异常空白时可换字体”兜底，
+# 不动这里的默认。"" 表示“自动”（本机回落链：思源黑体 → 微软雅黑 → Fandol），
+# 保留给旧任务 / Agent 传空串的调用，语义不变。其余系统字体经注册表过滤。
+_TEX_BUNDLED_CJK_FONTS = frozenset({"FandolSong"})
 _EXPORT_CJK_FONT_CHOICES = (
-    ("", "默认（自动：思源黑体 → 微软雅黑 → Fandol）"),
+    ("FandolSong", "Fandol 宋体（默认；TeX 自带）"),
+    ("", "自动（思源黑体 → 微软雅黑 → Fandol）"),
     ("Noto Sans SC", "思源黑体 Noto Sans SC"),
     ("Noto Serif SC", "思源宋体 Noto Serif SC"),
     ("Microsoft YaHei", "微软雅黑"),
@@ -4442,9 +4447,6 @@ _EXPORT_CJK_FONT_CHOICES = (
     ("SimHei", "黑体"),
     ("KaiTi", "楷体"),
     ("FangSong", "仿宋"),
-)
-_EXPORT_CJK_TEX_ONLY = (
-    ("FandolSong", "Fandol 宋体（TeX 自带；少数阅读器中文可能空白）"),
 )
 _EXPORT_LATIN_FONT_CHOICES = (
     ("", "默认（Latin Modern）"),
@@ -4486,9 +4488,10 @@ def _font_installed(family: str) -> bool:
 
 def available_export_fonts() -> dict:
     """导出面板的中/英文字体清单（只含本机可用项，供页面下拉渲染）。"""
+    # FandolSong（TeX 自带）不在 Windows 字体注册表，恒保留；其余系统字体
+    # 按本机注册表过滤。顺序即下拉顺序，首项是页面默认选中项。
     cjk = [(fid, label) for fid, label in _EXPORT_CJK_FONT_CHOICES
-           if not fid or _font_installed(fid)]
-    cjk += list(_EXPORT_CJK_TEX_ONLY)
+           if not fid or fid in _TEX_BUNDLED_CJK_FONTS or _font_installed(fid)]
     latin = [(fid, label) for fid, label in _EXPORT_LATIN_FONT_CHOICES
              if not fid or _font_installed(fid)]
     return {"cjk": cjk, "latin": latin}

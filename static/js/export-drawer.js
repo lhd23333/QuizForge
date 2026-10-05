@@ -316,12 +316,14 @@
   });
 
   // —— 字体预览 ——
-  // 下拉直接作用到预览行的 font-family（浏览器用本机同名系统字体渲染；
-  // FandolSong 等 TeX 专属字体在本机无系统字形时回退衬线近似）。
+  // 下拉直接作用到预览行的 font-family（浏览器用本机同名系统字体渲染）。
+  // FandolSong 是 TeX 分发字体、本机没有同名系统字形，直接用宋体近似——
+  // 别让它落到后面的微软雅黑（黑体，与导出 PDF 的宋体观感差得远）。
   function syncExportFontPreviews() {
     if (cjkFontPreview) {
-      cjkFontPreview.style.fontFamily =
-        `"${cjkFontSel?.value || 'Noto Sans SC'}", "Microsoft YaHei", serif`;
+      cjkFontPreview.style.fontFamily = cjkFontSel?.value === 'FandolSong'
+        ? '"SimSun", "Microsoft YaHei", serif'
+        : `"${cjkFontSel?.value || 'Noto Sans SC'}", "Microsoft YaHei", serif`;
     }
     if (latinFontPreview) {
       latinFontPreview.style.fontFamily =
