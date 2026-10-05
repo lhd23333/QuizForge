@@ -2452,7 +2452,10 @@ def _paginate_custom(questions, spec, keypoints="", fullpage_ids=None,
     """四维自定义组合的分页总入口：命中等价表复用 legacy 分页器，其余走薄策略。"""
 
     def dispatch():
-        key = (spec.layout, spec.grouped, spec.columns, spec.ratio)
+        # 自适应 + 双栏按流式折算（与 resolve_export_layout 同一口径）：分题型
+        # 命中 practice 等价表，不分题型落到下面的 practice_stream。
+        key = ("flow" if spec.layout == "adaptive" and spec.columns == 2
+               else spec.layout, spec.grouped, spec.columns, spec.ratio)
         sp = None
         if spec.std_head:
             sp = (std_opts or {}).get("section_points") or {}
@@ -2965,7 +2968,11 @@ def resolve_export_layout(layout=None, grouped=None, columns=None, ratio=None,
         columns = 1             # 一页 N 题是单栏页结构
 
     std_head = std_exam and columns == 1 and not wide
-    key = (layout, grouped, columns, ratio)
+    # 自适应 + 双栏 ≡ 流式 + 双栏：自适应的留白公式本来就取自双栏刷题（见
+    # _paginate_adaptive），查等价表时按流式折算——分题型下命中 practice 预设，
+    # 产物与流式双栏逐字节一致，不会把「分题型」静默丢掉。
+    key = ("flow" if layout == "adaptive" and columns == 2 else layout,
+           grouped, columns, ratio)
     if std_head and key == ("flow", True, 1, "a4"):
         compat = "exam_std"     # 与标准试卷预设完全同一条路径
     else:

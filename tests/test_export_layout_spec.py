@@ -89,6 +89,11 @@ class ResolveSpecTests(unittest.TestCase):
         self.assertEqual(spec.columns, 2)
         self.assertTrue(spec.two_columns)
         self.assertEqual(spec.template_mode, "practice")
+        # 等价表按流式折算：分题型命中 practice 预设，不分题型与流式双栏同为 list
+        self.assertEqual(spec.compat_mode, "practice")
+        flat = exporter.resolve_export_layout("adaptive", False, 2, "a4")
+        self.assertEqual(flat.compat_mode, "list")
+        self.assertEqual(flat.label, "自适应·不分题型·双栏·A4")
 
     def test_grouped_accepts_form_style_values(self):
         self.assertTrue(exporter.resolve_export_layout("flow", "1").grouped)
@@ -274,13 +279,29 @@ class NewComboPaginationTests(unittest.TestCase):
         self.assertEqual([b["num"] for b in blocks if b["kind"] == "question"],
                          [1, 2, 3, 4])
 
-    def test_adaptive_two_columns_reuses_practice_stream(self):
-        """自适应 + 双栏 = 双栏流式的既有留白口径（qpracticesolve 作答盒）。"""
-        adaptive = self._paginate(layout="adaptive", grouped=False, columns=2,
-                                  ratio="a4")
-        flow = self._paginate(layout="flow", grouped=False, columns=2, ratio="a4")
-        self.assertEqual(adaptive, flow)
-        self.assertTrue(any(b.get("practice_solve") for b in adaptive[0]))
+    def test_adaptive_two_columns_is_identical_to_flow_two_columns(self):
+        """自适应 + 双栏 ≡ 流式 + 双栏：留白口径本来就是双栏刷题的（分题型与
+        不分题型都成立——分题型曾被静默丢掉，这里钉住）。"""
+        for grouped in (False, True):
+            with self.subTest(grouped=grouped):
+                adaptive = self._paginate(layout="adaptive", grouped=grouped,
+                                          columns=2, ratio="a4")
+                flow = self._paginate(layout="flow", grouped=grouped,
+                                      columns=2, ratio="a4")
+                self.assertEqual(adaptive, flow)
+                blocks = self._blocks(adaptive)
+                self.assertTrue(any(b.get("practice_solve") for b in blocks))
+                # 分题型下保留大题分区标题，不分题型下没有
+                self.assertEqual(
+                    sum(1 for b in blocks if b["kind"] == "heading") > 0,
+                    grouped)
+                md_adaptive = exporter.build_markdown(
+                    _questions(), TITLE, mode="list", layout="adaptive",
+                    grouped=grouped, columns=2, ratio="a4")
+                md_flow = exporter.build_markdown(
+                    _questions(), TITLE, mode="list", layout="flow",
+                    grouped=grouped, columns=2, ratio="a4")
+                self.assertEqual(md_adaptive, md_flow)
 
     def test_wide_separate_solutions_one_per_page(self):
         pages = self._paginate(layout="one", grouped=True, columns=None,
