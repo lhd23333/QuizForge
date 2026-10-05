@@ -383,6 +383,7 @@ try {
         "tex_installer.py",
         "search_query.py", "word_exporter.py", "word_ooxml.py",
         "license_manager.py", "device_identity.py", "filestore.py", "exporter.py",
+        "export_service.py",
         "converter.py", "pdf_collection.py", "collection_structure.py",
         "collection_recovery.py", "ocr_pool.py",
         "mineru_store.py", "doc2x_client.py", "doc2x_store.py", "imgorder.py",

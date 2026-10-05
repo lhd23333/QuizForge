@@ -5776,3 +5776,53 @@ html.desktop-host:not(.embedded-view).app-sidebar-collapsed.question-sidebar-col
    按钮点了只会翻图标、边栏不动，属于“点了没反应”的死控件，直接不显示。 */
 html:not(.desktop-host) .sidebar-collapse-button { display: none; }
 @media (max-width: 760px) { .sidebar-collapse-button { display: none; } }
+
+/* ---------- 导出任务面板（export_tasks.html + export-tasks.js） ---------- */
+/* 行布局复用 .bo-row/.bo-chips/.bo-act（与转换任务总面板同一族，保证两页观感
+   一致），这里只补导出特有的三块：可点开详情的名称区、详情对话框的两列表、
+   以及 PDF 内嵌查看层。dialog 的颜色走 var(--surface)/var(--text)，在
+   @layer overlays 的通用 dialog 规则之外仍能跟随深浅主题。 */
+.export-page-hint { margin: 0; font-size: 13px; }
+.export-empty { margin: var(--sp-2) 0 0; font-size: 13px; }
+.export-empty[hidden] { display: none; }
+#export-list-active, #export-list-done, #export-list-stopped { margin-top: var(--sp-2); }
+.export-row { align-items: center; }
+/* 名称区是按钮：整块可点开详情，但外观仍是普通文本行 */
+.export-name { flex: 1; min-width: 0; display: grid; gap: 2px; padding: 0; border: 0;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.export-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-name:hover .export-title { color: var(--primary); }
+.export-source { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-row .bo-act { flex-wrap: wrap; justify-content: flex-end; }
+
+.export-detail-dialog { width: min(640px, calc(100vw - 30px));
+  max-height: min(780px, calc(100vh - 30px)); padding: 0;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); }
+.export-detail-dialog::backdrop { background: rgb(15 23 42 / 35%); }
+.export-detail-shell { display: flex; flex-direction: column; max-height: inherit; }
+.export-detail-head { display: flex; align-items: center; gap: 10px;
+  padding: 13px 16px; border-bottom: 1px solid var(--border); }
+.export-detail-head b { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.export-detail-body { padding: 14px 16px; overflow: auto; }
+.export-detail-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 7px 14px; margin: 0; font-size: 13px; }
+.export-detail-grid dt { color: var(--text-2); }
+.export-detail-grid dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.export-detail-actions { display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 10px; padding: 11px 16px 14px; border-top: 1px solid var(--border); }
+
+/* PDF 查看层：产物多为 PDF，同源 iframe 直接内嵌看，不依赖浏览器新窗口或
+   系统默认程序（Obsidian 插件里两者行为都不可控）。 */
+.export-viewer-dialog { width: min(1020px, calc(100vw - 30px));
+  height: min(820px, calc(100vh - 30px)); padding: 0;
+  border: 1px solid var(--border); border-radius: 9px;
+  background: var(--surface); color: var(--text); box-shadow: var(--shadow-lg); }
+.export-viewer-dialog::backdrop { background: rgb(15 23 42 / 35%); }
+.export-viewer-shell { display: flex; flex-direction: column; height: 100%; }
+.export-viewer-head { display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.export-viewer-head b { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#export-viewer-frame { flex: 1; width: 100%; border: 0; background: #fff; }

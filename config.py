@@ -340,8 +340,11 @@ MINERU_CONCURRENCY = 6
 DOC2X_CONCURRENCY = 8
 OCR_LIMIT_COOLDOWN_SECONDS = 15
 
-# 同时进行的 xelatex 编译数。单机单人，1 足够，避免多个 xelatex 抢 CPU。
-EXPORT_CONCURRENCY = 1
+# 同时进行的导出数（PDF/TeX/DOCX 共用，见 exporter._EXPORT_SLOTS）。
+# 导出改为后台任务面板后，用户会连点几次导出排队；1 会让第二个任务干等到
+# 第一个整卷编译完（十几分钟），2 允许一个长任务旁边穿插一份小题量导出。
+# 不放大到更高：xelatex 单进程就吃满一个核，再高只会互相拖慢且抢内存。
+EXPORT_CONCURRENCY = 2
 
 # 题目类型选项
 QUESTION_TYPES = ["单选题", "多选题", "填空题", "解答题"]

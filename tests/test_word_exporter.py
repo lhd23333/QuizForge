@@ -200,7 +200,7 @@ class WordPipelineTests(unittest.TestCase):
             assets.mkdir()
             commands = []
 
-            def fake_pandoc(command, *, cwd):
+            def fake_pandoc(command, *, cwd, cancel=None):
                 commands.append((command, cwd))
                 target = Path(command[command.index("-o") + 1])
                 shutil.copy2(config.WORD_REFERENCE_DOCX, target)
@@ -227,7 +227,7 @@ class WordPipelineTests(unittest.TestCase):
             assets = root / "assets"
             assets.mkdir()
 
-            def failed_pandoc(command, *, cwd):
+            def failed_pandoc(command, *, cwd, cancel=None):
                 Path(command[command.index("-o") + 1]).write_bytes(b"partial")
                 raise word_exporter.ExportError("Pandoc 生成 Word 失败：测试错误")
 

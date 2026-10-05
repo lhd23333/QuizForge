@@ -19,7 +19,7 @@ python app.py
 
 # 编译检查 + 标准库回归测试（不新增 pytest 依赖）
 .venv\Scripts\python.exe -m py_compile app.py
-.venv\Scripts\python.exe -m py_compile filestore.py exporter.py export_tables.py import_defaults.py converter.py pdf_collection.py collection_structure.py ocr_pool.py mineru_store.py doc2x_client.py doc2x_store.py imgorder.py blockpipe.py blocksplit.py blocknorm.py mechfix.py importer.py dedup.py llm_client.py providers.py qrender.py task_store.py cleanup_output.py corpus.py tools\eval_doc2x.py
+.venv\Scripts\python.exe -m py_compile filestore.py exporter.py export_tables.py export_service.py import_defaults.py converter.py pdf_collection.py collection_structure.py ocr_pool.py mineru_store.py doc2x_client.py doc2x_store.py imgorder.py blockpipe.py blocksplit.py blocknorm.py mechfix.py importer.py dedup.py llm_client.py providers.py qrender.py task_store.py cleanup_output.py corpus.py tools\eval_doc2x.py
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 
 # 一键运行完整源码验证；构建目录版后去掉 -SkipBundleScan 可同时检查发行文件
@@ -61,7 +61,12 @@ filestore.py        文件式题库存储层（替代服务器版的 db.py）
                     ——内存索引缓存（按 mtime 刷新）
                     ——勾选篮以题目 id 原子写入 data/selections.json
 task_store.py       转换任务 JSON 快照；重启后保留完成/待审核结果，不自动重放付费调用
+export_service.py   导出后台任务服务：queue.Queue + N 个 worker（config.EXPORT_CONCURRENCY 默认 2）
+                    ——题库页 /export 只登记任务并立即返回，导出任务面板按进行中/已完成/已终止管理
+                    ——内存任务镜像 + task_store "export" 命名空间快照；重启在途任务标中断，不自动重放
+                    ——乐观取消：running 立即置 cancelled，Event → 杀整棵编译进程树，worker 收尾不覆写
 cleanup_output.py   启动清理：过期任务 7 天、上传件/导出产物 24 小时
+                    ——任务历史保留期（7 天）内豁免导出任务产物，避免已完成任务打不开 PDF
 converter.py        OCR 后端与拆题引擎的统一转换层
                     ——OCR 为 MinerU/Doc2X 二选一；下游 whole/block/no_ai 独立选择
                     ——多组并发转换用 ThreadPoolExecutor
@@ -82,6 +87,8 @@ imgorder.py         多图片选择题归属恢复
 exporter.py         PDF 导出：题目列表 → Markdown → pandoc → xelatex → PDF
                     ——分页、选项分列、图片布局、分值区与 WIMath 标志
                     ——双栏大题按 TeX 实际高度占列，16:9 题目区保持 70% 左对齐
+                    ——接收 progress 回调与 cancel Event（由 export_service 注入）；
+                      xelatex stdout 的 [N] 页码标记用于“已排出 K 页”进度
 export_tables.py    OCR HTML／Markdown 管道表格的共享纯文本行列解析
                     ——页面与 PDF 分别安全渲染，不把外来 HTML 直接带回 DOM
 qrender.py          页面侧题目正文结构化渲染

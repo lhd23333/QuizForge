@@ -9,12 +9,14 @@
 """
 
 import base64
+import collections
 import functools
 import logging
 import re
 import shutil
 import subprocess
 import threading
+import time
 import unicodedata
 import zipfile
 import uuid
@@ -32,6 +34,25 @@ import tex_sandbox
 
 class ExportError(Exception):
     """导出过程出错。"""
+
+
+class ExportCancelled(ExportError):
+    """用户主动终止导出。
+
+    与普通失败分开成独立类型：导出任务服务要把它归到「已终止」而不是「失败」。
+    ``_export_unlocked`` 捕获它时会删掉本次导出的半成品工作目录——用户按的是
+    「不要了」，留下半个 PDF 或几百 MB 中间文件只会让人以为导出还活着。
+    """
+
+
+def _cancelled(cancel) -> bool:
+    """容忍 None 与任意带 is_set() 的取消标记（threading.Event / 测试假对象）。"""
+    return bool(cancel is not None and cancel.is_set())
+
+
+def _check_cancel(cancel) -> None:
+    if _cancelled(cancel):
+        raise ExportCancelled("导出已终止")
 
 
 def _resolve_image_source(raw_name: str) -> Path | None:
@@ -73,10 +94,16 @@ def _resolve_image_source(raw_name: str) -> Path | None:
 
 
 # 工作目录隔离解决“文件互删”，并发槽解决“同时跑多个 XeLaTeX 抢爆内存”。
-# 这是进程内边界；生产当前单 worker，正好覆盖全部导出请求。
+# 这是进程内边界：PDF 导出、DOCX 导出（word_exporter）与讲义局部编译
+# （handout_exporter）共用同一把槽，避免三条路各自放行后叠加超限。
 _EXPORT_SLOTS = threading.BoundedSemaphore(
     max(1, int(getattr(config, "EXPORT_CONCURRENCY", 1)))
 )
+
+# xelatex 每 shipout 一页会在 stdout 打一行 ``[N]``（`[1]`、`[2]` …，页码可带
+# 前后缀如 `[12 <...>]`）。统计其中最大页码就是“已排出几页”，是编译阶段唯一
+# 可得的真实进度信号；纯文本估算看不到 TeX 实际断页。
+_PAGE_MARK_RE = re.compile(r"\[(\d+)[^\]]*\]")
 
 
 # 完整选项标签：优先匹配 $\displaystyle A.$（含美元整体），否则裸 A. / A．
@@ -3692,10 +3719,26 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
            std_opts: dict = None, paper_tone: str = "white",
            wimath_logo: bool = False, bank_subject: str = "math",
            template_path: str | Path | None = None,
-           cjk_font: str = "", latin_font: str = "") -> Path:
-    """在有界编译槽内导出；公开签名向后兼容（新增可选字体参数）。"""
+           cjk_font: str = "", latin_font: str = "",
+           progress=None, cancel=None) -> Path:
+    """在有界编译槽内导出；公开签名向后兼容（新增可选字体/进度/取消参数）。
+
+    progress: ``callable(stage, detail)`` 进度回调。stage 取值 staging /
+        rendering / compiling / verifying；compiling 的 detail 带
+        ``{"pass": 第几遍, "passes": 总遍数, "pages": 已排页数}``。回调在
+        编译线程里执行，实现方自己保证线程安全；回调内部抛错会被吞掉——
+        进度上报不能反过来杀死编译。
+    cancel: 带 ``is_set()`` 的取消标记（threading.Event）。置位后终止整棵
+        编译进程树并抛 ``ExportCancelled``；排队等待编译槽期间同样响应。
+    """
     _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
-    with _EXPORT_SLOTS:
+    # 循环轮询拿槽：排队期间被用户终止的任务不该继续占着工作线程白等
+    # （导出任务面板的“终止”对排队中的任务也要立即生效）。
+    while True:
+        _check_cancel(cancel)
+        if _EXPORT_SLOTS.acquire(timeout=0.5):
+            break
+    try:
         return _export_unlocked(
             questions, title=title, fmt=fmt, mode=mode, keypoints=keypoints,
             fullpage_ids=fullpage_ids, header_footer=header_footer,
@@ -3703,7 +3746,10 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
             paper_tone=paper_tone, wimath_logo=wimath_logo,
             bank_subject=bank_subject, template_path=template_path,
             cjk_font=cjk_font, latin_font=latin_font,
+            progress=progress, cancel=cancel,
         )
+    finally:
+        _EXPORT_SLOTS.release()
 
 
 def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
@@ -3714,7 +3760,8 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
                      wimath_logo: bool = False,
                      bank_subject: str = "math",
                      template_path: str | Path | None = None,
-                     cjk_font: str = "", latin_font: str = "") -> Path:
+                     cjk_font: str = "", latin_font: str = "",
+                     progress=None, cancel=None) -> Path:
     """导出为 tex / pdf / zip（tex + 插图打包），返回产物路径。
 
     questions: dict 列表，每项含 id/body/type/solution。
@@ -3725,10 +3772,20 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     paper_tone: 所有模式共用的纸张底色（white / cream）；非法值退回 white。
     template_path: 可选的已校验 TeX 模板。模板所在目录中的资源会复制到本次
         导出工作区；不传时继续使用内置 exam_template.tex。
+    progress / cancel: 见 ``export``。被终止时删掉本次工作目录再抛出，
+        不留半个 PDF 或几百 MB 中间文件。
     """
     if not questions:
         raise ExportError("没有题目可导出")
     _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
+
+    def emit(stage: str, detail: dict | None = None) -> None:
+        if progress is None:
+            return
+        try:
+            progress(stage, detail)
+        except Exception:      # 进度上报不允许反向影响编译
+            logger.exception("导出进度回调失败（已忽略）：%s", stage)
 
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # 每次导出使用独占目录。不能在这里清理共享 output/：两个用户同时导出时，
@@ -3742,65 +3799,103 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     tex_path = work_dir / f"{stem}.tex"
     pdf_path = work_dir / f"{stem}.pdf"
 
-    # 0. 暂存题目插图：把 ![[...]] 引用的图拷进本次工作目录并改写为本地文件名，
-    #    使 xelatex 能就地找到（quiz_ 前缀 → 下次导出随中间产物一并清理）
-    questions = _stage_images(questions, stem, work_dir)
+    try:
+        _check_cancel(cancel)
+        # 0. 暂存题目插图：把 ![[...]] 引用的图拷进本次工作目录并改写为本地文件名，
+        #    使 xelatex 能就地找到（quiz_ 前缀 → 下次导出随中间产物一并清理）
+        emit("staging")
+        questions = _stage_images(questions, stem, work_dir)
+        _check_cancel(cancel)
 
-    # 1. 写 Markdown（UTF-8 无 BOM）
-    md_path.write_text(
-        build_markdown(questions, title, mode=mode, keypoints=keypoints,
-                       fullpage_ids=fullpage_ids, solution_mode=solution_mode,
-                       std_opts=std_opts, bank_subject=bank_subject),
-        encoding="utf-8",
-    )
+        # 1. 写 Markdown（UTF-8 无 BOM）
+        emit("rendering")
+        md_path.write_text(
+            build_markdown(questions, title, mode=mode, keypoints=keypoints,
+                           fullpage_ids=fullpage_ids, solution_mode=solution_mode,
+                           std_opts=std_opts, bank_subject=bank_subject),
+            encoding="utf-8",
+        )
 
-    # 2. pandoc → tex（页眉页脚用 -V 变量传入，不被 pandoc 转义）
-    template_source = _resolve_template_path(template_path, mode=mode)
-    template_for_pandoc = _stage_template_resources(
-        template_source, work_dir) if template_path is not None else template_source
-    cmd = [config.PANDOC, str(md_path), "-o", str(tex_path),
-           "--template", str(template_for_pandoc)]
-    if mode == "slides":
-        cmd += ["-V", "slides=1"]
-    elif mode == "practice":
-        cmd += ["-V", "practice=1"]
-    logo_name = _stage_wimath_logo(stem, work_dir, wimath_logo)
-    if logo_name:
-        cmd += ["-V", f"wimath_logo={logo_name}"]
-    cmd += _paper_tone_variable_args(paper_tone)
-    cmd += _font_variable_args(cjk_font, latin_font)
-    cmd += _hf_variable_args(header_footer, title)
-    _run(cmd, cwd=work_dir, step="pandoc")
-    if fmt == "tex":
-        return tex_path
-    if fmt == "zip":
-        return _zip_tex(tex_path, stem, work_dir)
+        # 2. pandoc → tex（页眉页脚用 -V 变量传入，不被 pandoc 转义）
+        template_source = _resolve_template_path(template_path, mode=mode)
+        template_for_pandoc = _stage_template_resources(
+            template_source, work_dir) if template_path is not None else template_source
+        cmd = [config.PANDOC, str(md_path), "-o", str(tex_path),
+               "--template", str(template_for_pandoc)]
+        if mode == "slides":
+            cmd += ["-V", "slides=1"]
+        elif mode == "practice":
+            cmd += ["-V", "practice=1"]
+        logo_name = _stage_wimath_logo(stem, work_dir, wimath_logo)
+        if logo_name:
+            cmd += ["-V", f"wimath_logo={logo_name}"]
+        cmd += _paper_tone_variable_args(paper_tone)
+        cmd += _font_variable_args(cjk_font, latin_font)
+        cmd += _hf_variable_args(header_footer, title)
+        _run(cmd, cwd=work_dir, step="pandoc", cancel=cancel)
+        _check_cancel(cancel)
+        if fmt == "tex":
+            emit("verifying")
+            return tex_path
+        if fmt == "zip":
+            emit("verifying")
+            return _zip_tex(tex_path, stem, work_dir)
 
-    # 3. xelatex → pdf（在 output 目录内跑，nonstopmode 容忍数据里的非法反斜杠）
-    #    跑两遍：第一遍把总页数写进 .aux，第二遍 \pageref{LastPage} 才解析成真实数字
-    #    （只跑一遍页脚「总页数」会显示 ??）。第二遍去掉 -halt-on-error，避免
-    #    第一遍已生成 PDF 后因残留告警中断。
-    if template_path is not None:
-        try:
-            tex_sandbox.compile_xelatex(tex_path, passes=2,
-                                        timeout=_XELATEX_TIMEOUT_SECONDS)
-        except tex_sandbox.TexSandboxError as exc:
-            raise ExportError(f"[xelatex 沙箱] {exc}") from exc
-    else:
-        for i in range(2):
-            _run(
-                [config.XELATEX, "-interaction=nonstopmode",
-                 *(["-halt-on-error"] if i == 0 else []),
-                 f"{stem}.tex"],
-                cwd=work_dir,
-                step="xelatex",
-            )
-    fatal = _xelatex_fatal_log(work_dir)
-    if fatal:
-        raise ExportError(f"[xelatex] 日志检测到致命错误：{fatal}{_tex_error_hint(work_dir)}")
-    if not pdf_path.exists():
-        raise ExportError("xelatex 未生成 PDF，请检查 .log 文件")
-    return pdf_path
+        # 3. xelatex → pdf（在 output 目录内跑，nonstopmode 容忍数据里的非法反斜杠）
+        #    跑两遍：第一遍把总页数写进 .aux，第二遍 \pageref{LastPage} 才解析成真实数字
+        #    （只跑一遍页脚「总页数」会显示 ??）。第二遍去掉 -halt-on-error，避免
+        #    第一遍已生成 PDF 后因残留告警中断。
+        if template_path is not None:
+            try:
+                tex_sandbox.compile_xelatex(
+                    tex_path, passes=2,
+                    timeout=_XELATEX_TIMEOUT_SECONDS, cancel=cancel,
+                    progress=lambda info: emit("compiling", info))
+            except tex_sandbox.TexSandboxError as exc:
+                if getattr(exc, "code", "") == "compile_cancelled":
+                    raise ExportCancelled("导出已终止") from exc
+                raise ExportError(f"[xelatex 沙箱] {exc}") from exc
+        else:
+            for i in range(2):
+                _check_cancel(cancel)
+                # 「已排出第几页」只在内存里传给进度回调，不进任务快照——快照只在
+                # 阶段/状态变化时落盘，逐页写会变成每秒一次 JSON 重写。
+                page_state = {"max": 0, "sent": 0.0}
+
+                def _on_line(line, *, _i=i, _state=page_state):
+                    found = _PAGE_MARK_RE.findall(line)
+                    if not found:
+                        return
+                    page = max(int(x) for x in found)
+                    _state["max"] = max(_state["max"], page)
+                    now = time.monotonic()
+                    if now - _state["sent"] >= 0.5:
+                        _state["sent"] = now
+                        emit("compiling", {"pass": _i + 1, "passes": 2,
+                                           "pages": _state["max"]})
+
+                emit("compiling", {"pass": i + 1, "passes": 2, "pages": 0})
+                _run(
+                    [config.XELATEX, "-interaction=nonstopmode",
+                     *(["-halt-on-error"] if i == 0 else []),
+                     f"{stem}.tex"],
+                    cwd=work_dir,
+                    step="xelatex",
+                    cancel=cancel,
+                    on_line=_on_line,
+                )
+        emit("verifying")
+        fatal = _xelatex_fatal_log(work_dir)
+        if fatal:
+            raise ExportError(f"[xelatex] 日志检测到致命错误：{fatal}{_tex_error_hint(work_dir)}")
+        if not pdf_path.exists():
+            raise ExportError("xelatex 未生成 PDF，请检查 .log 文件")
+        return pdf_path
+    except ExportCancelled:
+        # 用户按的是「不要了」：半成品工作目录整体删掉。普通失败（ExportError）
+        # 仍保留目录供排查——两条语义不同，不要合并成一个 except。
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
 
 
 def _stage_wimath_logo(stem: str, work_dir: Path,
@@ -3990,14 +4085,21 @@ _PANDOC_TIMEOUT_SECONDS = 120
 _XELATEX_TIMEOUT_SECONDS = 900
 
 
-def _run(cmd: list[str], cwd: Path, step: str):
-    """跑外部命令，失败抛 ExportError（参数列表形式，避免注入）。"""
+def _run(cmd: list[str], cwd: Path, step: str, *, cancel=None, on_line=None):
+    """跑外部命令，失败抛 ExportError（参数列表形式，避免注入）。
+
+    从 ``subprocess.run`` 换成 Popen + 读取线程，是为了两件事：① 用户终止导出
+    时能立刻杀掉整棵编译进程树（xelatex 会再派生进程，只杀父进程端口不释放）；
+    ② 逐行读取输出，把「已排出第几页」这类真实进度报给导出任务面板。
+    仍走参数列表、不经 shell，注入面与旧实现相同。
+    """
     timeout = (_XELATEX_TIMEOUT_SECONDS if step == "xelatex"
                else _PANDOC_TIMEOUT_SECONDS)
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(cwd), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout,
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
     except FileNotFoundError:
         if step == "pandoc":
@@ -4010,10 +4112,54 @@ def _run(cmd: list[str], cwd: Path, step: str):
                 "或改选“LaTeX 源码包”并上传 Overleaf 编译"
             )
         raise ExportError(f"[{step}] 找不到可执行文件：{cmd[0]}")
-    except subprocess.TimeoutExpired:
-        raise ExportError(f"[{step}] 超时（>{timeout}s）")
+    except OSError as exc:
+        raise ExportError(f"[{step}] 无法启动：{exc}")
 
-    if proc.returncode != 0:
-        tail = (proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]
-        hint = _tex_error_hint(cwd) if step == "xelatex" else ""
-        raise ExportError(f"[{step}] 退出码 {proc.returncode}: {tail}{hint}")
+    # 输出尾部滚动保留：失败时只要最后一段用于报错，全量累积在长编译下会吃内存。
+    tail: collections.deque = collections.deque(maxlen=400)
+
+    def _pump():
+        # 必须持续读走管道：xelatex 输出量远超管道缓冲区，不读会把它自己
+        # 阻塞在 write 上（表面症状就是“编译卡死”）。
+        try:
+            for line in proc.stdout or ():
+                tail.append(line)
+                if on_line is not None:
+                    try:
+                        on_line(line)
+                    except Exception:   # 进度回调出错不能杀死编译
+                        logger.exception("导出输出回调失败（已忽略）：%s", step)
+        except (OSError, ValueError):
+            pass
+
+    pump = threading.Thread(target=_pump, name=f"qf-export-{step}", daemon=True)
+    pump.start()
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if proc.poll() is not None:
+                break
+            if _cancelled(cancel):
+                tex_sandbox.terminate_process_tree(proc)
+                pump.join(timeout=2)
+                raise ExportCancelled("导出已终止")
+            if time.monotonic() > deadline:
+                tex_sandbox.terminate_process_tree(proc)
+                pump.join(timeout=2)
+                raise ExportError(f"[{step}] 超时（>{timeout}s）")
+            time.sleep(0.15)
+        pump.join(timeout=5)    # 进程已退出，读取线程把管道排空后自行结束
+
+        if proc.returncode != 0:
+            output = "".join(tail)
+            hint = _tex_error_hint(cwd) if step == "xelatex" else ""
+            raise ExportError(
+                f"[{step}] 退出码 {proc.returncode}: {output[-1600:]}{hint}")
+    finally:
+        # 显式关闭输出管道：迭代结束不会自动 close，漏掉它每次导出都会
+        # 泄漏一个管道句柄（长会话里会持续积累）。
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except OSError:
+            pass

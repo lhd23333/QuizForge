@@ -207,7 +207,7 @@ class TexSandboxTests(unittest.TestCase):
                 encoding="utf-8")
             calls = []
 
-            def fake_run(command, *, cwd, timeout, step):
+            def fake_run(command, *, cwd, timeout, step, cancel=None):
                 calls.append(command)
                 (cwd / "document.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
                 return ""

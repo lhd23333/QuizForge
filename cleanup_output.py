@@ -97,6 +97,30 @@ def _active_cleanup_dirs() -> set[Path]:
     return active
 
 
+def _active_export_outputs() -> set[Path]:
+    """导出任务历史仍在引用的产物文件（resolve 后绝对路径）。
+
+    导出任务面板靠这些文件提供「打开 PDF / 打开文件夹」，它们在任务快照
+    保留期（7 天）内必须一直可用，不能按 24h 常规规则清掉。任务记录删除或
+    过期后（``purge_expired`` 已在本函数调用前跑过），保护自动解除，下次
+    清理按普通产物回收。只认 ``artifact.path`` 一个字段，且必须位于
+    OUTPUT_DIR 之内，损坏的快照不能变成任意路径保护入口。
+    """
+    protected: set[Path] = set()
+    for _, payload in task_store.load("export"):
+        artifact = payload.get("artifact") if isinstance(payload, dict) else None
+        raw = artifact.get("path") if isinstance(artifact, dict) else None
+        if not raw:
+            continue
+        try:
+            resolved = Path(str(raw)).resolve()
+        except OSError:
+            continue
+        if _inside(resolved, config.OUTPUT_DIR):
+            protected.add(resolved)
+    return protected
+
+
 def _unlink(path: Path) -> bool:
     try:
         path.unlink()
@@ -192,11 +216,17 @@ def run_cleanup(now: float | None = None) -> dict[str, int]:
         _remove_empty_dirs(config.UPLOAD_DIR)
 
     output_cutoff = current - OUTPUT_MAX_AGE_HOURS * 3600
+    # 导出任务面板仍引用的产物豁免 24h 清理：只要任务记录还在（比如用户
+    # 几小时前导出、正等它编译完或还没点开），「打开 PDF」就必须可用。
+    # 必须在 purge_expired 之后取保护集——已过期任务的产物不再受保护。
+    protected_outputs = _active_export_outputs()
     if config.OUTPUT_DIR.exists():
         for path in config.OUTPUT_DIR.rglob("*"):
             if not path.is_file():
                 continue
             try:
+                if path.resolve() in protected_outputs:
+                    continue
                 expired = path.stat().st_mtime < output_cutoff
             except OSError:
                 continue

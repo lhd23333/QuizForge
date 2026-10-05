@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}导出任务 · QuizForge{% endblock %}
+{% block content %}
+<section class="app-page export-tasks-page" id="export-tasks" data-poll-ms="2000">
+<header class="app-page-head">
+  <h1>导出任务</h1>
+</header>
+<p class="muted export-page-hint">在题库里选好题目点「导出」后任务会出现在这里；编译在后台执行，可以继续刷题、连着提交多份导出。</p>
+
+<section class="bo-library-section" aria-label="进行中的导出任务">
+  <h2>进行中</h2>
+  <div class="bo-list" id="export-list-active"></div>
+  <p class="muted export-empty" id="export-empty-active">没有进行中的导出任务。</p>
+</section>
+
+<section class="bo-library-section" aria-label="已完成的导出任务">
+  <h2>已完成</h2>
+  <div class="bo-list" id="export-list-done"></div>
+  <p class="muted export-empty" id="export-empty-done">本会话还没有完成的导出；完成后可以在这里打开 PDF、打开所在文件夹或下载。</p>
+</section>
+
+<section class="bo-library-section" aria-label="已终止与失败的导出任务">
+  <h2>已终止</h2>
+  <div class="bo-list" id="export-list-stopped"></div>
+  <p class="muted export-empty" id="export-empty-stopped">没有已终止或失败的导出任务。</p>
+</section>
+
+{% if not tasks %}
+<div class="app-empty-state app-surface" id="export-empty-state">
+  <strong>还没有任何导出任务</strong>
+  <span class="muted">去题库勾选题目、点「导出选项 → 导出」，就会在这里生成一条任务。</span>
+  <a class="btn" href="{{ url_for('index') }}">回到题库</a>
+</div>
+{% endif %}
+</section>
+
+{# 详情面板：点击任务行打开，展示来源题库、完整导出配置与产物操作。 #}
+<dialog class="export-detail-dialog" id="export-detail" aria-labelledby="export-detail-title">
+  <div class="export-detail-shell">
+    <header class="export-detail-head">
+      <b id="export-detail-title">导出任务</b>
+      <span class="spacer"></span>
+      <button type="button" class="icon-btn" data-export-detail-close
+              aria-label="关闭详情" title="关闭">{{ icon('x') }}</button>
+    </header>
+    <div class="export-detail-body" id="export-detail-body"></div>
+    <footer class="export-detail-actions" id="export-detail-actions"></footer>
+  </div>
+</dialog>
+
+{# PDF 内嵌查看层：导出产物多为 PDF，直接在同源 iframe 里看，避免依赖
+   浏览器新窗口/系统默认程序在 Obsidian 与桌面壳里的不同行为。 #}
+<dialog class="export-viewer-dialog" id="export-viewer" aria-label="导出产物预览">
+  <div class="export-viewer-shell">
+    <header class="export-viewer-head">
+      <b id="export-viewer-title">产物预览</b>
+      <span class="spacer"></span>
+      <a class="btn btn-sm" id="export-viewer-download" href="#" download>下载</a>
+      <button type="button" class="icon-btn" data-export-viewer-close
+              aria-label="关闭预览" title="关闭">{{ icon('x') }}</button>
+    </header>
+    <iframe id="export-viewer-frame" title="导出产物" src="about:blank"></iframe>
+  </div>
+</dialog>
+
+{# 首屏行数据内联渲染：面板每 2s 轮询 /export-tasks/status 增量更新，
+   但第一屏直接用这里的数据画出，省掉一次空列表闪烁。 #}
+<script type="application/json" id="export-tasks-data">{{ tasks | tojson }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ static_v('js/export-tasks.js') }}" defer></script>
+{% endblock %}

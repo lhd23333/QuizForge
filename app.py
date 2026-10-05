@@ -18,6 +18,7 @@ import library_ops
 import importer
 import mechfix
 import exporter
+import export_service
 import service_ports
 import tex_installer
 import desktop_product
@@ -85,6 +86,7 @@ import queue
 import threading
 import zipfile
 import shutil
+import subprocess
 from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -1027,7 +1029,7 @@ def _inject_desktop_host():
 
 
 def _nav_pending_count() -> int:
-    """导航徽标计数：批次 + 资料库任务 + 实时监控任务里"还没处理完"的数量。
+    """导航徽标计数：批次 + 资料库任务 + 实时监控 + 导出任务里"还没处理完"的数量。
 
     抽成独立函数是因为它有两个消费者：整页渲染的 context_processor，以及
     /nav/count 轮询端点——监控任务完成不会触发整页刷新（桌面壳只换 iframe、
@@ -1046,12 +1048,24 @@ def _nav_pending_count() -> int:
     return n
 
 
+# 导出任务服务：提交即返回，编译在后台 worker 里跑；面板读它的内存镜像。
+# persist=True 写 task_store("export")，重启后在 restore_persisted_tasks 里
+# 统一标「中断」，绝不自动重放。
+_export_service = export_service.ExportService()
+
+
+def _nav_export_count() -> int:
+    """「导出任务」的导航徽标计数（与转换任务分开：点红心要落到正确的面板）。"""
+    return _export_service.pending_count()
+
+
 @app.context_processor
 def _inject_nav_badge():
-    """导航栏「转换任务」后面的未处理批次数。放 context_processor 是因为它要
-    出现在 base.html，每个页面都要算——各视图逐个传参必然漏。
+    """导航栏「转换任务」「导出任务」后面的未处理数。放 context_processor 是因为
+    它要出现在 base.html，每个页面都要算——各视图逐个传参必然漏。
     """
-    return {"nav_batch_count": _nav_pending_count()}
+    return {"nav_batch_count": _nav_pending_count(),
+            "nav_export_count": _nav_export_count()}
 
 
 @app.template_global()
@@ -4292,6 +4306,13 @@ def restore_persisted_tasks() -> None:
     task_store.mark_interrupted(
         "source", {"queued", "converting", "validating"}, _RESTART_INTERRUPTED)
 
+    # 导出任务：在途编译随进程一起消失了，标成中断但保留配置，用户可在面板
+    # 里「重新导出」。编译不计费，本可自动补跑，但用户可能已经改了题集或配置，
+    # 悄悄产出第二份 PDF 不如让他自己决定。
+    restored_export = task_store.mark_interrupted(
+        "export", export_service.ACTIVE_STATUSES, _RESTART_INTERRUPTED)
+    _export_service.restore(restored_export)
+
 
 def resume_enabled_source_monitors() -> None:
     """进程启动时恢复用户已开启的来源监听。
@@ -6618,9 +6639,10 @@ def nav_count():
     """导航徽标的轻量轮询端点（static/js/nav-badge.js）。
 
     刻意不复用 /batches/status：那个每次要序列化三个任务列表，而徽标只关心
-    一个数字，且是常驻整个会话的 10s 轮询——不该拖着列表走。
+    两个数字，且是常驻整个会话的 10s 轮询——不该拖着列表走。
     """
-    return jsonify(ok=True, nav_batch_count=_nav_pending_count())
+    return jsonify(ok=True, nav_batch_count=_nav_pending_count(),
+                   nav_export_count=_nav_export_count())
 
 
 @app.route("/batch/<batch_id>/delete", methods=["POST"])
@@ -8558,19 +8580,28 @@ def import_md():
 
 
 
-def _collect_questions(scope: str, *, show_source: bool = False) -> list[dict]:
-    """按 scope 从库里取题目 dict 列表（export 与 preview 共用）。"""
-    tags = [t for t in request.form.get("tags", "").split(",") if t.strip()]
-    match = request.form.get("match", "and")
-    type_ = request.form.get("type") or ""
+def _collect_questions(scope: str, *, show_source: bool = False, tags=(),
+                       match: str = "and", qtype: str = "",
+                       pinned_ids=None) -> list[dict]:
+    """按 scope 从库里取题目 dict 列表（export 与 preview 共用）。
+
+    刻意做成不读 request 的纯函数：导出任务在后台 worker 线程里取材，没有
+    Flask 请求上下文；参数由路由在提交瞬间从表单解析好传进来。
+
+    pinned_ids: 「按这批题重新导出」的固定题目 id（导出任务面板的重新导出/
+    重试）。只在 scope=="selected" 时生效并**优先于实时选题篮**——任务提交后
+    用户完全可以继续勾选别的题，重导出必须还原当初那一批。
+    """
+    tags = [t for t in tags if str(t).strip()]
     if scope == "selected":
         # 选题篮通常只有几十道题，不能为了筛这些 id 先解析整座题库。大题库冷启动
         # 时旧路径会把近三万份 Markdown 全部读入并解析 YAML，导出前白等一分多钟。
         # 定向读取仍交给 list_questions 排序，并在并发取消勾选时刷新 selected 状态。
-        selected = filestore.records_from_ids(filestore.selected_ids())
+        ids = list(pinned_ids) if pinned_ids else filestore.selected_ids()
+        selected = filestore.records_from_ids(ids)
         rows = filestore.list_questions(selected_only=True, records=selected)
     elif scope == "filtered":
-        rows = filestore.list_questions(tags=tags, match=match, qtype=type_)
+        rows = filestore.list_questions(tags=tags, match=match, qtype=qtype)
     else:
         rows = filestore.list_questions()
     questions = [_question_export_payload(record) for record in rows]
@@ -8616,6 +8647,12 @@ def _read_export_params():
         solution_mode=request.form.get("solution_mode", "none"),
         show_source=request.form.get("show_source", "") in ("1", "true", "on"),
         paper_tone=paper_tone,
+        # 筛选条件与「重新导出」的固定题目 id。预览/导出共用；pinned_ids 只在
+        # scope=="selected" 时被 _collect_questions 采用（见其 docstring）。
+        tags=[t.strip() for t in request.form.get("tags", "").split(",") if t.strip()],
+        match=request.form.get("match", "and") or "and",
+        type=request.form.get("type", "") or "",
+        pinned_ids=[x for x in request.form.getlist("pinned_ids") if x],
         # 字体选择（白名单校验在 exporter._font_variable_args，防任意串进 LaTeX）
         cjk_font=request.form.get("cjk_font", "").strip()[:80],
         latin_font=request.form.get("latin_font", "").strip()[:80],
@@ -8753,7 +8790,10 @@ def preview():
     而那条路在 Obsidian 的 Electron 环境里嵌不进 iframe（见 `_out_files` 的注释）。
     """
     p = _read_export_params()
-    questions = _collect_questions(p["scope"], show_source=p["show_source"])
+    questions = _collect_questions(p["scope"], show_source=p["show_source"],
+                                   tags=p["tags"], match=p["match"],
+                                   qtype=p["type"],
+                                   pinned_ids=p["pinned_ids"] or None)
     if not questions:
         return jsonify(ok=False, error="没有可预览的题目"), 400
 
@@ -8792,48 +8832,221 @@ def preview():
     return jsonify(ok=True, url=url_for("out_file", token=token))
 
 
+def _bank_identity() -> tuple[str, str]:
+    """当前题库的（显示名, 绝对路径），供导出任务面板显示「来源」。
+
+    桌面版把用户登记的题库列表放在 desktop.json；按路径匹配当前 BANK_DIR
+    取用户起的名。匹配不到（浏览器直启 / 未登记）回落目录名——面板不能因为
+    拿不到显示名就不显示来源。
+    """
+    path = Path(str(config.BANK_DIR))
+    try:
+        raw = json.loads(
+            (config.DATA_DIR / "desktop.json").read_text(encoding="utf-8"))
+        for item in raw.get("banks") or []:
+            if not isinstance(item, dict):
+                continue
+            item_path = str(item.get("path") or "").strip()
+            if item_path and Path(item_path) == path:
+                name = str(item.get("name") or "").strip()
+                if name:
+                    return name, str(path)
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return (path.name or str(path)), str(path)
+
+
+def _path_inside(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _start_export_task(payload: dict) -> str:
+    """按持久化配置启动一个后台导出任务，返回 task_id。
+
+    模板解析放在提交线程而不是 worker：模板被删/停用时用户应当立即收到 400，
+    而不是等任务在面板里转一圈才报错。解析出的路径只进闭包、不进 payload——
+    面板回显配置时不该出现服务器内部路径。
+    """
+    fmt = str(payload.get("fmt") or "pdf")
+    template_path = None
+    if payload.get("template_id"):
+        template_path, _template_info = _export_template_path(
+            payload["template_id"], fmt=fmt)
+
+    bank, bank_path = _bank_identity()
+    title = str(payload.get("title") or "试卷")
+
+    def collect():
+        return _collect_questions(
+            payload.get("scope", "selected"),
+            show_source=bool(payload.get("show_source")),
+            tags=payload.get("tags") or (),
+            match=payload.get("match") or "and",
+            qtype=payload.get("type") or "",
+            pinned_ids=payload.get("pinned_ids") or None,
+        )
+
+    def run(questions, progress, cancel):
+        kwargs = dict(
+            title=title, fmt=fmt, mode=payload.get("mode", "list"),
+            keypoints=payload.get("keypoints", ""),
+            fullpage_ids=payload.get("fullpage_ids") or [],
+            header_footer=payload.get("header_footer") or {},
+            solution_mode=payload.get("solution_mode", "none"),
+            std_opts=payload.get("std_opts") or {},
+            paper_tone=payload.get("paper_tone", "white"),
+            wimath_logo=bool(payload.get("wimath_logo")),
+            bank_subject=payload.get("bank_subject") or config.BANK_SUBJECT,
+            cjk_font=payload.get("cjk_font", ""),
+            latin_font=payload.get("latin_font", ""),
+            tex_backend=payload.get("tex_backend", "local"),
+        )
+        if template_path is not None:
+            kwargs["template_path"] = str(template_path)
+        return service_ports.export_document(
+            questions, progress=progress, cancel=cancel, **kwargs)
+
+    def deliver(path):
+        # 下载名用「试卷标题 + 产物扩展名」，而不是内部带时间戳和 uuid 的
+        # 工作目录文件名：存进 vault 后要靠这个名字认出是哪份卷子。
+        name = (filestore.safe_folder_name(title) or "试卷") + Path(path).suffix
+        return {"name": name, "token": _register_out_file(path, name)}
+
+    return _export_service.submit(
+        title=title, fmt=fmt, bank=bank, bank_path=bank_path,
+        payload=payload, collect=collect, run=run, deliver=deliver)
+
+
 @app.route("/export", methods=["POST"])
 def export():
-    """生成导出产物，返回取件地址（JSON）。
+    """登记后台导出任务，立即把焦点还给题库。
 
-    同样不直接回文件流：`as_attachment` 的下载在 iframe 里不会发生（宿主没有下载
-    器），前端拿到地址后自己决定怎么落地——独立浏览器里点一个 `<a download>`，
-    Obsidian 里则把地址交给插件，由插件抓下来写进 vault（见 base.html 的桥）。
+    编译不再占着请求线程：返回 task_id 后由「导出任务」面板轮询进度，多份
+    导出按 EXPORT_CONCURRENCY 排队流式执行。产物完成后面板提供「打开 PDF」
+    「打开文件夹」「下载」；产出地址仍走取件号（iframe/Electron 环境下
+    `as_attachment` 下载与 blob URL 都不可用，见 _out_files 的注释）。
     """
     p = _read_export_params()
     fmt = request.form.get("fmt", "pdf")             # pdf / tex / zip / docx
     if fmt not in {"pdf", "tex", "zip", "docx"}:
         return jsonify(ok=False, error="导出格式不支持"), 400
-
+    if p["scope"] == "selected" and not p["pinned_ids"]:
+        # 提交瞬间快照选题篮：任务在后台排队期间用户会继续勾选别的题，
+        # 本任务必须仍是「点按钮那一刻的那批」。空选题直接拒绝，不建空任务。
+        p["pinned_ids"] = list(filestore.selected_ids())
+        if not p["pinned_ids"]:
+            return jsonify(ok=False, error="没有可导出的题目"), 400
+    payload = dict(p)
+    payload["fmt"] = fmt
+    payload["tex_backend"] = request.form.get("tex_backend", "local")
     try:
-        template_path, _template_info = _export_template_path(
-            p.get("template_id", ""), fmt=fmt)
+        task_id = _start_export_task(payload)
     except agent_catalog.CatalogError as exc:
         return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+    return jsonify(ok=True, task_id=task_id)
 
-    questions = _collect_questions(p["scope"], show_source=p["show_source"])
-    if not questions:
-        return jsonify(ok=False, error="没有可导出的题目"), 400
 
+def _export_task_rows() -> list[dict]:
+    """面板行 = 服务内存镜像 + 每次请求现拼的取件地址。
+
+    取件号随快照持久化，但 URL 必须用当前请求现拼（存进服务层就绑死了
+    某次请求上下文）；token 为空（登记失败）时前端只显示路径与文件夹按钮。
+    """
+    rows = _export_service.overview()
+    for row in rows:
+        artifact = row.get("artifact")
+        if isinstance(artifact, dict) and artifact.get("token"):
+            artifact["url"] = url_for("out_file", token=artifact["token"], dl=1)
+            artifact["view_url"] = url_for("out_file", token=artifact["token"])
+    return rows
+
+
+@app.route("/export-tasks")
+def export_tasks_page():
+    """导出任务面板：进行中 / 已完成 / 已终止三个分区。"""
+    return render_template("export_tasks.html", tasks=_export_task_rows())
+
+
+@app.route("/export-tasks/status")
+def export_tasks_status():
+    """面板轮询端点；数据来自服务内存镜像，不解析快照文件。"""
+    return jsonify(ok=True, tasks=_export_task_rows())
+
+
+@app.route("/export-tasks/<task_id>/config")
+def export_task_config(task_id):
+    """「修改配置重新导出」的预填数据：返回任务提交时的完整配置。"""
+    row = _export_service.get(task_id)
+    if not row:
+        return jsonify(ok=False, error="导出任务不存在"), 404
+    return jsonify(ok=True, payload=row.get("payload") or {},
+                   title=row.get("title") or "", fmt=row.get("fmt") or "pdf")
+
+
+@app.route("/export-tasks/<task_id>/cancel", methods=["POST"])
+def export_task_cancel(task_id):
+    if not _export_service.cancel(task_id):
+        return jsonify(ok=False, error="任务不存在或已经结束"), 404
+    return jsonify(ok=True)
+
+
+@app.route("/export-tasks/<task_id>/delete", methods=["POST"])
+def export_task_delete(task_id):
+    """删除任务历史。只删记录，产物文件交给产出目录的 24h 清理回收。"""
+    if not _export_service.remove(task_id):
+        return jsonify(ok=False, error="任务不存在或还在运行"), 400
+    return jsonify(ok=True)
+
+
+@app.route("/export-tasks/<task_id>/retry", methods=["POST"])
+def export_task_retry(task_id):
+    """按原配置重新导出（失败 / 中断 / 已终止任务的「重新导出」按钮）。"""
+    row = _export_service.get(task_id)
+    if not row:
+        return jsonify(ok=False, error="导出任务不存在"), 404
+    payload = row.get("payload") or {}
+    if not isinstance(payload, dict) or not payload.get("fmt"):
+        return jsonify(ok=False, error="任务没有可复用的配置"), 400
     try:
-        out_path = service_ports.export_document(
-            questions, title=p["title"], fmt=fmt, mode=p["mode"],
-            keypoints=p["keypoints"], fullpage_ids=p["fullpage_ids"],
-            header_footer=p["header_footer"], solution_mode=p["solution_mode"],
-            std_opts=p["std_opts"], paper_tone=p["paper_tone"],
-            wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
-            cjk_font=p["cjk_font"], latin_font=p["latin_font"],
-            tex_backend=request.form.get("tex_backend", "local"),
-            **({"template_path": str(template_path)} if template_path else {}))
-    except exporter.ExportError as e:
-        return jsonify(ok=False, error=f"导出失败：{e}"), 500
+        new_id = _start_export_task(dict(payload))
+    except agent_catalog.CatalogError as exc:
+        return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
+    return jsonify(ok=True, task_id=new_id)
 
-    # 下载名用「试卷标题 + 产物扩展名」，而不是 exporter 内部那个带时间戳和 uuid 的
-    # 工作目录文件名：存进 vault 之后要靠这个名字认出是哪份卷子。
-    name = (filestore.safe_folder_name(p["title"]) or "试卷") + Path(out_path).suffix
-    token = _register_out_file(out_path, name)
-    return jsonify(ok=True, url=url_for("out_file", token=token, dl=1),
-                   filename=name)
+
+@app.route("/export-tasks/<task_id>/reveal", methods=["POST"])
+def export_task_reveal(task_id):
+    """在系统文件管理器里定位产物文件。
+
+    路径只从任务记录里取，绝不接受请求参数里的路径片段——本应用无鉴权，
+    接受路径等于开放「打开任意文件夹」入口。记录里没有产物（未完成或
+    登记失败）或文件已被清理时明确报错。
+    """
+    row = _export_service.get(task_id)
+    artifact = (row or {}).get("artifact") if row else None
+    raw = artifact.get("path") if isinstance(artifact, dict) else None
+    if not raw:
+        return jsonify(ok=False, error="任务还没有产物文件"), 400
+    try:
+        target = Path(str(raw)).resolve(strict=True)
+    except OSError:
+        return jsonify(ok=False, error="产物文件已不存在（可能超过清理时限）"), 404
+    if not _path_inside(target, config.OUTPUT_DIR):
+        return jsonify(ok=False, error="产物路径不在导出目录内"), 400
+    try:
+        if os.name == "nt":
+            # explorer 的 /select 要一个参数；不能等待它返回——复用已有窗口时
+            # explorer 会立刻带非零退出码返回，run/wait 会误报失败。
+            subprocess.Popen(["explorer", f"/select,{target}"])
+        else:
+            subprocess.Popen(["xdg-open", str(target.parent)])
+    except OSError as exc:
+        return jsonify(ok=False, error=str(exc)), 500
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -252,7 +253,12 @@ def _sandbox_env(cwd: Path) -> dict[str, str]:
     return env
 
 
-def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+def terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """终止整棵子进程树（Windows 走 taskkill /T，POSIX 杀进程组）。
+
+    公开给 exporter._run 的取消路径复用——xelatex 会再派生进程，只杀父进程
+    会留下仍占文件句柄的子进程。
+    """
     if process.poll() is not None:
         return
     if os.name == "nt":
@@ -275,8 +281,14 @@ def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
         pass
 
 
-def run(command: list[str], *, cwd: Path, timeout: int, step: str) -> str:
-    """在沙箱环境中执行外部工具，并返回合并后的 UTF-8 输出。"""
+def run(command: list[str], *, cwd: Path, timeout: int, step: str,
+        cancel=None) -> str:
+    """在沙箱环境中执行外部工具，并返回合并后的 UTF-8 输出。
+
+    cancel: 可选取消标记（带 ``is_set()`` 的对象，通常是 threading.Event）。
+    置位后终止整棵编译进程并抛 ``TexSandboxError(code="compile_cancelled")``，
+    由导出任务层翻译成「已终止」；模板预览等不提供取消入口的调用方传 None。
+    """
     work = Path(cwd).resolve(strict=True)
     kwargs: dict[str, object] = {
         "cwd": str(work),
@@ -296,14 +308,28 @@ def run(command: list[str], *, cwd: Path, timeout: int, step: str) -> str:
         process = subprocess.Popen(command, **kwargs)
     except OSError as exc:
         raise TexSandboxError(f"{step} 无法启动：{exc}", code="tool_start_failed") from exc
-    try:
-        output, _ = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(process)
-        raise TexSandboxError(
-            f"{step} 超时（>{timeout}s），已终止整棵编译进程。",
-            code="compile_timeout",
-        ) from exc
+    # 短间隔轮询 communicate 而不是一次 communicate(timeout=)：官方文档明确
+    # 「捕获 TimeoutExpired 后重试不会丢输出」，超时抛出的间隙正好用来响应取消。
+    # 不自己读管道是因为 communicate 的内部读取线程持续排空输出，xelatex 才
+    # 不会卡在写满的管道上。
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            output, _ = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired as exc:
+            if cancel is not None and cancel.is_set():
+                terminate_process_tree(process)
+                raise TexSandboxError(
+                    f"{step} 已按用户请求终止。",
+                    code="compile_cancelled",
+                ) from exc
+            if time.monotonic() > deadline:
+                terminate_process_tree(process)
+                raise TexSandboxError(
+                    f"{step} 超时（>{timeout}s），已终止整棵编译进程。",
+                    code="compile_timeout",
+                ) from exc
     text = (output or b"").decode("utf-8", "replace")
     if process.returncode != 0:
         raise TexSandboxError(
@@ -340,7 +366,12 @@ def run_pandoc(markdown: Path, output_tex: Path, template: Path,
 
 
 def compile_xelatex(tex_file: Path, *, passes: int = 2,
-                    timeout: int = 60) -> Path:
+                    timeout: int = 60, cancel=None, progress=None) -> Path:
+    """校验并编译 TeX；cancel / progress 语义与 ``run`` 相同。
+
+    progress: 可选回调，每遍开始前收到 ``{"pass": 第几遍, "passes": 总遍数}``，
+    供导出任务面板显示「编译中（第 1/2 遍）」；回调抛错会被吞掉，不影响编译。
+    """
     tex_path = Path(tex_file).resolve(strict=True)
     work = tex_path.parent
     validate_tex_text(
@@ -357,9 +388,16 @@ def compile_xelatex(tex_file: Path, *, passes: int = 2,
         "-no-shell-escape", "-interaction=nonstopmode", "-halt-on-error",
         "-file-line-error", tex_path.name,
     ])
-    for index in range(max(1, int(passes))):
+    total = max(1, int(passes))
+    for index in range(total):
+        if progress is not None:
+            try:
+                progress({"pass": index + 1, "passes": total})
+            except Exception:   # 进度上报不能杀死编译
+                pass
         output = run(command, cwd=work, timeout=timeout,
-                     step=f"XeLaTeX 编译（第 {index + 1} 遍）")
+                     step=f"XeLaTeX 编译（第 {index + 1} 遍）",
+                     cancel=cancel)
         if "Missing character: There is no" in output:
             raise TexSandboxError(
                 "XeLaTeX 编译完成但存在缺失字形；请为中文和公式配置可用字体。",
@@ -375,4 +413,5 @@ __all__ = [
     "TexSandboxError", "TexToolUnavailable", "TEXT_RESOURCE_SUFFIXES",
     "strip_tex_comments", "validate_tex_text", "validate_tex_package", "tools_available",
     "pandoc_path", "xelatex_path", "run", "run_pandoc", "compile_xelatex",
+    "terminate_process_tree",
 ]

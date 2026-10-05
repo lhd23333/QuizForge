@@ -700,7 +700,10 @@ class DesktopFirstRunTests(unittest.TestCase):
             self.assertIn("Overleaf", rows["XeLaTeX"]["detail"])
 
     def test_export_tool_errors_are_actionable(self):
-        with mock.patch.object(exporter.subprocess, "run", side_effect=FileNotFoundError):
+        # _run 已从 subprocess.run 换成 Popen（终止要杀进程树、要读实时进度），
+        # 外部工具缺失的路径打在 Popen 的 FileNotFoundError 上。
+        with mock.patch.object(exporter.subprocess, "Popen",
+                               side_effect=FileNotFoundError):
             with self.assertRaisesRegex(exporter.ExportError, "重新安装 QuizForge"):
                 exporter._run(["pandoc"], Path.cwd(), "pandoc")
             with self.assertRaisesRegex(exporter.ExportError, "Overleaf"):

@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 # 任务类型只决定快照顶层的命名空间，不改变 payload 的业务结构。资料库转换
-# 任务沿用同一份原子账本，避免再引入第二个 conversion_tasks.json。
-KINDS = ("job", "batch", "library", "source")
+# 任务沿用同一份原子账本，避免再引入第二个 conversion_tasks.json。export 是
+# 导出任务面板的持久化记录（进行中/已完成/已终止），由 export_service 读写。
+KINDS = ("job", "batch", "library", "source", "export")
 _KINDS = KINDS
 
 # 来源监听里这些状态属于"等待用户处理"或"防重放指纹载体"。任务记录一旦被

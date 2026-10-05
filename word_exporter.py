@@ -14,13 +14,15 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-import threading
+import time
 from typing import Iterable
 import uuid
 
 import config
 import export_tables
-from exporter import ExportError
+import exporter
+import tex_sandbox
+from exporter import ExportCancelled, ExportError
 
 
 SUPPORTED_MODES = frozenset({
@@ -47,7 +49,9 @@ _QIMG_RE = re.compile(r"!\[\[([^\]|]+?)(?:\|[^\]]*)?\]\]")
 _WORD_IMAGE_EXTENSIONS = frozenset({
     ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp",
 })
-_EXPORT_SLOTS = threading.BoundedSemaphore(2)
+# Pandoc 转 Word 的超时只防死锁，不用于卡正常大卷：旧实现没设超时，这里给足
+# 15 分钟；真正又大又慢的导出由用户从任务面板终止，而不是被超时误杀。
+_PANDOC_TIMEOUT_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -402,24 +406,46 @@ def build_word_plan(questions, *, title, mode, keypoints="", fullpage_ids=None,
     )
 
 
-def _run_pandoc(command: list[str], *, cwd: Path) -> None:
-    """用参数数组执行 Pandoc，并把外部错误收敛成产品错误。"""
+def _run_pandoc(command: list[str], *, cwd: Path, cancel=None) -> None:
+    """用参数数组执行 Pandoc，并把外部错误收敛成产品错误。
+
+    cancel: 与 exporter 相同的取消标记。置位后终止整棵进程树并抛
+    ``ExportCancelled``，由 ``export`` 的失败分支把整个工作目录清掉。
+    """
     try:
-        process = subprocess.run(
+        process = subprocess.Popen(
             command,
             cwd=str(cwd),
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             encoding="utf-8",
             errors="replace",
-            shell=False,
         )
     except FileNotFoundError:
         raise ExportError("未找到 Pandoc，请到“关于与环境”检查 Word 导出环境") from None
     except OSError as exc:
         raise ExportError(f"无法启动 Pandoc：{exc}") from exc
+
+    # 短间隔轮询 communicate（官方文档保证重试不丢输出）：超时间隙用来响应
+    # 用户终止；持续读取管道同时避免 Pandoc 卡在写满的 buffer 上。
+    deadline = time.monotonic() + _PANDOC_TIMEOUT_SECONDS
+    while True:
+        try:
+            stdout, _ = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired as exc:
+            if exporter._cancelled(cancel):
+                tex_sandbox.terminate_process_tree(process)
+                raise ExportCancelled("导出已终止") from exc
+            if time.monotonic() > deadline:
+                tex_sandbox.terminate_process_tree(process)
+                raise ExportError(
+                    f"Pandoc 生成 Word 超时（>{_PANDOC_TIMEOUT_SECONDS}s），已终止"
+                ) from exc
     if process.returncode != 0:
-        detail = (process.stderr or process.stdout or "未知错误").strip()
+        detail = (stdout or "").strip() or "未知错误"
         if len(detail) > 2000:
             detail = detail[-2000:]
         raise ExportError(f"Pandoc 生成 Word 失败：{detail}")
@@ -451,12 +477,16 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "docx",
            header_footer: dict | None = None, solution_mode: str = "none",
            std_opts: dict | None = None, paper_tone: str = "white",
            wimath_logo: bool = False, bank_subject: str = "math",
-           cjk_font: str = "", latin_font: str = "") -> Path:
+           cjk_font: str = "", latin_font: str = "",
+           progress=None, cancel=None) -> Path:
     """生成可继续编辑的 DOCX，失败不暴露半成品。
 
     cjk_font / latin_font 仅为与 /export 路由统一传参而接收——字体选择只作用于
     PDF/TeX，Word 版式字体由参考模板 word-reference.docx 控制，此处忽略。
     （2026-10-04 前缺少这两个参数：/export 无条件传参 → TypeError → HTTP 500。）
+
+    progress / cancel: 与 ``exporter.export`` 同一套语义；终止时工作目录整体
+    删除（DOCX 没有可保留的半成品）。
     """
     if fmt != "docx":
         raise ExportError("Word 导出器只接受 docx 格式")
@@ -473,6 +503,14 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "docx",
 
     import word_ooxml  # SectionSpec 定义在本模块，延迟导入避免模块初始化环。
 
+    def emit(stage: str, detail: dict | None = None) -> None:
+        if progress is None:
+            return
+        try:
+            progress(stage, detail)
+        except Exception:   # 进度上报不能杀死导出
+            pass
+
     config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     work_dir = config.OUTPUT_DIR / f"word_{stamp}_{uuid.uuid4().hex}"
@@ -481,52 +519,67 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "docx",
     part_path = work_dir / f"word_{stamp}.docx.part"
     output_path = work_dir / f"word_{stamp}.docx"
 
-    with _EXPORT_SLOTS:
-        try:
-            staged, image_widths = stage_word_images(
-                questions, work_dir, f"word_{stamp}")
-            normalized = []
-            for question in staged:
-                copy = dict(question)
-                copy["body"] = normalize_word_markdown(copy.get("body", ""))
-                copy["solution"] = normalize_word_markdown(copy.get("solution", ""))
-                normalized.append(copy)
-            plan = build_word_plan(
-                normalized,
-                title=title,
-                mode=mode,
-                keypoints=normalize_word_markdown(keypoints),
-                fullpage_ids=fullpage_ids,
-                solution_mode=solution_mode,
-                std_opts=std_opts,
-                bank_subject=bank_subject,
-            )
-            plan = WordPlan(plan.markdown, plan.sections, image_widths)
-            markdown_path.write_text(plan.markdown, encoding="utf-8")
-            command = [
-                config.PANDOC,
-                str(markdown_path),
-                "--from", "markdown+fenced_divs+raw_attribute+pipe_tables+tex_math_dollars",
-                "--to", "docx",
-                "--reference-doc", str(reference),
-                "--resource-path", str(work_dir),
-                "-o", str(part_path),
-            ]
-            _run_pandoc(command, cwd=work_dir)
-            if not part_path.is_file():
-                raise ExportError("Pandoc 未生成 Word 文档")
-            word_ooxml.patch_docx(
-                part_path,
-                title=str(title or "试卷"),
-                sections=plan.sections,
-                header_footer=header_footer or {},
-            )
-            os.replace(part_path, output_path)
-            _cleanup_success_inputs(work_dir, output_path)
-            return output_path
-        except Exception:
+    # 与 PDF/讲义共用 exporter 的同一把编译槽：原先各持一把，两类导出并发时
+    # 总量翻倍（每份 DOCX 背后同样是一个 Pandoc 进程）。
+    while True:
+        if exporter._cancelled(cancel):
             shutil.rmtree(work_dir, ignore_errors=True)
-            raise
+            raise ExportCancelled("导出已终止")
+        if exporter._EXPORT_SLOTS.acquire(timeout=0.5):
+            break
+    try:
+        emit("staging")
+        staged, image_widths = stage_word_images(
+            questions, work_dir, f"word_{stamp}")
+        if exporter._cancelled(cancel):
+            raise ExportCancelled("导出已终止")
+        emit("rendering")
+        normalized = []
+        for question in staged:
+            copy = dict(question)
+            copy["body"] = normalize_word_markdown(copy.get("body", ""))
+            copy["solution"] = normalize_word_markdown(copy.get("solution", ""))
+            normalized.append(copy)
+        plan = build_word_plan(
+            normalized,
+            title=title,
+            mode=mode,
+            keypoints=normalize_word_markdown(keypoints),
+            fullpage_ids=fullpage_ids,
+            solution_mode=solution_mode,
+            std_opts=std_opts,
+            bank_subject=bank_subject,
+        )
+        plan = WordPlan(plan.markdown, plan.sections, image_widths)
+        markdown_path.write_text(plan.markdown, encoding="utf-8")
+        command = [
+            config.PANDOC,
+            str(markdown_path),
+            "--from", "markdown+fenced_divs+raw_attribute+pipe_tables+tex_math_dollars",
+            "--to", "docx",
+            "--reference-doc", str(reference),
+            "--resource-path", str(work_dir),
+            "-o", str(part_path),
+        ]
+        emit("compiling")
+        _run_pandoc(command, cwd=work_dir, cancel=cancel)
+        if not part_path.is_file():
+            raise ExportError("Pandoc 未生成 Word 文档")
+        emit("verifying")
+        word_ooxml.patch_docx(
+            part_path,
+            title=str(title or "试卷"),
+            sections=plan.sections,
+            header_footer=header_footer or {},
+        )
+        os.replace(part_path, output_path)
+        _cleanup_success_inputs(work_dir, output_path)
+        return output_path
+    except Exception:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+    finally:
+        exporter._EXPORT_SLOTS.release()
 
 
 def zipfile_is_docx(path: Path) -> bool:

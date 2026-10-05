@@ -22,6 +22,7 @@ from werkzeug.datastructures import FileStorage
 from PIL import Image
 
 import config
+import export_service
 import llm_client
 import tikz_render
 
@@ -2130,18 +2131,25 @@ class PageTests(unittest.TestCase):
             "img_align": "", "img_width": None, "img_split": None,
             "img_layouts": [], "sol_img_split": None, "sol_img_layouts": [],
         }
+        # 导出已改为后台任务：/export 只登记，用独立服务实例同步执行——
+        # 不落盘真实快照，也不让全局 worker 与断言抢同一条任务。
+        service = export_service.ExportService(persist=False, autostart=False)
+        self.addCleanup(service.shutdown)
         with (mock.patch.object(app_module, "_collect_questions",
                                 return_value=[question]),
+              mock.patch.object(app_module, "_export_service", service),
               mock.patch.object(app_module.service_ports, "export_document",
                                 return_value=produced) as export_mock):
             preview = app_module.app.test_client().post(
                 "/preview", data={"wimath_logo": "1"},
                 headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
             exported = app_module.app.test_client().post(
-                "/export", data={"wimath_logo": "1", "fmt": "pdf"},
+                "/export", data={"wimath_logo": "1", "fmt": "pdf",
+                                 "scope": "all"},
                 headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+            self.assertEqual(exported.status_code, 200)
+            service.run_task_sync(exported.get_json()["task_id"])
         self.assertEqual(preview.status_code, 200)
-        self.assertEqual(exported.status_code, 200)
         self.assertEqual(export_mock.call_count, 2)
         self.assertTrue(all(
             call.kwargs.get("wimath_logo") is True
@@ -2226,25 +2234,101 @@ class PageTests(unittest.TestCase):
             "img_width": None, "img_split": None, "img_layouts": [],
             "sol_img_split": None, "sol_img_layouts": [],
         }
+        service = export_service.ExportService(persist=False, autostart=False)
+        self.addCleanup(service.shutdown)
         with (mock.patch.object(app_module, "_collect_questions",
                                 return_value=[question]),
+              mock.patch.object(app_module, "_export_service", service),
               mock.patch.object(app_module.service_ports, "export_document",
                                 return_value=produced) as export_mock):
             response = app_module.app.test_client().post(
-                "/export", data={"fmt": "docx", "title": "月考"},
+                "/export", data={"fmt": "docx", "title": "月考",
+                                 "scope": "all"},
                 headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
-
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertEqual(payload["filename"], "月考.docx")
+            self.assertEqual(response.status_code, 200)
+            task_id = response.get_json()["task_id"]
+            service.run_task_sync(task_id)
+            # 下载地址由面板端点现拼（任务里只有取件号），顺带覆盖
+            # /export-tasks/status 的 artifact 组装。
+            status = app_module.app.test_client().get(
+                "/export-tasks/status").get_json()
+        rows = {row["id"]: row for row in status["tasks"]}
+        self.assertEqual(rows[task_id]["status"], "done")
+        self.assertEqual(rows[task_id]["artifact"]["name"], "月考.docx")
         self.assertEqual(export_mock.call_args.kwargs["fmt"], "docx")
-        download = app_module.app.test_client().get(payload["url"])
+        download = app_module.app.test_client().get(
+            rows[task_id]["artifact"]["url"])
         self.assertEqual(
             download.mimetype,
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         )
         self.assertIn(".docx", download.headers["Content-Disposition"])
         download.close()
+
+    def test_export_task_panel_endpoints_flow(self):
+        """面板端点闭环：登记 → config 回填 → 终止 → 删除；以及边界响应。"""
+        service = export_service.ExportService(persist=False, autostart=False)
+        self.addCleanup(service.shutdown)
+        client = app_module.app.test_client()
+        token_header = {"X-CSRF-Token": app_module._WRITE_TOKEN}
+        with mock.patch.object(app_module, "_export_service", service):
+            page = client.get("/export-tasks")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn(b"export-list-active", page.data)
+
+            posted = client.post(
+                "/export", data={"scope": "all", "fmt": "pdf",
+                                 "title": "面板测试"},
+                headers=token_header)
+            self.assertEqual(posted.status_code, 200)
+            task_id = posted.get_json()["task_id"]
+
+            conf = client.get(f"/export-tasks/{task_id}/config").get_json()
+            self.assertTrue(conf["ok"])
+            self.assertEqual(conf["payload"]["scope"], "all")
+            self.assertEqual(conf["title"], "面板测试")
+            self.assertEqual(conf["fmt"], "pdf")
+
+            status = client.get("/export-tasks/status").get_json()
+            row = {r["id"]: r for r in status["tasks"]}[task_id]
+            self.assertEqual(row["status"], "queued")
+            self.assertEqual(row["bank_path"], str(config.BANK_DIR))
+
+            # 排队中的任务只能先终止、不能直接删历史
+            self.assertEqual(client.post(
+                f"/export-tasks/{task_id}/delete",
+                headers=token_header).status_code, 400)
+            self.assertEqual(client.post(
+                f"/export-tasks/{task_id}/cancel",
+                headers=token_header).status_code, 200)
+            self.assertEqual(client.post(
+                f"/export-tasks/{task_id}/cancel",
+                headers=token_header).status_code, 404)
+
+            status = client.get("/export-tasks/status").get_json()
+            row = {r["id"]: r for r in status["tasks"]}[task_id]
+            self.assertEqual(row["status"], "cancelled")
+            # 没有产物时「打开文件夹」明确报错，而不是打开一个瞎猜的位置
+            self.assertEqual(client.post(
+                f"/export-tasks/{task_id}/reveal",
+                headers=token_header).status_code, 400)
+
+            self.assertEqual(client.post(
+                f"/export-tasks/{task_id}/delete",
+                headers=token_header).status_code, 200)
+            self.assertEqual(
+                client.get("/export-tasks/status").get_json()["tasks"], [])
+
+            # 不存在的任务：config/retry 404，delete 400（不区分"没找到"与
+            # "还在运行"是对内部调用方的语义，面板上都会显示错误提示）
+            self.assertEqual(
+                client.get("/export-tasks/nope/config").status_code, 404)
+            self.assertEqual(client.post(
+                "/export-tasks/nope/retry",
+                headers=token_header).status_code, 404)
+            self.assertEqual(client.post(
+                "/export-tasks/nope/delete",
+                headers=token_header).status_code, 400)
 
     def test_export_rejects_unknown_format_before_service_call(self):
         with (mock.patch.object(app_module, "_collect_questions",

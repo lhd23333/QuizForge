@@ -1982,19 +1982,16 @@ if (modeSel) modeSel.addEventListener('change', syncExportTemplateOptions);
 syncExportTemplateOptions();
 
 // —— 真实 PDF 预览 / 导出 ——
-// 两者都是「POST 拿一个取件地址，再由地址去取文件」，不再直接收文件流。原因是本页
-// 会被 Obsidian 插件嵌在 iframe 里（Electron 渲染进程），那里有两件事不成立：
-//   ① blob: URL 赋给 iframe 的 src —— 预览层永远空白；
-//   ② 表单提交触发的附件下载 —— 点「导出」毫无反应。
-// 换成普通的 http 地址后，预览就是同源 iframe 的一次正常加载；导出则在独立浏览器
-// 里点一个 <a download>，在 Obsidian 里交给插件抓下来写进 vault（见 base.html 的桥）。
+// 预览是「POST 拿一个取件地址，再由地址去取文件」，不再直接收文件流。原因是本页
+// 会被 Obsidian 插件嵌在 iframe 里（Electron 渲染进程），那里 blob: URL 赋给
+// iframe 的 src 永远显示空白；换成普通 http 地址后预览就是同源 iframe 的一次
+// 正常加载。导出则不再当场取件——提交登记为后台任务（见下方提交处理器）。
 const previewBtn = document.getElementById('preview-btn');
 const overlay = document.getElementById('preview-overlay');
 const frame = document.getElementById('preview-frame');
 const previewTitle = document.getElementById('preview-title');
 const previewInfo = document.getElementById('preview-info');
 const previewOpen = document.getElementById('preview-open');
-const embedded = window.parent !== window;   // 被 Obsidian 插件嵌着
 
 function closePreview() {
   overlay.classList.add('hidden');
@@ -2046,33 +2043,20 @@ if (previewBtn) {
   overlay.addEventListener('click', e => { if (e.target === overlay) closePreview(); });
 }
 
-// 导出：接管表单提交（原先是普通 submit + as_attachment 附件响应）
+// 导出：接管表单提交 —— 提交只登记后台任务（编译交给「导出任务」面板），
+// 立即把焦点还给题库。原先这里是同步等待整卷编译（十几分钟），页面全程卡着；
+// 现在连点几次导出会按导出并发槽排队，用户还能继续选题、整理别的卷子。
+// 产出后从左侧「导出任务」面板打开 PDF / 打开文件夹 / 下载。
 const exportForm = document.getElementById('export-form');
-function deliverExport(data) {
-  if (embedded) {
-    window.parent.postMessage({source: 'quizforge', type: 'download',
-                               url: new URL(data.url, location.href).href,
-                               filename: data.filename}, '*');
-    return;
-  }
-  const a = document.createElement('a');
-  a.href = data.url;
-  a.download = data.filename || '';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
 if (exportForm) {
   exportForm.addEventListener('submit', async e => {
     e.preventDefault();
     const btn = exportForm.querySelector('button[type="submit"]');
     const label = btn ? btn.textContent : '';
-    if (btn) { btn.disabled = true; btn.textContent = '正在生成…'; }
+    if (btn) { btn.disabled = true; btn.textContent = '正在创建任务…'; }
     try {
-      const data = await postForExport('/export', new FormData(exportForm));
-      // Obsidian/桌面壳由父页面落盘；普通浏览器使用原生下载。
-      deliverExport(data);
+      await postForExport('/export', new FormData(exportForm));
+      flashToast('已创建导出任务，进度见左侧「导出任务」面板');
     } catch (err) {
       alert('导出失败：' + err.message);
     } finally {
@@ -2080,6 +2064,77 @@ if (exportForm) {
     }
   });
 }
+
+// 「修改配置重新导出」：导出任务面板跳转时携带 ?export_task=<id>，这里把原
+// 任务的完整配置回填到表单。pinned_ids 用隐藏域固定当初那批题目——回填时
+// 用户的选题篮可能已经完全变了，重导出必须还是原来那批题。
+async function prefillExportFromTask() {
+  const taskId = new URL(window.location.href).searchParams.get('export_task');
+  if (!taskId || !exportForm) return;
+  let payload;
+  try {
+    const res = await fetch('/export-tasks/' + encodeURIComponent(taskId) + '/config');
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || '读取配置失败');
+    payload = data.payload || {};
+  } catch (err) {
+    flashToast('读取导出配置失败：' + err.message, 'err');
+    return;
+  }
+  const setValue = (name, value) => {
+    if (value === undefined || value === null) return;
+    const el = exportForm.elements[name];
+    if (el && typeof el.value !== 'undefined') el.value = String(value);
+  };
+  // 先设模式再设模板：模板下拉按模式过滤选项，顺序反了 compatible 模板会被清掉。
+  setValue('mode', payload.mode);
+  setValue('tags', (payload.tags || []).join(','));
+  setValue('match', payload.match);
+  setValue('type', payload.type);
+  ['fmt', 'title', 'scope', 'solution_mode', 'keypoints', 'paper_tone',
+   'cjk_font', 'latin_font', 'tex_backend'
+  ].forEach(name => setValue(name, payload[name]));
+  const check = (name, value) => {
+    const el = exportForm.elements[name];
+    if (el && typeof el.checked !== 'undefined') el.checked = !!value;
+  };
+  check('wimath_logo', payload.wimath_logo);
+  check('show_source', payload.show_source);
+  const hf = payload.header_footer || {};
+  Object.keys(hf).forEach(name => setValue(name, hf[name]));
+  const so = payload.std_opts || {};
+  setValue('subject', so.subject);
+  check('info_bar', so.info_bar);
+  setValue('secret_notice', so.secret_notice);
+  setValue('exam_notes', so.exam_notes);
+  const points = so.section_points || {};
+  setValue('points_single', points.single);
+  setValue('points_multi', points.multi);
+  setValue('points_blank', points.blank);
+  setValue('points_solve', points.solve);
+  // 固定当初那批题目（仅 scope=selected 使用；后端优先于实时选题篮）。
+  exportForm.querySelectorAll('input[name="pinned_ids"]').forEach(el => el.remove());
+  (payload.pinned_ids || []).forEach(id => {
+    const hidden = document.createElement('input');
+    hidden.type = 'hidden';
+    hidden.name = 'pinned_ids';
+    hidden.value = id;
+    exportForm.appendChild(hidden);
+  });
+  setValue('template_id', payload.template_id);
+  // 手动过一遍各联动：模板兼容过滤、Word 禁用项、讲义/标准试卷专属面板。
+  syncModeUI();
+  syncExportTemplateOptions();
+  syncExportFormatUI();
+  syncExportFontPreviews();
+  setExportPanelOpen(true);
+  flashToast('已载入任务配置，确认后点「导出」重新生成');
+  // 参数只用于一次性回填；留在地址栏会让之后每次刷新都跳回同一个旧任务。
+  const url = new URL(window.location.href);
+  url.searchParams.delete('export_task');
+  history.replaceState(null, '', url.toString());
+}
+void prefillExportFromTask();
 
 // —— 文件夹树：展开/折叠、新建（顶级/子）、改名、移动、删除 ——
 const folderTree = document.getElementById('folder-tree');
