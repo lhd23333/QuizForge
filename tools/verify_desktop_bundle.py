@@ -31,11 +31,9 @@ PRIVATE_MARKERS = (
     b"-----BEGIN PRIVATE KEY-----",
     b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
 )
-REQUIRED_HANDOUT_RESOURCES = (
+REQUIRED_EXPORT_RESOURCES = (
     "assets/wimath-logo-latex-black.pdf",
     "assets/word-reference.docx",
-    "templates/handouts.html",
-    "static/js/handout-editor.bundle.js",
     "static/js/katex/katex.min.css",
 )
 REQUIRED_BRAND_RESOURCES = (
@@ -83,9 +81,9 @@ def scan(dist: Path, project_root: Path) -> list[str]:
     for relative in OBSOLETE_RELEASE_PATHS:
         if dist.joinpath(*relative.split("/")).exists():
             problems.append(f"包含废弃程序文件：{relative}")
-    for relative in REQUIRED_HANDOUT_RESOURCES:
+    for relative in REQUIRED_EXPORT_RESOURCES:
         if not (resource_root / relative).is_file():
-            problems.append(f"缺少讲义工作台资源：{relative}")
+            problems.append(f"缺少导出与预览资源：{relative}")
     for relative in REQUIRED_BRAND_RESOURCES:
         if not (resource_root / relative).is_file():
             problems.append(f"缺少品牌资源：{relative}")

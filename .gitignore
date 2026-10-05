@@ -60,3 +60,6 @@ runtime/tex/
 
 # 线上联考导入的运行工作文件（进度 JSON / 日志 / 临时脚本），只在本机存活
 /_online_import*
+
+# 本地 agent 工作产物（sdd 计划与任务报告），不进公开仓库
+/.superpowers/

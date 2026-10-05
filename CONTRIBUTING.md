@@ -11,7 +11,7 @@ python -m venv .venv
 .venv\Scripts\pip.exe install -r requirements.txt
 .venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 npm.cmd install
-npm.cmd run test:handouts
+npm.cmd run test:frontend
 ```
 
 运行 `python app.py` 后访问 `http://127.0.0.1:5000`。该本地服务没有用户鉴权，不得暴露到公网或局域网。

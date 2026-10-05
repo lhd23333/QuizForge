@@ -263,7 +263,7 @@ data/
 ### 桌面缩放与题库内新增
 
 - 独立桌面窗口固定打开 `/workspace`，由 `workspace.html` 同时保留普通业务 iframe 和资料库 iframe。顶部导航只隐藏／显示，不得销毁资料库；子页面用 `_embedded=1` 隐藏重复外壳，并通过现有 location 消息同步路径。浏览器与 Obsidian 仍直接打开业务路由。
-- `library-tabs.js` 的标签必须对应持续存在的 document panel，PDF iframe 只创建一次；切换标签只能设 `hidden`。双分栏最多两栏，布局、比例、各栏标签及活动项保存在 `sessionStorage`，正文仍从磁盘读取。
+- 题库页文件工作区（`question-files.js`）的标签必须对应持续存在的 document panel，PDF iframe 只创建一次；切换标签只能设 `hidden`。双分栏最多两栏，布局、比例、各栏标签及活动项保存在 `sessionStorage`，正文仍从磁盘读取。
 - 资料库 Markdown 保存走独立的 `/api/library/write`，请求必须带 `/api/library/read` 以十进制字符串返回的 `st_mtime_ns`。路由先过题库根路径与扩展白名单，`filestore.write_markdown_text()` 再与题卡写入共享锁、核对版本并原子替换；前端禁止把它转为会丢精度的 JavaScript `Number`；冲突返回 409 且客户端保留草稿，不能静默覆盖 Obsidian 的外部修改。
 - `/import` 首屏不得调用完整目录树。目标父文件夹选择器在打开后复用 `/collections/children` 按层加载，最终仍提交 `target_parent`。
 - Windows 无边框窗口的缩放由 `base.html` 八个 `.desktop-resize-*` 命中区和 `DesktopApi.window_resize()` 共同实现；页面传目标尺寸与固定对侧角，Python 用 `FixPoint` 调原生 `Window.resize()`。最小宽高必须与 `create_window(min_size=(1024, 680))` 保持一致，最大化时禁止缩放。

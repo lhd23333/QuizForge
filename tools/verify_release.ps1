@@ -97,7 +97,7 @@ try {
         & $npm.Source run build
     }
     Invoke-Checked "Frontend tests" {
-        & $npm.Source run test:handouts
+        & $npm.Source run test:frontend
     }
 
     if (-not $SkipBundleScan) {

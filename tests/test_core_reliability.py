@@ -2857,14 +2857,19 @@ class InlineEditorAndLibraryTests(unittest.TestCase):
         self.assertEqual(question_page.status_code, 200)
         self.assertIn('name="show_pdf"', question_page.get_data(as_text=True))
         self.assertIn('name="show_general_md"', question_page.get_data(as_text=True))
-        library_script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
-            encoding="utf-8")
-        self.assertIn("quizforge:library-workspace:v3", library_script)
-        self.assertIn("function addBlankDocumentTab(", library_script)
-        self.assertIn("let tab = tabs.get(pane.active)", library_script)
-        self.assertIn("replaceTabDocument(tab,", library_script)
-        self.assertIn("add.dataset.libraryTabAdd = pane.id", library_script)
-        self.assertNotIn("if (tabs.has(path))", library_script)
+        # 文件工作区（question-files.js）替代了旧 library-tabs.js；钉住分栏比例
+        # 持久化与标签迁移/移除语义，防止工作区能力回退。
+        workspace_script = (
+            config.BASE_DIR / "static" / "js" / "question-files.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("quizforge:question-file-split:v1", workspace_script)
+        self.assertIn("sessionStorage.setItem(SPLIT_STORE", workspace_script)
+        self.assertIn("function tabForPath(path)", workspace_script)
+        self.assertIn(
+            "function migrateTab(tab, source, destination, activate = false)",
+            workspace_script,
+        )
+        self.assertIn("function removeTab(tabOrKey, options = {})", workspace_script)
         listing = self.client.get(
             "/api/library/children", query_string={"path": "资料阅读测试"})
         self.assertEqual(listing.status_code, 200)

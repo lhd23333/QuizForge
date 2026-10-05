@@ -174,36 +174,31 @@ class LibraryRouteTests(unittest.TestCase):
         self.assertTrue(legacy_page.headers["Location"].endswith("/"))
         page = self.client.get(
             "/", query_string={"show_general_md": "1"}).get_data(as_text=True)
-        script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
-            encoding="utf-8")
 
+        # 资料库并入题库后，题库首页只保留普通 Markdown 的显示开关与文件夹菜单；
+        # 「新建 Markdown」的页面入口随旧 library-tabs.js 一并移除（创建接口本身
+        # 由上面两个用例继续覆盖），这里不再钉前端指纹。
         self.assertIn('name="show_general_md"', page)
         self.assertIn('data-act="new-folder"', page)
-        self.assertIn("function createLibraryMarkdown(parent = '')", script)
-        self.assertIn("fetchJson('/api/library/markdown'", script)
-        self.assertIn("['new-markdown', '新建 Markdown']", script)
-        self.assertIn("if (host) await loadChildren(host, parent, 0)", script)
-        self.assertIn("openDocument({...data.entry", script)
-        self.assertIn(
-            "newMarkdownButton?.addEventListener('click', () => createLibraryMarkdown(''))",
-            script,
-        )
 
     def test_library_drag_and_card_ui_contract(self):
-        script = (config.BASE_DIR / "static" / "js" / "library-tabs.js").read_text(
+        # 资料库并入题库后：文件树拖拽在题库首页内联脚本中实现，文件打开与
+        # 制卡在 question-files.js 中实现。指纹迁移到这两个活载体，防功能回退。
+        page = (config.BASE_DIR / "templates" / "index.html").read_text(
             encoding="utf-8")
-        self.assertIn('button.draggable = true', script)
-        self.assertIn("/api/library/transfer", script)
-        self.assertIn("event.shiftKey", script)
+        script = (config.BASE_DIR / "static" / "js" / "question-files.js").read_text(
+            encoding="utf-8")
+        self.assertIn("draggable = true", page)
+        self.assertIn("/api/library/transfer", page)
+        self.assertIn("event.shiftKey", page)
         self.assertIn("/api/library/card-task", script)
-        self.assertIn("split_mode: mode.value", script)
-        self.assertIn("loadLibraryCardCollections(target, status)", script)
-        self.assertIn("const target = document.createElement('select')", script)
-        self.assertIn("useLlm.checked = false", script)
-        self.assertIn("use_llm: Boolean(useLlm?.checked)", script)
+        self.assertIn("split_mode: modeField.input.value", script)
+        self.assertIn("loadCollections(targetField.input, ui.status)", script)
+        self.assertIn("temporary.textContent = '临时卡片（默认）'", script)
+        self.assertIn("llm.checked = false", script)
+        self.assertIn("use_llm: llm.checked", script)
         self.assertIn("card_name: nameField.input.value.trim()", script)
-        self.assertIn("event.ctrlKey || event.metaKey", script)
-        self.assertIn("openLibraryCardDialog(tab)", script)
+        self.assertIn("openCardDialog(tab)", script)
 
     def test_transfer_moves_and_copies_entries(self):
         source = config.BANK_DIR / "转移来源"

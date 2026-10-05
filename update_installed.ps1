@@ -411,12 +411,12 @@ try {
 
     $npm = Get-Command "npm.cmd" -ErrorAction SilentlyContinue
     if ($null -eq $npm) {
-        throw "npm.cmd was not found; handout frontend tests cannot run"
+        throw "npm.cmd was not found; frontend tests cannot run"
     }
     & $npm.Source run build
     Assert-LastExitCode "Frontend build"
-    & $npm.Source run test:handouts
-    Assert-LastExitCode "Handout frontend tests"
+    & $npm.Source run test:frontend
+    Assert-LastExitCode "Frontend tests"
     Write-Output "[5/9] Frontend build and tests passed"
 
     if ($DirectBundle) {

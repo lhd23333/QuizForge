@@ -150,7 +150,7 @@ SignPath Foundation 审核尚未完成。当前 GitHub Actions 只构建短期�
 ```powershell
 .venv\Scripts\pip.exe install -r requirements-desktop.txt
 npm.cmd install
-npm.cmd run build:handouts
+npm.cmd run build
 .\build_desktop.ps1
 .\build_installer.ps1
 ```
@@ -314,7 +314,7 @@ MinerU Token 与 LLM 配置都可在设置页维护；LLM 配置支持新增、�
     js/inline-editor.js      题卡源码/实时编译/阅读三模式
     js/image-layout.js       题卡图片位置、方向、缩放与拖动换序
     js/import-preview-images.js 导入题卡图片添加、预览与排序
-    js/library-tabs.js       Markdown/PDF/图片多标签阅读器
+    js/question-files.js     题库页内文件工作区（PDF/Markdown 标签与制卡）
     js/export-drawer.js      题库页右缘导出抽屉（预设↔四维联动、纸色与回填）
   vendor/project_alpha/       MinerU OCR 与整篇 LLM 规范化的内置实现
   data/                       本机私有配置与状态（.gitignore 排除）
