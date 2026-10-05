@@ -280,5 +280,5 @@ data/
 ## 相关文档
 
 - `README.md` / `README.en.md`：功能说明与快速开始
-- `迁移说明.md`：从服务器版移植模块的完整变更记录（2026-08-07 ~ 2026-08-08，七轮）
+- `docs/迁移说明.md`：从服务器版移植模块的完整变更记录（2026-08-07 ~ 2026-08-08，七轮）
 - `vendor/project_alpha/VENDORED_FROM.md`：project-alpha 的上游 commit 记录

@@ -125,7 +125,7 @@ SignPath Foundation 审核尚未完成。当前 GitHub Actions 只构建短期�
 - [当前状态](docs/STATUS.md)：本轮仍有效的实现、验证和待执行交付步骤。
 - [CSS 技术约定](docs/CSS_STYLE_GUIDE.md)：令牌、布局、控件、图标、响应式和无障碍的统一实现规则。
 - [品牌资产登记](docs/BRAND_ASSETS.md)：QuizForge 产品图标、WIMath 署名图形的用途、哈希、构建和许可边界。
-- [迁移说明](迁移说明.md)：服务器版向软件版迁移及早期演进的技术历史档案，不再承担后续主更新日志。
+- [迁移说明](docs/迁移说明.md)：服务器版向软件版迁移及早期演进的技术历史档案，不再承担后续主更新日志。
 
 日常业务修改在源码验证通过后，使用 `update_installed.ps1 -DirectBundle` 原位覆盖本机日常安装版并启动验收，默认不生成 Setup。只有明确要求构建安装包或正式发布时，才运行 Inno Setup 和覆盖升级验证。
 

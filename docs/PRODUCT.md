@@ -1,6 +1,6 @@
 # QuizForge 软件版产品全景
 
-本文描述 QuizForge 软件版长期稳定的产品结构、各板块核心原则和开源演进边界。具体版本变化见 [`../CHANGELOG.md`](../CHANGELOG.md)，使用与安装入口见 [`../README.md`](../README.md)，早期迁移技术记录见 [`../迁移说明.md`](../迁移说明.md)。
+本文描述 QuizForge 软件版长期稳定的产品结构、各板块核心原则和开源演进边界。具体版本变化见 [`../CHANGELOG.md`](../CHANGELOG.md)，使用与安装入口见 [`../README.md`](../README.md)，早期迁移技术记录见 [`迁移说明.md`](迁移说明.md)。
 
 ## 产品定位与总原则
 
