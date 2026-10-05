@@ -23,6 +23,31 @@ test('设置页只保留开源下载与更新入口', () => {
 });
 
 
+test('可拖拽收起的侧栏类名与折叠按钮一一对应', () => {
+  // split-panes.js 靠 data-split-collapse 找按钮、切折叠类，CSS 又按类名出样式：
+  // 任何一处改名都会静默失配（按钮不再跟着收起/展开）。这里钉住三者的字符串耦合。
+  const source = fs.readFileSync(
+    new URL('../../static/js/split-panes.js', import.meta.url), 'utf8');
+  const css = fs.readFileSync(
+    new URL('../../static/style.css', import.meta.url), 'utf8');
+  assert.match(source, /dataset\.splitCollapse/);
+  assert.match(css, /\.sidebar-collapse-dragging/);
+
+  for (const file of ['../../templates/base.html', '../../templates/index.html']) {
+    const template = fs.readFileSync(new URL(file, import.meta.url), 'utf8');
+    const buttons = new Set(
+      [...template.matchAll(/data-sidebar-collapse="([^"]+)"/g)].map(match => match[1]));
+    const resizers = [...template.matchAll(/data-split-collapse="([^"]+)"/g)]
+      .map(match => match[1]);
+    assert.ok(resizers.length > 0, `${file} 应有一个可拖拽收起的 resizer`);
+    for (const className of resizers) {
+      assert.ok(buttons.has(className), `${file} 的 ${className} 没有对应的折叠按钮`);
+      assert.match(css, new RegExp(`\\.${className}`), `style.css 缺少 ${className} 的折叠样式`);
+    }
+  }
+});
+
+
 test('隐藏分栏未被拖动时保留响应式 CSS 默认宽度', async () => {
   const dom = new JSDOM(`<!doctype html><html><head><style>
     #owner { --panel-width: 330px; display: grid; }

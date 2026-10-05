@@ -1934,7 +1934,7 @@ def main() -> int:
 
     import webview
     from werkzeug.serving import make_server
-    from app import app as flask_app
+    from app import app as flask_app, resume_enabled_source_monitors
     import desktop_product
 
     demo_created = False
@@ -1957,6 +1957,9 @@ def main() -> int:
         target=server.serve_forever, name="quizforge-local-http", daemon=True
     )
     server_thread.start()
+    # 桌面外壳不走 app.py 的 __main__ 分支，来源监听的启动时恢复要在这里
+    # 显式触发；见 app.resume_enabled_source_monitors 的注释。
+    resume_enabled_source_monitors()
     logging.getLogger(__name__).info(
         "桌面本地服务已启动：127.0.0.1:%s，题库=%s", server.server_port, bank_dir
     )

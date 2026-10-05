@@ -52,6 +52,24 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertEqual(loaded["good_paper"]["input_dir"], str(self.root / "papers"))
         self.assertTrue(loaded["good_question"]["enabled"])
 
+    def test_normalize_flag_defaults_off_and_round_trips(self):
+        profiles = source_settings.load_profiles()
+        for row in profiles.values():
+            self.assertFalse(row["normalize_with_llm"])  # 默认机械拆题
+        rows = source_settings.load_profiles()
+        rows["good_question"]["normalize_with_llm"] = True
+        saved = source_settings.save_profiles(rows)
+        self.assertTrue(saved["good_question"]["normalize_with_llm"])
+        self.assertFalse(saved["good_paper"]["normalize_with_llm"])
+        self.assertTrue(source_settings.load_profiles()[
+            "good_question"]["normalize_with_llm"])
+        # save_profile 不带该字段时沿用现值，不能被顺手重置。
+        kept = source_settings.save_profile(
+            "good_question",
+            input_dir=saved["good_question"]["input_dir"],
+            output_dir=saved["good_question"]["output_dir"], enabled=True)
+        self.assertTrue(kept["normalize_with_llm"])
+
     def test_custom_local_paths_are_created_and_persisted(self):
         input_dir = self.root / "外接盘" / "输入"
         output_dir = self.root / "外接盘" / "输出"

@@ -58,11 +58,48 @@
     return tableHtml(rows);
   }
 
+  // 与 export_tables.split_pipe_row 同一规则：只有未被转义、且不在 $...$ 里的
+  // 竖线才是单元格边界。题库数据常写 $\displaystyle |a|=3$，无条件切会把数学式
+  // 劈成多格、预览与 PDF 导出两边同时错位。
+  function splitPipeRow(text) {
+    const cells = [];
+    let buf = '';
+    let inMath = false;
+    for (let i = 0; i < text.length; i += 1) {
+      const ch = text[i];
+      if (ch === '\\' && i + 1 < text.length) {
+        const next = text[i + 1];
+        buf += next === '|' ? '|' : ch + next;
+        i += 1;
+        continue;
+      }
+      if (ch === '$') {
+        if (text.startsWith('$$', i)) {
+          inMath = !inMath;
+          buf += '$$';
+          i += 1;
+          continue;
+        }
+        inMath = !inMath;
+        buf += ch;
+        continue;
+      }
+      if (ch === '|' && !inMath) {
+        cells.push(buf);
+        buf = '';
+        continue;
+      }
+      buf += ch;
+    }
+    cells.push(buf);
+    return cells;
+  }
+
   function pipeCells(line) {
     let text = line.trim();
     if (text.startsWith('|')) text = text.slice(1);
     if (text.endsWith('|')) text = text.slice(0, -1);
-    return text.split('|').map(cell => ({
+    return splitPipeRow(text).map(cell => ({
       text: decodeEntities(cell).replace(/\s+/g, ' ').trim(), span: 1,
     }));
   }

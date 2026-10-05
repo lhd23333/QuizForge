@@ -653,11 +653,22 @@ ENGINE_BLOCK = "block"
 # 从哪里来，whole/block 决定拿到原文后怎么切题和规范化。
 OCR_MINERU = "mineru"
 OCR_DOC2X = "doc2x"
-OCR_BACKENDS = (OCR_MINERU, OCR_DOC2X)
+# 本地 MinerU（doclib 常驻服务，127.0.0.1:15980）：协议与 mineru.net 的异步
+# batch 完全不同，由 mineru_local.py 包装成与 MineruClient.parse_pdf 同形状的
+# 客户端；不需要任何凭证，重试与串行语义见该模块文档。
+OCR_MINERU_LOCAL = "mineru_local"
+OCR_BACKENDS = (OCR_MINERU, OCR_DOC2X, OCR_MINERU_LOCAL)
 
 
 def normalize_ocr_backend(raw: str) -> str:
-    return OCR_DOC2X if (raw or "").strip().lower() == OCR_DOC2X else OCR_MINERU
+    value = (raw or "").strip().lower()
+    if value == OCR_DOC2X:
+        return OCR_DOC2X
+    if value in (OCR_MINERU_LOCAL, "local"):
+        # "local" 是设置页/旧客户端对本地 MinerU 的别名写法（偏好层历史用名），
+        # 与 "mineru_local" 指同一后端；不归一会在 normalize 里被静默回落成云端。
+        return OCR_MINERU_LOCAL
+    return OCR_MINERU
 
 
 def _normalize_image_page_count(raw) -> int:
@@ -836,12 +847,13 @@ def _apply_image_page_boundaries(raw_md: str, extract_dir: Path, *,
     prefix = f"（{label}）" if label else ""
     meta = {"image_page_count": count}
     backend = normalize_ocr_backend(ocr_backend)
-    if backend != OCR_MINERU:
-        error = "Doc2X 当前不提供可与 Markdown 可靠对应的页界坐标"
-        separated, inserted = raw_md, 0
-    else:
+    if backend == OCR_MINERU:
         separated, inserted, error = _inject_source_page_breaks(
             raw_md, extract_dir, count)
+    else:
+        service = "Doc2X" if backend == OCR_DOC2X else "本地 MinerU"
+        error = f"{service} 当前不提供可与 Markdown 可靠对应的页界坐标"
+        separated, inserted = raw_md, 0
     if error:
         meta.update(source_page_boundary_status="unavailable",
                     source_page_break_count=0)
@@ -1895,7 +1907,9 @@ def _parse_with_ocr_backend(path: Path, extract_dir: Path, cfg, *,
 
     MinerU 的强制 OCR 重试与坐标图片修复只属于 MinerU；Doc2X 自己已经给出排版
     后的 Markdown，不能再套 MinerU 的 content_list 修复，否则会拿不存在的坐标账
-    误改图片。两条链路在这里汇合后，共用判空、选项检查与下游拆题。
+    误改图片。本地 MinerU（mineru_local）复用 MinerU 的重试包装，只是把底层换
+    成 doclib HTTP；它不产出 content_list 坐标，依赖坐标的增强修复自动降级。
+    三条链路在这里汇合后，共用判空、选项检查与下游拆题。
     """
     backend = normalize_ocr_backend(ocr_backend)
     if backend == OCR_DOC2X:
@@ -1954,6 +1968,22 @@ def _parse_with_ocr_backend(path: Path, extract_dir: Path, cfg, *,
             # 一次完整结果，不会暴露半轮产物。
             shutil.rmtree(staging, ignore_errors=True)
 
+    if backend == OCR_MINERU_LOCAL:
+        # 本地 MinerU：doclib 常驻服务，无凭证、无云端排队。串行与重试语义
+        # 见 mineru_local.py；清洗/切题/导入链路与 mineru.net 完全共用。
+        import mineru_local
+        raw_md, name = _parse_mineru_with_ocr_retry(
+            mineru_local.MineruLocalClient(), path, extract_dir,
+            note_sink=note_sink, label=label, collection=collection,
+            boundary_mode=boundary_mode, num_template=num_template)
+        raw_md, page_meta = _apply_image_page_boundaries(
+            raw_md, extract_dir, boundary_mode=boundary_mode,
+            image_page_count=image_page_count, ocr_backend=backend,
+            note_sink=note_sink, label=label)
+        raw_md = _repair_choice_images(
+            raw_md, extract_dir, note_sink, label=label)
+        return raw_md, name, page_meta
+
     from src.mineru_client import MineruClient
     raw_md, name = ocr_pool.run(
         OCR_MINERU,
@@ -1981,6 +2011,11 @@ def _ensure_raw_text(raw_md: str, path: Path, label: str = "", *,
     内容」的组——看板显示已就绪、点进去却说没转完（那正是这个检查要根除的症状）。
     在这里就断掉，用户看到的是原因而不是矛盾的状态。
     """
+    if "<!-- qf:no-questions -->" in raw_md:
+        prefix = f"（{label}）" if label else ""
+        raise ConvertError(
+            f"{prefix}{path.name} 未识别出任何题目（内容以表格/图表为主，"
+            "疑似成绩单或结果类文档），已跳过导入")
     if _has_text_beyond_images(raw_md):
         return
     prefix = f"（{label}）" if label else ""
@@ -3713,7 +3748,7 @@ def recognize_collection_units(exam_path, solution_path=None,
                             cached):
             if cached is not None:
                 raw, meta = cached
-                if backend == OCR_MINERU:
+                if backend in (OCR_MINERU, OCR_MINERU_LOCAL):
                     side = "exam" if label == "题干合集" else "solution"
                     restored = _restore_collection_image_namespace(
                         raw, extract_dir, side)
@@ -4296,7 +4331,8 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
                            image_page_count: int = 0,
                            only_numbers=None, note_sink=None,
                            ocr_backend: str = OCR_MINERU,
-                           doc2x_api_key: str = "") -> dict:
+                           doc2x_api_key: str = "",
+                           single_block: bool = False) -> dict:
     """逐块路径「先切块、暂停等人工审核」的单文件入口。
 
     行为对齐 convert_file(engine=ENGINE_BLOCK) 直到切块+机械排版那一步，但
@@ -4311,8 +4347,13 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
         source_name   失败提示里要报的文件名
     """
     import blockpipe
+    import blocksplit
 
     mode = normalize_boundary_mode(boundary_mode)
+    if single_block and only_numbers:
+        # 在触碰 OCR 之前就拒绝：单题模式没有"只取题号"的语义，错误要早、
+        # 要便宜（测试也不必为了这条断言去 mock 网络层）。
+        raise ConvertError("单题模式不支持「只取题号」")
     source_path = Path(file_path).resolve()
     if not source_path.is_file():
         raise ConvertError(f"文件不存在: {source_path}")
@@ -4347,17 +4388,37 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
         _ensure_raw_text(raw_md, file_path, ocr_backend=backend)
         _check_options(raw_md, note_sink)
 
-        blocks = blockpipe.split_and_prep(
-            raw_md, keep_images=keep_images, num_template=num_template,
-            only_numbers=only_numbers, note_sink=note_sink,
-            boundary_mode=mode)
-        if not blocks:
-            reason = ("指定的「只取题号」没有匹配到任何题" if only_numbers else
-                      "可能是题号写法没被认出（可在「重新转换」里指定题号模板），"
-                      "或这份文件其实不含题目")
-            raise ConvertError(
-                f"已识别出 {source_path.name} 的原文，但没能从中切出任何题目。{reason}")
-        return {
+        if single_block:
+            # 单题专线（好题截图）：整段文本按一道题处理，**不切块**。单张题目
+            # 截图没有可切的顶层题号，硬走切块只会得到"没能从中切出任何题目"。
+            import importer
+            import mechfix
+
+            text = mechfix.normalize_block(
+                raw_md.replace(blocksplit.SOURCE_PAGE_BREAK, ""),
+                keep_images=keep_images)
+            # 题号必须在构造块前解析出来：渲染时 mechfix.strip_lead_number(text,
+            # None) 会把开头题号剥掉且不再补回，只有 Block.number 带值才会被
+            # _with_number 归一化补回 `3. ` 前缀，供下游按题号命名题卡。
+            blocks = [blocksplit.Block(
+                index=0, number=importer.block_number(text), text=text,
+                section=None, group=None,
+                # zone 必须是 "stem" 这条是硬不变量：group_blocks 只从 stem
+                # 起配题，判成 solution 会让渲染输出为空、收尾处复读
+                # "没能从中切出任何题目"的事故文案。
+                zone="stem", line_no=1, kind="unknown")]
+        else:
+            blocks = blockpipe.split_and_prep(
+                raw_md, keep_images=keep_images, num_template=num_template,
+                only_numbers=only_numbers, note_sink=note_sink,
+                boundary_mode=mode)
+            if not blocks:
+                reason = ("指定的「只取题号」没有匹配到任何题" if only_numbers else
+                          "可能是题号写法没被认出（可在「重新转换」里指定题号模板），"
+                          "或这份文件其实不含题目")
+                raise ConvertError(
+                    f"已识别出 {source_path.name} 的原文，但没能从中切出任何题目。{reason}")
+        pending = {
             "blocks": [dataclasses.asdict(b) for b in blocks],
             "extract_dirs": [{"dir": str(extract_dir), "stem": source_stem}],
             "keep_images": keep_images,
@@ -4366,6 +4427,9 @@ def convert_file_to_blocks(file_path, mineru_token: str = "", *, is_image=False,
             "ocr_backend": backend,
             "ocr_meta": ocr_meta,
         }
+        if single_block:
+            pending["single_block"] = True
+        return pending
     except ConvertError:
         raise
     except Exception as e:
@@ -4505,6 +4569,16 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
         md = blockpipe.normalize_and_render(
             blocks, client, keep_images=keep_images,
             include_solution=include_solution, boundary_mode=mode)
+        if pending.get("single_block") and not md.strip():
+            # 单题专线护栏：LLM 把单块判成纯解析等异常时 normalize_and_render
+            # 会输出空文本，随后 _ensure_normalized 会复读"没能从中切出任何
+            # 题目"的事故文案。这里回退机械渲染——宁可给一张未规范化的题卡 +
+            # 人工校对提示，也不要让整条转换失败。
+            md = blockpipe.render_without_ai(
+                blocks, include_solution=include_solution, boundary_mode=mode)
+            if note_sink is not None:
+                note_sink(qualcheck.mark_manual_review(
+                    "大模型未能产出本题的规范化结果，已回退机械渲染；请人工校对"))
     else:
         md = blockpipe.render_without_ai(
             blocks, include_solution=include_solution, boundary_mode=mode)
@@ -4515,6 +4589,22 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
             note_sink=note_sink, include_solution=include_solution,
             blocks=blocks, boundary_mode=mode)
 
+    md = _finalize_pending(pending, md, review_action=action, note_sink=note_sink)
+
+    source = Path(pending.get("source_name") or "文件")
+    return _ensure_normalized(md, source)
+
+
+def _finalize_pending(pending: dict, md: str, *, review_action: str,
+                      note_sink=None) -> str:
+    """收尾三件事：图片拦截 → 语料留档 → 中间产物清理。
+
+    顺序与 _convert_image 一致（留档排在清理之前）。题卡链路
+    （finish_block_review）与好资料的纯文本出口（convert_file_plain_text）
+    共用；md 是各自的文本产物，extract_dirs / keep_images 从 pending 取。
+    """
+    keep_images = bool(pending.get("keep_images", True))
+    mode = normalize_boundary_mode(pending.get("boundary_mode"))
     from src.pipeline import _cleanup_temp
 
     for ed in pending.get("extract_dirs") or []:
@@ -4526,7 +4616,7 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
         # 留档排在清理之前（同 _convert_pdf）。这条路径没有 cfg 可问版本——暂停点
         # 之后 provider/cfg 不一定在手，engine 则是确定的：能走到人工审核就是逐块。
         corpus.archive(extract_dir, stem,
-                       meta={"engine": ENGINE_BLOCK, "review": action,
+                       meta={"engine": ENGINE_BLOCK, "review": review_action,
                              "boundary_mode": mode,
                              "ocr_backend": pending.get("ocr_backend", OCR_MINERU),
                              "ocr_meta": pending.get("ocr_meta") or {}},
@@ -4536,9 +4626,219 @@ def finish_block_review(pending: dict, *, action: str, include_solution: bool,
                 _cleanup_temp(extract_dir, stem, keep_images=keep_images)
             except Exception as e:
                 logger.warning("[WARN] 审核后清理中间产物失败（不影响转换）: %s", e)
+    return md
 
-    source = Path(pending.get("source_name") or "文件")
-    return _ensure_normalized(md, source)
+
+def _locate_page_range_start(raw_md: str, rows: list) -> int | None:
+    """在页内**逐块下扫**，取第一个"唯一且强"锚点所在行的行首偏移。
+
+    与 _locate_page_start 的差别：那个是硬停——首个内容块定位不到就放弃整页
+    （多图片白名单场景宁可转人工）；好资料是整本书，实测约 2/10 的真实文档
+    会因首块是标题/页码/装饰文本而整页丢页码。这里继续沿页内块下扫，找到
+    第一个可用锚点即返回；整页都定位不到才返回 None。
+    """
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for group in _content_row_anchor_groups(row):
+            hits: list[int] = []
+            for anchor in group:
+                if not _anchor_is_strong(anchor):
+                    continue
+                positions = _anchor_occurrences(raw_md, anchor)
+                if len(positions) == 1:
+                    hits.append(positions[0])
+            if hits:
+                return raw_md.rfind("\n", 0, min(hits)) + 1
+    return None
+
+
+def inject_content_page_breaks(raw_md: str, extract_dir: Path) -> tuple[str, dict]:
+    """尽力为好资料注入带页码的源页界标记（MinerU content_list 锚点定位）。
+
+    与 _inject_source_page_breaks 的分工：那个服务"多图片白名单"（页数必须与
+    上传图片严格相等、一次失败即整体转人工）；这里服务整本资料——逐页定位、
+    能定位几页标几页，跳过的页不插标记（带页码标记不会让后续页号漂移）。
+    返回 (注入后的文本, page_info)：
+      status: reliable | partial | unavailable | unsupported
+      located_pages / skipped（定位失败）/ empty_pages / page_total（1 基）
+    """
+    info: dict = {"status": "unavailable", "located_pages": [], "skipped": [],
+                  "empty_pages": [], "page_total": 0}
+    extract_dir = Path(extract_dir)
+    import blocksplit
+
+    candidates = sorted(
+        (path for path in extract_dir.glob("*_content_list.json")
+         if not path.name.endswith("_content_list_v2.json")),
+        key=lambda path: path.stat().st_mtime)
+    if not candidates:
+        return raw_md, info
+    try:
+        rows = json.loads(candidates[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return raw_md, info
+    if not isinstance(rows, list) or not rows:
+        return raw_md, info
+    by_page: dict[int, list] = {}
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("page_idx"), int):
+            by_page.setdefault(row["page_idx"], []).append(row)
+    if len(by_page) <= 1:
+        return raw_md, info
+    info["page_total"] = max(by_page) + 1
+    for page_idx in range(info["page_total"]):
+        if page_idx not in by_page:
+            info["empty_pages"].append(page_idx + 1)
+    positions: list[tuple[int, int]] = []          # (1 基页码, 行首偏移)
+    previous = -1
+    for page_idx in sorted(by_page):
+        if page_idx == 0:
+            positions.append((1, 0))               # 首页就是文首，无需定位
+            previous = 0
+            continue
+        position = _locate_page_range_start(raw_md, by_page[page_idx])
+        if position is None or position <= previous:
+            info["skipped"].append(page_idx + 1)
+            continue
+        positions.append((page_idx + 1, position))
+        previous = position
+    info["located_pages"] = [page for page, _ in positions]
+    scheduled = [item for item in positions if item[0] > 1]
+    if scheduled:
+        text = raw_md
+        for page, position in sorted(scheduled, reverse=True):
+            text = (text[:position]
+                    + blocksplit.source_page_break_marker(page) + "\n"
+                    + text[position:])
+        raw_md = text
+        info["status"] = ("reliable"
+                          if not info["skipped"] and
+                          len(positions) == info["page_total"]
+                          else "partial")
+    return raw_md, info
+
+
+def convert_file_plain_text(file_path, mineru_token: str = "", *, is_image=False,
+                            keep_images: bool = True,
+                            ocr_backend: str = OCR_MINERU,
+                            doc2x_api_key: str = "",
+                            inject_pages: bool = False) -> tuple[str, dict]:
+    """不渲染题卡契约格式的纯文本出口（好资料分块用）。
+
+    与 convert_file_to_blocks 的区别：
+    - 不切块、不渲染 `- [标签]` 契约格式；只做文档向轻量清理
+      （mechfix.light_clean：合并 HTML 上下标、收敛空行），不做题目向的
+      normalize_block——那会把讲义散文的中文标点改成半角、给公式加
+      \\displaystyle，是题目排版语义；
+    - inject_pages=True 时在清理前尽力注入带页码的源页界标记（MinerU 后端），
+      并把带标记版本重写进留档 raw（corpus 磁盘文件优先于 texts，不重写的话
+      留档里永远没有页码证据）。
+    图片拦截 / 语料留档 / 中间产物清理与题卡链路共用 _finalize_pending。
+    返回 (text, page_info)。
+    """
+    import mechfix
+
+    source_path = Path(file_path).resolve()
+    if not source_path.is_file():
+        raise ConvertError(f"文件不存在: {source_path}")
+    backend = normalize_ocr_backend(ocr_backend)
+    is_image_input = is_image or is_image_file(source_path.name)
+    source_stem = source_path.stem
+    extract_dir = _raw_md_dir(source_stem)
+    file_path = _prep_for_ocr(source_path, backend, force_image=is_image,
+                              work_dir=extract_dir)
+    if backend == OCR_DOC2X:
+        is_image_input = False
+    elif file_path.suffix.lower() == ".pdf":
+        is_image_input = False
+    _ensure_src_on_path()
+    try:
+        with _alpha_cwd():
+            cfg = _load_config_for_user(mineru_token,
+                                        require_mineru=(backend == OCR_MINERU))
+        raw_md, _, ocr_meta = _parse_with_ocr_backend(
+            file_path, extract_dir, cfg, ocr_backend=backend,
+            doc2x_api_key=doc2x_api_key)
+        raw_md = _clean_mineru_text(raw_md, file_path)
+        try:
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            (extract_dir / f"{source_stem}_raw.md").write_text(
+                raw_md, encoding="utf-8")
+        except OSError as e:
+            logger.warning("[WARN] 原文落盘失败（不影响转换）: %s", e)
+        text = mechfix.light_clean(raw_md)
+        if not text.strip():
+            # 资料专属文案：_ensure_raw_text 的措辞是"题目"语义，对讲义是误导。
+            raise ConvertError(
+                f"已识别出 {source_path.name} 的原文，但正文为空——"
+                "可能是识别失败或原文件没有可转换的文本")
+        _ensure_raw_text(raw_md, file_path, ocr_backend=backend)
+        page_info: dict = {"status": "unavailable", "located_pages": [],
+                           "skipped": [], "empty_pages": [], "page_total": 0}
+        if inject_pages:
+            if backend == OCR_MINERU:
+                text, page_info = inject_content_page_breaks(text, extract_dir)
+                if page_info.get("status") in {"reliable", "partial"}:
+                    try:
+                        (extract_dir / f"{source_stem}_raw.md").write_text(
+                            text, encoding="utf-8")
+                    except OSError as e:
+                        logger.warning("[WARN] 页标记原文落盘失败: %s", e)
+            else:
+                page_info["status"] = "unsupported"
+        pending = {
+            "blocks": [],
+            "extract_dirs": [{"dir": str(extract_dir), "stem": source_stem}],
+            "keep_images": keep_images,
+            "source_name": source_path.name,
+            "boundary_mode": BOUNDARY_AUTO,
+            "ocr_backend": backend,
+            "ocr_meta": ocr_meta,
+        }
+        text = _finalize_pending(pending, text, review_action="plain_text")
+        return text, page_info
+    except ConvertError:
+        raise
+    except Exception as e:
+        raise ConvertError(f"转换失败: {type(e).__name__}: {e}") from e
+
+
+def normalize_plain_blocks(texts: list[str], provider, *,
+                           note_sink=None) -> list[str]:
+    """对一组整块文本逐个做 LLM 规范化，按原顺序返回（好资料题块用）。
+
+    走与逐块识别同一条 blocknorm 通道（题目向 prompt），单块单次调用。
+    **不要拿它处理讲义正文**——那个 prompt 是"数学题目排版"语义（中文标点改
+    半角、按"解："劈题干/解析），对散文是劣化。LLM 把题块判出解析时按内容
+    守恒拼回（宁可留 `【解析】` 标记，也不能静默丢内容）；输出为空时回退原文。
+    """
+    import blocknorm
+    import blocksplit
+
+    if not texts:
+        return []
+    client = _make_llm_client(None, provider)
+    blocks = [blocksplit.Block(index=i, number=None, text=text, section=None,
+                               group=None, zone="stem", line_no=1,
+                               kind="unknown")
+              for i, text in enumerate(texts)]
+    normed = blocknorm.normalize_blocks(blocks, client, keep_images=True)
+    by_index = {nb.index: nb for nb in normed}
+    out: list[str] = []
+    for i, original in enumerate(texts):
+        nb = by_index.get(i)
+        body = (nb.body or "").strip() if nb is not None else ""
+        solution = (nb.solution or "").strip() if nb is not None else ""
+        if solution and not solution.lstrip().startswith("【解析】"):
+            solution = "【解析】\n" + solution
+        combined = (body + ("\n\n" + solution if solution else "")).strip()
+        if not combined:
+            if note_sink is not None:
+                note_sink(f"第 {i + 1} 块大模型规范化结果为空，已保留原文")
+            combined = original
+        out.append(combined)
+    return out
 
 
 def _run_block_engine(raw_md: str, cfg, provider, *, include_solution: bool,

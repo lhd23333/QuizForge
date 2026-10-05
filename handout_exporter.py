@@ -105,6 +105,9 @@ def _question_markdown(block: dict, label: str, mode: str,
         block.get("img_layouts"),
         block.get(exporter._IMG_FILES_KEY),
         practice_image_wrap=bool(block.get("_practice")),
+        # 题卡外层是 samepage（wrapfig 冲突环境）：题干尾图降级为题末
+        # flexbox（2026-10-04 审查：讲义题卡内 wrapfigure 实测丢图）
+        box_context=True,
     )
     escaped = exporter._latex_escape(label)
     question_md = (
@@ -252,6 +255,13 @@ def build_markdown(metadata: dict, body: str, *, stem: str = "handout",
             + exporter._raw("\\qpracticeend")
             for page in pages
         )
+    title = str(meta.get("title") or "").replace("\n", " ").strip()
+    if title:
+        # pandoc title block（与 exporter.build_markdown 同款）：整册文档编译时模板
+        # 按 $if(title)$ 渲染居中标题——此前讲义工作台导出的 PDF 整册没有标题，与
+        # 题库侧导出不一致（2026-10-04 P1-14）。fragment 题卡分支不消费 title，
+        # 题卡预览不受影响。
+        document = f"% {title}\n\n{document}"
     return document.rstrip() + "\n", warnings
 
 

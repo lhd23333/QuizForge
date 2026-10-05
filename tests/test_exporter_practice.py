@@ -301,20 +301,25 @@ class PracticeExportTests(unittest.TestCase):
         self.assertLess(first_open, heading)
         self.assertLess(heading, first_close)
 
-    def test_practice_solve_template_measures_real_box_height(self):
+    def test_practice_solve_template_never_emits_unbreakable_box(self):
+        # 回归钉：\box（不可分盒）与题间 \columnbreak 交互会让 multicol 输出例程
+        # 从第 767 页起死循环（2026-10-05 全量实测 1416 次 Output loop、整份文档
+        # 报废）。收集仍走 vbox，但放出必须是 \unvbox——不要再把 \box 改回来。
         template = exporter.config.TEX_TEMPLATE.read_text(encoding="utf-8")
         solve_env = template.split(r"\newenvironment{qpracticesolve}", 1)[1]
         solve_env = solve_env.split(r"\makeatother", 1)[0]
 
-        self.assertIn(r"\ht\qpracticesolvebox+\dp\qpracticesolvebox", solve_env)
-        self.assertIn(r"\qpracticecolumnheight", solve_env)
+        self.assertIn(r"\setbox\qpracticesolvebox=\vbox\bgroup", solve_env)
         self.assertIn(r"\unvbox\qpracticesolvebox", solve_env)
-        self.assertIn(
-            r"\global\qpracticecolumnheight=\csname @colroom\endcsname",
-            template,
-        )
+        self.assertNotIn(r"\box\qpracticesolvebox", solve_env)
+        # 同一事故的孪生形态（2026-10-05 全量直传复核时抓到）：测高寄存器随测高
+        # 代码一并删除后，若 \qpracticebegin 里还留着 \qpracticecolumnheight 赋值，
+        # 每个导出都会报 Undefined control sequence 并破坏首页排版（内容大段缩水、
+        # 多出一页）。该名字不允许在整个模板里再出现——不要只检查 solve_env，
+        # \qpracticebegin 定义在 \makeatother 之后。
+        self.assertNotIn("qpracticecolumnheight", template)
 
-    def test_first_solve_has_no_forced_break_so_tex_can_measure_remaining_column(self):
+    def test_first_solve_has_no_forced_break_so_tex_can_use_remaining_column(self):
         questions = [
             {"id": "fill", "body": "填空占位", "type": "填空题",
              "difficulty": "1", "solution": ""},
@@ -324,10 +329,10 @@ class PracticeExportTests(unittest.TestCase):
 
         md = exporter.build_markdown(questions, "余量分支", mode="practice")
 
+        # 首道大题前不断栏：环境以 \par\penalty0 开头，TeX 按栏余量自然决定接排
+        # 还是断到下一栏（见模板 {qpracticesolve} 注释）。
         first_solve = md.index(r"\begin{qpracticesolve}")
         self.assertNotIn(r"\columnbreak", md[:first_solve])
-        self.assertIn(r"\box\qpracticesolvebox",
-                      exporter.config.TEX_TEMPLATE.read_text(encoding="utf-8"))
 
     def test_practice_choice_options_wrap_only_in_one_column(self):
         four_cols = exporter._choice_tasks(
@@ -365,6 +370,33 @@ class PracticeExportTests(unittest.TestCase):
                 "! File ended while scanning use of \\environment tasks .\n",
                 encoding="utf-8")
             self.assertIn("File ended", exporter._xelatex_fatal_log(root))
+
+    def test_inline_math_closing_dollar_keeps_gap_before_number(self):
+        # 2026-10-04 批量导出故障：闭 `$` 后的空格被吃掉 → pandoc 不认这对行内
+        # 数学 → .tex 里出现 `\$\displaystyle A.\$60` → xelatex `! Missing $`。
+        # 源头数据本来就是合法的 `$\displaystyle A.$ 60`，导出副本必须逐字保留。
+        source = ("$\\displaystyle A.$ 60\n\n$\\displaystyle B.$ 90\n\n"
+                  "$\\neq$ 0")
+        self.assertEqual(exporter._sanitize_export_text(source), source)
+
+    def test_inline_math_closing_dollar_before_digit_gains_gap(self):
+        self.assertEqual(exporter._sanitize_export_text("$x$2"),
+                         "$x$ 2")
+        self.assertEqual(exporter._sanitize_export_text("$\\neq$0"),
+                         "$\\neq$ 0")
+
+    def test_inline_math_boundary_gaps_are_trimmed_inside_the_span(self):
+        self.assertEqual(exporter._sanitize_export_text("$\\displaystyle f  $"),
+                         "$\\displaystyle f$")
+        self.assertEqual(exporter._sanitize_export_text("$ \\displaystyle f$"),
+                         "$\\displaystyle f$")
+        # `$$…$$` 与空公式不受行内规则约束，保持原样。
+        self.assertEqual(exporter._sanitize_export_text("$$x$$5"), "$$x$$5")
+        self.assertEqual(exporter._sanitize_export_text("$ $"), "$ $")
+
+    def test_inline_math_boundary_normalization_leaves_plain_text_alone(self):
+        source = "若 $x$ 与 $y$ 满足 $x+y=1$，则 $x$ 有解，体积为（）"
+        self.assertEqual(exporter._sanitize_export_text(source), source)
 
     def test_practice_uses_narrower_column_thresholds(self):
         medium = ["A. abcdefghijkl", "B. bcdefghijklm"]

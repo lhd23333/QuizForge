@@ -48,6 +48,23 @@ logger = logging.getLogger(__name__)
 BOUNDARY_MODE_AUTO = "auto"
 BOUNDARY_MODE_WHITELIST = "whitelist"
 SOURCE_PAGE_BREAK = "<!-- quizforge:source-page-break -->"
+# 带页码的源页界标记（好资料按页分块用，页码 1 基）。与上面不带页码的标记
+# 分开：白名单多图片链路按"标记出现次序"推定页号，一旦有页定位失败被跳过，
+# 后续页号会整体漂移；带页码的标记自体携带事实，跳页不会错位。两个标记的
+# 消费方互不认识——精确匹配各自的正则，不会互相误认。
+_TAGGED_PAGE_BREAK_RE = re.compile(
+    r"^<!-- quizforge:source-page-break:(\d{1,6}) -->$")
+
+
+def source_page_break_marker(page_number: int) -> str:
+    """生成带页码的源页界标记（1 基页码）。"""
+    return f"<!-- quizforge:source-page-break:{int(page_number)} -->"
+
+
+def parse_source_page_break(line: str) -> int | None:
+    """解析带页码的源页界标记行；不是标记返回 None。"""
+    match = _TAGGED_PAGE_BREAK_RE.match(str(line).strip())
+    return int(match.group(1)) if match else None
 
 
 def normalize_boundary_mode(boundary_mode: str = BOUNDARY_MODE_AUTO) -> str:
@@ -271,6 +288,15 @@ _DEFAULT_DIALECT = _Dialect("arabic-dot", _NUM_LINE_RE, _NUM_LINE_LOOSE_RE)
 _CN_TI_CN_RE = re.compile(
     r"^(?:§\s*[\d.]+\s*)?第\s*([一二三四五六七八九十百零]+)\s*[题題]\s*[.．、:：]?\s*(.*)$")
 
+# 字母+数字题号：`G1.` `A2.[20]` `N3、`（AGMC 特长赛每赛道用「学科首字母+序号」，
+# 赛道内 1-10 回卷，section 标题（`## 3 代数 Algebra`）随赛道切换使回卷合法）。
+# 字母**必选**（不匹配裸 `1.`）：普通卷上该方言只有零星 `图A1.` 类碎片，LIS 短
+# 且 run<2 无权重加成，默认方言稳赢——零影响。实测 2025.8 problems-expertise：
+# 默认方言只切出 4 个「（1）（2）」小问块，50 道真题目（G1-A10-N10-C10-M10）
+# 全部落入「首题号前」丢弃（占全文 80.5%）。weight=1.2：字母卷上须知连号
+# （1..9/1..10）会被默认方言计入 LIS，字母方言须稳定压过它。
+_LETTER_NUM_RE = re.compile(r"^[A-Za-z]\s*(\d{1,3})\s*[.．、)）]\s*(.*)$")
+
 _DIALECTS = (
     _DEFAULT_DIALECT,
     # weight=3：`第N题` 有「第」「题」两个汉字锚点，误命中率远低于裸 `N.`——
@@ -287,6 +313,10 @@ _DIALECTS = (
     # 两者不会同时命中同一行（数字类不重叠），顺序只影响打平顺序。
     _Dialect("cn-di-ti-cn", _CN_TI_CN_RE, _CN_TI_CN_RE,
              guard_chain=False, weight=3.0, numeral="chinese"),
+    # 字母+数字题号（`G1.` `A2.`）：字母是强锚点（26 字母 + 紧贴数字 + 点号），
+    # 不需要链式数字 guard。排在最后：普通卷上 LIS 短不外溢，字母卷上靠 LIS 胜出。
+    _Dialect("letter-num", _LETTER_NUM_RE, _LETTER_NUM_RE,
+             guard_chain=False, weight=1.2),
 )
 
 # 目录页的「点导引」：`第1 题. . . . . . . . . . . 4`。目录整整占了 3 页、
@@ -324,6 +354,30 @@ _PRACTICE_SECTION_RE = re.compile(
     r"^(?:核心题型(?:\s|$|[①②③④⑤⑥⑦⑧⑨⑩])|"
     r"刷(?:基础|提分|易错|素养|提升|能力|高分|综合)(?:\s|$|[▶▷])|"
     r"易错点\s*[▶▷])")
+
+# 多轮竞赛/大卷的分轮标题：`## 证明轮` `## 抢答轮` `### 第一轮` `## 二试`。
+# 轮内题号合法地从 1 重开，必须切换分区上下文；否则 _find_restart 会把新轮
+# 整段判成解析区（实测 AGMC 2026.2 problems-team：证明轮 1~10 之后的抢答轮
+# 1~27 全被判成"解析块"，37 道题最终只导入 3 道卷首说明残块）。只认带
+# markdown 标题记号、整行只有轮次词的形态，正文里的「车轮」等普通词不参与，
+# 与「不把任意 Markdown 标题都算分区」的既有边界一致。
+_ROUND_HEAD_RE = re.compile(
+    r"^\s*#{1,6}\s*(?:"
+    r"第\s*[一二三四五六七八九十\d]+\s*届.{0,24}部分|"         # 第六届 AGMC 高中组几何部分
+    r"[一二三四五六七八九十\d]+\s*试部分|"                      # 一试部分 / 二试部分
+    r"第\s*[一二三四五六七八九十\d]+\s*[轮试](?:部分|篇)?|"    # 第二轮 / 一试(部分)
+    r"[一二三四五六七八九十\d]+\s*试(?:部分|篇)?|"              # 二试(部分)
+    r"[一-鿿]{1,6}(?:轮|篇)|"                                  # 证明轮 / 拓展篇
+    r"\d{1,2}\s+.{1,24}|"                                      # 2 几何 Geometry / 1 注意事项
+    r"(?:Geometry|Algebra|Combinatorics|Number\s*Theory|"
+    r"Mathematical\s+Analysis)"
+    r")\s*$")
+
+# 结构化预处理注入的分区标题清单（来自 MinerU 中间 JSON 的 paragraph_title /
+# doc_title 块，见 mineru_local.py 的 _structural_preprocess 与
+# MinerU_json导入优化分析.md）。命中即视为分区标题——比词表/正则猜测精确，
+# 且天然覆盖「证明轮」「题组 1」这类不可枚举的标题。匹配时两侧都去空白归一。
+_SECTION_TITLES_RE = re.compile(r"<!-- qf:section-titles: (.*?) -->")
 
 # 分组标题：`A 组` `B组` `一组`（整行只有这个）
 _GRP_LINE_RE = re.compile(r"^([A-DＡ-Ｄa-d]|[一二三四五六七八九十]+)\s*组\s*$")
@@ -437,6 +491,20 @@ _DETAIL_MARK_RE = re.compile(r"【\s*(?:详解|解析)\s*】")
 # 卷首「注意事项」特征词：命中即整段丢弃（它的 1. 2. 3. 会被误当成题号）
 _PREAMBLE_KEYWORD_RE = re.compile(
     r"(答题卡|准考证号|考试结束|铅笔|涂黑|橡皮(?!泥|筋)|交回|本试卷共|考试时间|草稿纸|非选择题)")
+
+# 竞赛「流程/规则说明」特征词。配合 _drop_boilerplate 的「整段无公式」判据使用：
+# 实测 AGMC 2026.2 problems-team 的抢答轮规则段（`1. 负责人…` `2. 考试开始时…`）
+# 与卷首说明一样会把 1. 2. 3. 冒充题号，且会让真正的题目段被 _find_restart
+# 误判成解析区；这些段全部没有 $ 公式，数学真题必有公式，据此零误伤剔除。
+_RULES_KEYWORD_RE = re.compile(
+    r"(负责人|队伍|参赛|选手|监考|阅卷|评卷|答题|提交|题组|得分|雨课堂|开卷|"
+    r"注意事项|须知|准考证|考场|本竞赛|竞赛结束|成绩无效)")
+
+# 「(本部分包含 N 道填空题，共 300 分)」类副标题的题数声称。区域判据 ⑤ 用：
+# 这类 section 若只挂个位数块且远少于声称题数，挂的多是规则说明残渣（真实题
+# 在下级「题组 N」标题里）——实测 AGMC 2026.2 team 抢答轮副标题下剩 2 块
+# 规则残渣，同卷证明轮副标题下 10 块真题（块数 == 声称数）幸存。
+_PART_CLAIM_RE = re.compile(r"本部分包含\s*(\d+)\s*道")
 
 
 @dataclasses.dataclass
@@ -789,6 +857,14 @@ def _split_pass(raw_md: str, loose: bool,
     if dialect is None:
         dialect = _detect_dialect(lines, start)
     scheme = _detect_scheme(lines, start, dialect)
+    # 结构化预处理注入的分区标题清单（见 _SECTION_TITLES_RE 定义处注释）
+    section_titles: set[str] = set()
+    titles_match = _SECTION_TITLES_RE.search(raw_md)
+    if titles_match:
+        for item in titles_match.group(1).split(" || "):
+            key = re.sub(r"\s+", "", item)
+            if key:
+                section_titles.add(key)
 
     blocks: list[Block] = []
     cur_lines: list[str] = []
@@ -849,9 +925,25 @@ def _split_pass(raw_md: str, loose: bool,
             group = None
             continue
 
+        # 结构化标题清单命中：来源为 MinerU 中间 JSON 的 paragraph_title，
+        # 直接切换分区（精确，无需词表）。排在答案区标题之后、词表之前。
+        if section_titles and re.sub(r"\s+", "", body) in section_titles:
+            flush()
+            cur_lines, cur_num = [], None
+            section = body
+            continue
+
         # 教辅栏目标题：只切换分区上下文，不进入任何题块。后续若题号从 1 重开，
         # _find_restart 会看到 section 已变化，按新练习组处理而不是误判成解析区。
         if _PRACTICE_SECTION_RE.match(body):
+            flush()
+            cur_lines, cur_num = [], None
+            section = body
+            continue
+
+        # 多轮竞赛的分轮标题（`## 证明轮` `## 抢答轮`）：与教辅栏目同理切换分区，
+        # 让轮内题号合法重开。见 _ROUND_HEAD_RE 定义处的实测背景（AGMC 2026.2）。
+        if _ROUND_HEAD_RE.match(raw_line):
             flush()
             cur_lines, cur_num = [], None
             section = body
@@ -1777,17 +1869,90 @@ def _split_by_markers(raw_md: str) -> list[Block]:
 
 
 def _drop_boilerplate(blocks: list[Block]) -> list[Block]:
-    """丢掉「注意事项」类块并重排 index。
+    """丢掉「注意事项/流程说明」类块并重排 index。
 
     _drop_preamble 只扫开头 40 行，救不了文档中段又出现一遍的情形（实测一份 md
-    把卷子与答案拼在一起，第 104 行起又是一整段注意事项）。这里按内容判：短块
-    且命中考务特征词（答题卡/准考证号/…）即丢。要求短（< 120 字）以免误伤真题——
-    真题正文里偶尔也提「答题卡」，但不会通篇只有这一句。
+    把卷子与答案拼在一起，第 104 行起又是一整段注意事项）。这里按内容判，两条
+    判据：
+      ① 短块（< 120 字）命中卷首考务特征词（原有行为）；
+      ② 中长块（< 240 字）**整段不含 $ 公式**且命中 **≥2 个不同**竞赛流程词——
+         实测 AGMC 2026.2 problems-team 的卷首说明与抢答轮规则段全无公式，
+         命中词数均为 2-5，且会把 1. 2. 3. 冒充题号、让真题段被 _find_restart
+         误判成解析区。「≥2 词」而非「≥1 词」：单个弱词（如「参赛」「选手」
+         「队伍」）在排列组合真题里天然出现——实测星火杯第 3 题
+         「5 个生物竞赛的参赛名额…」无公式仅命中「参赛」一个弱词，按 ≥1 词
+         会被整题误删（库内 19 题切出 18）。
+      ③ 区域判据：首个 section 标题之前的块，若不是「1..N 连续题号」则整体
+         视为卷首须知区丢弃——实测 AGMC 2026.8 senior 首区 8 块须知
+         （1,3,4,5,7,8,9,10 缺号冒充题号）无 section 但被留下。仅当卷内存在
+         带 section 的块时判定（兜底路径块无 section，自动跳过）；真题目号
+         1..N 连续时保留（防「整卷无 section 识别」卷被误伤）。
+      ④ section 名含「注意事项/须知/答题说明/考试说明」的区段整段丢弃——
+         实测 AGMC 2025.2 junior 的 [注意事项] 区 2 块（`1. 本次竞赛共…`
+         `5. 雨课堂…`）冒充题号。
+      ⑤ 「(本部分包含 N 道…)」副标题 section 下块数 ≤3 且 < N 时整段丢弃
+         （说明残渣）——见 _PART_CLAIM_RE 注释。
     """
-    kept: list[Block] = []
+    # 第一遍：内容判据①②，先得幸存者——区域判据必须基于幸存者统计，否则
+    # 说明段条条（`1. 负责人…` `2. …`）都算进 section 块数、把残渣规模撑大。
+    #
+    # 判据②的「题号递增豁免」：位于真题号序列之中（题号严格大于上一幸存块的
+    # 题号）的块是序列内真题，词表再命中也不删——实测 Fiddie 第 16 题（概率题
+    # 含「参赛/选手/答题」三个弱词、整段无公式）被「≥2 词」判据误删（20→19）、
+    # 临一杯第 10 题同理。AGMC 卷首/轮间说明段不受豁免保护：其编号回卷到小区间
+    # （1-8 条）且远小于上一段末题号（如 5 < 10），且 prev 只跟踪幸存块，说明条
+    # 之间不会互相保护（`1. 负责人` 删掉后 `2. 考试开始时` 的参照仍是上一真题块）。
+    survivors: list[Block] = []
+    prev_num: int | None = None
     for b in blocks:
         body = b.text.strip()
+        junk = False
         if len(body) < 120 and _PREAMBLE_KEYWORD_RE.search(body):
+            junk = True
+        elif (len(body) < 240 and "$" not in body
+                and len(set(_RULES_KEYWORD_RE.findall(body))) >= 2):
+            if not (isinstance(b.number, int) and isinstance(prev_num, int)
+                    and b.number > prev_num):
+                junk = True
+        if not junk:
+            survivors.append(b)
+            # 锚点只在「强真题」（含公式或长文段）上推进：短的无公式残块
+            # （如 team 的「5. 每个题组…分值表」仅 1 词不触发②）不更新 prev，
+            # 否则其后说明条（6./7./8.）会借题号递增互相豁免（实测 team
+            # 由 37 回归到 41 块）。无公式的真题（Fiddie 第 16 题）不更新锚点
+            # 也无碍：豁免条件是「题号 > prev」而非连续 +1，后续题目照常豁免。
+            if isinstance(b.number, int) and ("$" in body or len(body) >= 240):
+                prev_num = b.number
+    # ④⑤：圈出要整段丢弃的 section（按幸存块数统计）
+    sec_counts: dict[str, int] = {}
+    for b in survivors:
+        s = (b.section or "").strip()
+        if s:
+            sec_counts[s] = sec_counts.get(s, 0) + 1
+    note_secs: set[str] = set()
+    for s, n in sec_counts.items():
+        if "注意事项" in s or "须知" in s or "答题说明" in s or "考试说明" in s:
+            note_secs.add(s)
+            continue
+        claim = _PART_CLAIM_RE.search(s)
+        if claim and n <= 3 and n < int(claim.group(1)):
+            note_secs.add(s)
+    # ③：首 section 之前的幸存块是否属于「须知区」
+    first_sec = next(
+        (i for i, b in enumerate(survivors) if (b.section or "").strip()), None)
+    drop_head = False
+    if first_sec:  # None/0（无 section 结构或首块即带 section）时不判定
+        head_nums = [b.number for b in survivors[:first_sec]]
+        drop_head = not (
+            len(head_nums) >= 2
+            and all(isinstance(x, int) for x in head_nums)
+            and sorted(head_nums) == list(range(1, len(head_nums) + 1)))
+
+    kept: list[Block] = []
+    for i, b in enumerate(survivors):
+        if drop_head and i < first_sec:
+            continue
+        if (b.section or "").strip() in note_secs:
             continue
         kept.append(b)
     for i, b in enumerate(kept):

@@ -556,6 +556,10 @@ def _to_record(path: Path, meta: dict, body: str) -> dict:
         "img_originals": list(meta.get("img_originals", []) or []),
         "img_versions": _merge_img_versions(meta, body),
         "number": _as_number(meta.get("number")),
+        # 好资料块卡的来源页码（1 基；普通题卡为 None）。读出来供题卡显示
+        # "第 N–M 页"标签；缺字段的旧卡片自然得到 None，不受影响。
+        "source_page_start": _as_number(meta.get("source_page_start")),
+        "source_page_end": _as_number(meta.get("source_page_end")),
         "created": meta.get("created", ""),
         "updated": meta.get("updated", ""),
         # selected 刻意**不在这里算**：它不是文件的属性，而是纯内存态

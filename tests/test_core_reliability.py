@@ -46,6 +46,11 @@ def setUpModule():
     config.BATCH_UPLOAD_DIR = config.UPLOAD_DIR / "batch"
     config.HISTORY_DIR = root / "history"
     config.OUTPUT_DIR = root / "output"
+    # 来源监听的状态路径也必须隔离：import app 会构造监听服务并懒加载任务
+    # 镜像，不隔离就会读到/写进用户的真实来源配置与版本账本。
+    config.SOURCE_SETTINGS_PATH = root / "state" / "source_settings.json"
+    config.SOURCE_VERSIONS_PATH = root / "state" / "source_versions.json"
+    config.SOURCE_WORKSPACE_DIR = root / "state" / "source_workspace"
     app_module = importlib.import_module("app")
 
 

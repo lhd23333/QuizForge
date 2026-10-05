@@ -8,6 +8,7 @@
   if (!rootEl) return;
   const listEl = document.getElementById('bo-list');
   const libraryListEl = document.getElementById('bo-library-list');
+  const sourceListEl = document.getElementById('bo-source-list');
   const showAll = rootEl.dataset.showAll === '1';
   const statusUrl = '/batches/status' + (showAll ? '?all=1' : '');
 
@@ -16,7 +17,131 @@
     return libraryListEl?.querySelector('.bo-library-row[data-task-id="'
       + taskId + '"]');
   }
+  function sourceRowOf(taskId) {
+    return sourceListEl?.querySelector('.bo-source-row[data-task-id="'
+      + taskId + '"]');
+  }
   function setText(el, s) { if (el) el.textContent = s; }
+
+  // 来源任务状态与文本/进度映射（服务端 _SOURCE_TASK_STATUS 的镜像）。
+  // 单文件任务的"进度"就是阶段；不能照抄批次/资料库"未知 id 就整页 reload"
+  // 的刷新模式——监控会持续新增任务，那样每导入一个文件整页就闪一次。
+  const SOURCE_STATUS = {
+    queued: {text: '排队中', pct: 10},
+    converting: {text: '识别中', pct: 40},
+    validating: {text: '正在提交', pct: 80},
+    committed: {text: '已完成', pct: 100},
+    failed: {text: '失败', pct: 0},
+    interrupted: {text: '已中断', pct: 0},
+    dismissed: {text: '已忽略', pct: 0},
+  };
+
+  function buildSourceRow(task) {
+    const row = document.createElement('div');
+    row.className = 'bo-row bo-source-row';
+    row.dataset.taskId = task.task_id;
+    const name = document.createElement('span');
+    name.className = 'bo-name';
+    const prog = document.createElement('span');
+    prog.className = 'bo-prog';
+    const bar = document.createElement('span');
+    bar.className = 'bo-bar';
+    const fill = document.createElement('span');
+    fill.className = 'bo-bar-fill';
+    bar.appendChild(fill);
+    const num = document.createElement('span');
+    num.className = 'bo-num';
+    prog.append(bar, num);
+    const chips = document.createElement('span');
+    chips.className = 'bo-chips';
+    const actions = document.createElement('span');
+    actions.className = 'bo-act';
+    row.append(name, prog, chips, actions);
+    return row;
+  }
+
+  function updateSourceRow(row, task) {
+    row.classList.toggle('bo-finished', task.status === 'committed');
+    setText(row.querySelector('.bo-name'), task.label
+      + (task.source_name ? ' · ' + task.source_name : ''));
+    const state = SOURCE_STATUS[task.status] || {text: task.status, pct: 0};
+    setText(row.querySelector('.bo-num'), task.status_text || state.text);
+    const fill = row.querySelector('.bo-bar-fill');
+    if (fill) fill.style.width = (task.percent ?? state.pct) + '%';
+    const chips = row.querySelector('.bo-chips');
+    if (chips) {
+      chips.textContent = '';
+      if (task.warnings?.length) {
+        const warn = document.createElement('span');
+        warn.className = 'bp-st';
+        warn.title = task.warnings.join('；');
+        warn.textContent = '需人工校对';
+        chips.appendChild(warn);
+      }
+      if (task.error) {
+        const detail = document.createElement('span');
+        detail.className = 'muted bo-library-error';
+        detail.textContent = task.error;
+        chips.appendChild(detail);
+      }
+      if (task.output) {
+        const output = document.createElement('span');
+        output.className = 'muted bo-library-output';
+        output.textContent = task.output;
+        chips.appendChild(output);
+      }
+    }
+    const actions = row.querySelector('.bo-act');
+    if (actions) {
+      actions.textContent = '';
+      if (task.retryable) {
+        const retry = document.createElement('button');
+        retry.type = 'button';
+        retry.className = 'btn btn-sm bo-source-retry';
+        retry.textContent = '重试';
+        actions.appendChild(retry);
+      }
+      if (task.dismissible) {
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'btn btn-sm bo-source-dismiss';
+        dismiss.textContent = '忽略';
+        actions.appendChild(dismiss);
+      }
+      if (task.removable) {
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'btn btn-sm bo-source-remove';
+        remove.textContent = '移除记录';
+        actions.appendChild(remove);
+      }
+    }
+  }
+
+  function refreshSourceRows(tasks) {
+    if (!sourceListEl) return;
+    const seen = new Set();
+    const newRows = [];
+    for (const task of tasks || []) {
+      seen.add(task.task_id);
+      let row = sourceRowOf(task.task_id);
+      if (!row) {
+        row = buildSourceRow(task);
+        newRows.push(row);
+      }
+      updateSourceRow(row, task);
+    }
+    // 服务端按时间倒序（新的在前）；从最旧的开始 prepend，最新的落在最上面。
+    for (const row of newRows.reverse()) sourceListEl.prepend(row);
+    sourceListEl.querySelectorAll('.bo-source-row').forEach(row => {
+      if (!seen.has(row.dataset.taskId)) row.remove();
+    });
+    const empty = document.getElementById('bo-source-empty');
+    if (empty) empty.hidden = !!sourceListEl.querySelector('.bo-source-row');
+    // 页面级空态块（"没有待处理的任务"）是服务端渲染的；监控在停留期间产生
+    // 新任务时它不会自己消失，这里补一刀，避免空态与任务行同屏。
+    if (newRows.length) document.getElementById('bo-empty-state')?.remove();
+  }
 
   // ---------- 中止整批 ----------
   listEl?.addEventListener('click', async ev => {
@@ -68,6 +193,68 @@
     } catch (e) {
       alert('重试失败：' + e.message);
       btn.disabled = false;
+    }
+  });
+
+  // 实时监控任务：重试（失败/中断/已忽略）、忽略（失败/中断）与移除记录（已完成）。
+  sourceListEl?.addEventListener('click', async ev => {
+    const retryBtn = ev.target.closest('.bo-source-retry');
+    const dismissBtn = ev.target.closest('.bo-source-dismiss');
+    const removeBtn = ev.target.closest('.bo-source-remove');
+    if (!retryBtn && !dismissBtn && !removeBtn) return;
+    const row = (retryBtn || dismissBtn || removeBtn).closest('.bo-source-row');
+    if (!row) return;
+    const taskId = row.dataset.taskId;
+    if (retryBtn) {
+      retryBtn.disabled = true;
+      try {
+        const res = await fetch('/api/source-ingest/retry/'
+          + encodeURIComponent(taskId), {method: 'POST'});
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || '重试失败');
+      } catch (e) {
+        alert('重试失败：' + e.message);
+      }
+      retryBtn.disabled = false;
+      refresh();
+      return;
+    }
+    if (dismissBtn) {
+      if (!confirm('忽略这条记录？它会从列表与红心计数里移出，之后不会自动重转'
+        + '这份文件（保留去重指纹，避免重复消耗识别额度）；要恢复处理，可在'
+        + '「连已完成一起看」视图里点重试。')) {
+        return;
+      }
+      dismissBtn.disabled = true;
+      try {
+        const res = await fetch('/api/source-ingest/task/'
+          + encodeURIComponent(taskId) + '/dismiss', {method: 'POST'});
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || '忽略失败');
+        // 交给下一轮 refresh 撤行：默认视图服务端已过滤 dismissed，重启一行
+        // 反而会对不上；show_all 视图里它会原地变成"已忽略"（可重试恢复）。
+        refresh();
+      } catch (e) {
+        alert('忽略失败：' + e.message);
+        dismissBtn.disabled = false;
+      }
+      return;
+    }
+    if (!confirm('仅从列表移除这条已完成记录，已生成的产物和源文件都不受影响。')) {
+      return;
+    }
+    removeBtn.disabled = true;
+    try {
+      const res = await fetch('/api/source-ingest/task/'
+        + encodeURIComponent(taskId) + '/delete', {method: 'POST'});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) throw new Error(data.error || '移除失败');
+      row.remove();
+      const empty = document.getElementById('bo-source-empty');
+      if (empty) empty.hidden = !!sourceListEl.querySelector('.bo-source-row');
+    } catch (e) {
+      alert('移除失败：' + e.message);
+      removeBtn.disabled = false;
     }
   });
 
@@ -138,6 +325,7 @@
 
     const batches = data.batches || [];
     const libraryTasks = data.library_tasks || [];
+    const sourceTasks = data.source_tasks || [];
     if (!listEl && batches.length) { location.reload(); return; }
 
     const seen = new Set();
@@ -192,6 +380,7 @@
       }
     }
     refreshLibraryRows(libraryTasks);
+    refreshSourceRows(sourceTasks);
   }
 
   setInterval(refresh, 5000);

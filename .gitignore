@@ -53,3 +53,10 @@ runtime/tex/
 
 # Obsidian 库配置（机器特定）
 .obsidian/
+
+# 桌面验证用的嵌套 git 仓库（自带 .git，不是本仓库内容；git add -A 会把它
+# 当嵌入仓库收进来，必须显式忽略）
+/QuizForge/
+
+# 线上联考导入的运行工作文件（进度 JSON / 日志 / 临时脚本），只在本机存活
+/_online_import*

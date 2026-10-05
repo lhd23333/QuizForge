@@ -65,6 +65,7 @@
         input_dir: card.querySelector('[name="input_dir"]').value,
         output_dir: card.querySelector('[name="output_dir"]').value,
         enabled: card.querySelector('[name="enabled"]').checked,
+        normalize_with_llm: card.querySelector('[name="normalize_with_llm"]').checked,
       };
     });
     const token = document.querySelector('meta[name="csrf-token"]')?.content || '';
@@ -76,7 +77,11 @@
       });
       const data = await response.json();
       if (!response.ok || !data.ok) throw new Error(data.error || '保存失败');
-      sourceStatus.textContent = '已保存';
+      // 明确"监听到底开没开"，否则用户只看到"已保存"，分不清监听是否生效。
+      const watching = Object.values(data.profiles || {})
+        .filter(row => row?.enabled).length;
+      sourceStatus.textContent = watching > 0
+        ? `已保存，${watching} 个目录正在监控` : '已保存，当前没有开启监控的目录';
     } catch (error) { sourceStatus.textContent = error.message || '保存失败'; }
   });
 

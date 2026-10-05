@@ -276,6 +276,7 @@
        data-split-resizer data-split-owner="#question-layout" data-split-panel="#question-sidebar"
        data-split-property="--question-sidebar-width" data-split-side="left"
        data-split-min="170" data-split-max="420" data-split-main-min="380"
+       data-split-collapse="question-sidebar-collapsed"
        data-split-key="question-sidebar"></div>
 
   <!-- 主区：题目列表 -->
@@ -375,6 +376,22 @@
               <option value="zip">LaTeX 源码包（.tex + 图片，.zip）</option>
             </select>
             <small class="export-runtime-hint" id="word-export-hint" hidden>Word 保留可编辑内容并由 Word/WPS 自行重排；底色与现有 WIMath 标志仅用于 PDF/TeX。</small>
+          </label>
+          <label>中文字体
+            <select name="cjk_font" id="export-cjk-font">
+              {% for fid, label in export_fonts.cjk %}
+              <option value="{{ fid }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+            <small class="export-font-preview" id="cjk-font-preview" title="实际字体会在导出 PDF/TeX 时应用">数学试题：函数与导数 0123</small>
+          </label>
+          <label>英文字体
+            <select name="latin_font" id="export-latin-font">
+              {% for fid, label in export_fonts.latin %}
+              <option value="{{ fid }}">{{ label }}</option>
+              {% endfor %}
+            </select>
+            <small class="export-font-preview" id="latin-font-preview" title="影响正文西文与数字；数学公式字体不变">The quick brown fox jumps 0123</small>
           </label>
           <label>试卷标题
             <input type="text" name="title" value="试卷" class="input">
@@ -1877,6 +1894,26 @@ tagCloud?.addEventListener('click', async event => {
     flashToast(error.message, 'err');
   }
 });
+
+// 导出字体预览：下拉直接作用到预览行的 font-family（浏览器用本机同名系统
+// 字体渲染；FandolSong 等 TeX 专属字体在本机无系统字形时回退衬线近似）。
+const cjkFontSel = document.getElementById('export-cjk-font');
+const latinFontSel = document.getElementById('export-latin-font');
+const cjkFontPreview = document.getElementById('cjk-font-preview');
+const latinFontPreview = document.getElementById('latin-font-preview');
+function syncExportFontPreviews() {
+  if (cjkFontPreview) {
+    cjkFontPreview.style.fontFamily =
+      `"${cjkFontSel?.value || 'Noto Sans SC'}", "Microsoft YaHei", serif`;
+  }
+  if (latinFontPreview) {
+    latinFontPreview.style.fontFamily =
+      `"${latinFontSel?.value || 'Latin Modern Roman'}", "Times New Roman", serif`;
+  }
+}
+cjkFontSel?.addEventListener('change', syncExportFontPreviews);
+latinFontSel?.addEventListener('change', syncExportFontPreviews);
+syncExportFontPreviews();
 
 // 导出模式切换：讲义模式显示「知识要点」文本域 + 每题「独占整页」勾选框；
 // 标准试卷形式显示保密说明/卷首说明/分值说明面板

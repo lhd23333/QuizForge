@@ -87,6 +87,20 @@ def _number_starts(lines: list[str], fenced: list[bool]) -> list[int]:
     return best
 
 
+def question_head_lines(lines: list[str]) -> set[int]:
+    """返回"题界候选"的行号集合（围栏外、题号成递增序列）。
+
+    与 split_questions 同一套判据（_fence_mask + _number_starts），给好资料的
+    "正文/题目/解析"流式分块用——切题链路与分块链路对"什么算题号"必须同一定义，
+    否则同一份文本在两处会切出不同结构。注意这只是**候选**：正文里的编号列表
+    （"1. 定义 2. 定理"）同样满足递增链，调用方还要用题干特征做第二道过滤。
+    """
+    if not lines:
+        return set()
+    fenced = _fence_mask(lines)
+    return set(_number_starts(lines, fenced))
+
+
 def _lead_is_question(lead: str) -> bool:
     """第一个题界之前那段文字是不是一道（没编号的）题，而非卷名/小节标题。
 
@@ -176,6 +190,16 @@ _SOL_HEAD_RE = re.compile(
     r"|解\s*[:：]|答\s*[:：]|证明\s*[:：])")
 _SOL_INLINE_RE = re.compile(
     r"(?:【\s*(?:参考)?(?:答案|解析)\s*】|(?:参考)?答案\s*[:：]|解析\s*[:：])")
+
+
+def is_solution_head(line: str) -> bool:
+    """该行是否是解析区起始（行首档标记，口径同 split_solution）。
+
+    逐行判定与整段 split_solution 的行首档完全一致：`【解析】` `解：` `答：`
+    `证明：` 等独占行首的标记。行内档刻意不收——`解不等式：` 这类题干写法
+    会被误切。
+    """
+    return bool(_SOL_HEAD_RE.match(str(line or "")))
 
 # 独占一行的"参考答案"大标题。切块是按题号切的，这一行落在**上一题**的块尾
 # （它前面没有新题号），不剥掉的话最后一道题的题干会拖着个"参考答案"。

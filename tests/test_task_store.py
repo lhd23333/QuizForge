@@ -86,6 +86,26 @@ class LibraryTaskStoreTests(unittest.TestCase):
         self.assertEqual(removed, [{"status": "interrupted", "path": "old.pdf"}])
         self.assertEqual(task_store.load("library"), [])
 
+    def test_purge_expired_keeps_unresolved_source_tasks(self):
+        """等待用户处理的来源任务不随 7 天过期清理：记录一旦消失，同内容的
+        源文件会被扫描器当成新文件自动重放（可能重复消耗 OCR 额度）。"""
+        old = time.time() - 9 * 86400
+        snapshots = task_store._empty()
+        snapshots["source"]["s-failed"] = {
+            "updated_at": old,
+            "payload": {"status": "failed", "source_key": "k1"},
+        }
+        snapshots["source"]["s-done"] = {
+            "updated_at": old,
+            "payload": {"status": "committed", "source_key": "k2"},
+        }
+        task_store._write_unlocked(snapshots)
+
+        removed = task_store.purge_expired(days=7)
+        self.assertEqual([row["status"] for row in removed], ["committed"])
+        self.assertEqual([tid for tid, _ in task_store.load("source")],
+                         ["s-failed"])
+
     def test_mark_interrupted_validates_arguments(self):
         with self.assertRaises(ValueError):
             task_store.mark_interrupted("unknown", {"running"}, "x")

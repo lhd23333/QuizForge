@@ -2958,12 +2958,10 @@ _ORPHAN_NOT_SCRIPT_RE = re.compile(r"\^\s*\{\s*\\not\s*\}")
 # 强调标记。只认连续三个及以上，避免碰到 ``a_1`` 这类正常下标。
 _FILL_BLANK_RE = re.compile(r"(?:\\_\s*){2,}\\_|_{3,}")
 _FILL_BLANK_TEX = r"\underline{\hspace{2cm}}"
-# 行内 `$` 与内容之间的边界空白（见 _sanitize_export_text）：`f  $` / `$ f` 这类
-# 写歪的边界让 pandoc 不认开/闭合（要求右侧/左侧紧贴非空白），该 `$` 落单被转义
-# 成 `\$`，配对崩坏后 xelatex 报 `! Missing $ inserted.` 令整卷导出失败。
-# `$$`（display 允许两侧空白）与空公式 `$ $` 不动。
-_DOLLAR_TRAIL_GAP_RE = re.compile(r"(?<=[^\s$])[ \t\n]+\$(?!\$)")
-_DOLLAR_LEAD_GAP_RE = re.compile(r"(?<!\$)\$(?!\$)[ \t\n]+(?=[^\s$])")
+# 行内 `$` 的边界归一（实现见 _normalize_inline_math_boundaries）：`f  $` / `$ f`
+# 这类写歪的边界、以及闭 `$` 右侧紧跟数字，都会让 pandoc 不把这一对当数学，转而
+# 输出 `\$\displaystyle A.\$60` 这种转义串，xelatex 随即报
+# `! Missing $ inserted.` 令整卷导出失败。
 _SOLUTION_LEADING_LABEL_RE = re.compile(
     r"\A\s*(?:#{1,6}\s*)?(?:【\s*解析\s*】|解析\s*[：:])\s*",
     re.I,
@@ -2980,6 +2978,41 @@ def _strip_solution_leading_label(text: str) -> str:
     return _SOLUTION_LEADING_LABEL_RE.sub("", str(text or ""), count=1)
 
 
+def _normalize_inline_math_boundaries(text: str) -> str:
+    r"""归一化行内 ``$...$`` 的边界，让 Pandoc 稳定认出这是数学区。
+
+    Pandoc 认一对行内数学要同时满足：开 ``$`` 右侧紧贴非空白、闭 ``$`` 左侧紧贴
+    非空白、闭 ``$`` 右侧不是数字。任一条不满足，这一对 ``$`` 会被当普通文本转义
+    成 ``\$``，正文里就出现 ``\$\displaystyle A.\$60``，xelatex 接着报
+    ``! Missing $ inserted.`` 让整卷导出失败（2026-10-04 实测：高考真题批量导出
+    第 10033 题，2025 年北京卷第 14 题）。
+
+    两类历史坑，都在这里一次解决：
+    - ``$\displaystyle f  $`` 边界写歪 → 收掉公式区内部的收尾空白；
+    - ``$\displaystyle A.$60`` / ``$\neq$0`` 闭 ``$`` 撞上数字 → 补一个空格。
+      旧实现拿 ``(?<!\$)\$(?!\$)[ \t\n]+`` 对全文裸 ``$`` 下手，分不清开闭，
+      把闭 ``$`` 后面的空格也一起删了，正是上面那个样例的根因。
+
+    ``$$…$$`` 不受这两条约束（实测 ``$$x$$5`` 照常出 display 数学），空公式
+    ``$ $`` 也不动；只在 ``_MATH_SPLIT_RE`` 认出的行内数学区上动手，不碰区外文本。
+    """
+    if "$" not in text:
+        return text
+    parts = _MATH_SPLIT_RE.split(text)
+    for i in range(1, len(parts), 2):
+        span = parts[i]
+        if span.startswith("$$"):
+            continue
+        inner = span[1:-1].strip(" \t\r\n")
+        parts[i] = f"${inner}$" if inner else span
+        tail = parts[i + 1]
+        # 注意 tail[:1] 可能是空串，而 '' in "0123456789" 为真（子串判定），
+        # 故必须先判非空，否则每次都会给行尾凭空补一个空格。
+        if tail[:1] and tail[0] in "0123456789":
+            parts[i + 1] = " " + tail
+    return "".join(parts)
+
+
 def _sanitize_export_text(text: str) -> str:
     """清掉不可见 OCR 控制码及无语义私用括号碎片，不修改 vault 文件。"""
     if not text:
@@ -2993,11 +3026,10 @@ def _sanitize_export_text(text: str) -> str:
     # 新的行内数学式，避免 U+0338 落进普通文本字体而消失。
     # 闭合美元后留空格：Pandoc 要求行内数学的闭合 `$` 后不能紧跟数字，`$\neq$0`
     # 会被误判成普通文本；写成 `$\neq$ 0` 才会稳定生成 `\(\neq\) 0`。
-    # 行内 `$` 边界空白归一（`$\displaystyle f  $` → `$\displaystyle f$`）：
-    # 写歪的边界让该 `$` 落单、被转义成 `\$`，配对崩坏后整卷 xelatex 失败
-    # （2026-10-04 审查实测样例：希望联盟夏令营 2024-2 第 3 题）。
-    cleaned = _DOLLAR_TRAIL_GAP_RE.sub("$", cleaned)
-    cleaned = _DOLLAR_LEAD_GAP_RE.sub("$", cleaned)
+    # 行内 `$` 边界归一（`$\displaystyle f  $` → `$\displaystyle f$`）：写歪的边界
+    # 让该 `$` 落单、被转义成 `\$`，配对崩坏后整卷 xelatex 失败（2026-10-04 审查
+    # 实测样例：希望联盟夏令营 2024-2 第 3 题）。
+    cleaned = _normalize_inline_math_boundaries(cleaned)
     return cleaned.replace("$\u0338=", r"$ $\neq$ ")
 
 
@@ -3132,6 +3164,17 @@ _MISSING_FRAC_ARG_RE = re.compile(
 # `$$\left|PF_1\right$$`。TeX 会因此在这一题直接中断整份导出；补不可见定界符
 # `.` 不凭空添加数学内容，只让已识别到的左定界符可以正常闭合。
 _MISSING_RIGHT_DELIM_RE = re.compile(r"\\right(?=\s*\$)")
+# `\frac`/`\dfrac`/`\tfrac` 的无花括号参数只吃**一个记号**。紧跟其后若是
+# `\mathrm` 这类要吃参数的字体命令，TeX 会把命令本身当成第二个参数，剩下
+# `{e}` 逃进数学列表 → `Argument of \math@egroup has an extra }` 之后连环报错
+# （题库实测 2 道：2018 全国 I 卷（文）第 21 题、2019 天津卷（文）第 20 题，
+# 源数据写成 `\dfrac1\mathrm{e}`）。补全花括号不改变任何字符的可见含义，只是
+# 让它成为 TeX 认得的 `\dfrac{1}{\mathrm{e}}`。
+_BARE_FRAC_FONT_RE = re.compile(
+    r"\\(?P<kind>[dtc]?frac)\s*(?P<num>\d|[A-Za-z])"
+    r"\\(?P<font>mathrm|mathbf|mathit|mathsf|mathtt|mathcal|mathfrak|mathbb|boldsymbol)"
+    r"\s*(?P<arg>\{[^{}]*\})"
+)
 
 
 def _repair_duplicate_math_scripts(text: str) -> str:
@@ -3156,6 +3199,11 @@ def _repair_incomplete_math_commands(text: str) -> str:
         return text
     if "frac" in text:
         text = _MISSING_FRAC_ARG_RE.sub(r"\g<frac>{}", text)
+        text = _BARE_FRAC_FONT_RE.sub(
+            lambda m: "\\%s{%s}{\\%s%s}" % (m.group("kind"), m.group("num"),
+                                            m.group("font"), m.group("arg")),
+            text,
+        )
     if "\\right" in text:
         text = _MISSING_RIGHT_DELIM_RE.sub(r"\\right.", text)
     return text
@@ -3526,12 +3574,16 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
         7. _repair_duplicate_math_scripts 修复数学区的连续同类脚标；
         8. _repair_incomplete_math_commands 给数学区末尾缺分母的 frac 补空参数；
            两者都只改本次导出的内存副本，不改题库文件，也不丢 OCR 识别出的内容；
-        9. _stash_tables 把内联 HTML <table> 换成 base64 令牌 —— 必须在
+        9. _normalize_inline_math_boundaries 复核行内 `$` 边界 —— 上面几步（填空线
+           转成行内公式、文本区符号包成行内数学）都可能新造出「闭 `$`
+           紧跟数字」的非法边界，这里统一收口，保证交给 pandoc 的每一对行内数学
+           都满足它的三条边界要求；
+        10. _stash_tables 把内联 HTML <table> 换成 base64 令牌 —— 必须在
            _escape_stray_backslash 之前，否则表格里的反斜杠会先被双写成字面反斜杠，
            而表格单元格的转义由 _cell_tex/_tex_text 自己负责（两套转义会打架）；
            令牌本身只含 A-Za-z0-9-_=，不含反斜杠，后一步碰不到它。
-        10. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
-        11. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
+        11. _escape_stray_backslash 处理正文里剩下的孤立反斜杠。
+        12. _rewrite 原位留 QFIGSLOT 哨兵，图片文件名单独返回。
         """
         repaired = _merge_inline_math_newlines(text)
         repaired = _sanitize_export_text(repaired)
@@ -3542,6 +3594,7 @@ def _stage_images(questions: list[dict], stem: str, work_dir: Path) -> list[dict
         repaired = _repair_invalid_math_font_wrappers(repaired)
         repaired = _repair_duplicate_math_scripts(repaired)
         repaired = _repair_incomplete_math_commands(repaired)
+        repaired = _normalize_inline_math_boundaries(repaired)
         return _rewrite(_escape_stray_backslash(_stash_tables(repaired)))
 
     staged = []
@@ -3729,7 +3782,8 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     #    第一遍已生成 PDF 后因残留告警中断。
     if template_path is not None:
         try:
-            tex_sandbox.compile_xelatex(tex_path, passes=2, timeout=120)
+            tex_sandbox.compile_xelatex(tex_path, passes=2,
+                                        timeout=_XELATEX_TIMEOUT_SECONDS)
         except tex_sandbox.TexSandboxError as exc:
             raise ExportError(f"[xelatex 沙箱] {exc}") from exc
     else:
@@ -3926,12 +3980,24 @@ def _xelatex_fatal_log(work_dir: Path) -> str:
     return ""
 
 
+# 单步外部命令的超时（秒）—— 是「防止挂死」的兜底，不是性能预算。
+# 120 秒对一节课的小卷够用，但整库导出必然撞死在它上面：16282 题 ≈ 2400 页的
+# 一份卷子，xelatex 单遍实测 172~200 秒（2026-10-05 高考真题全量导出实测），
+# 120 秒会在第二遍中途被杀，用户只拿到第一遍的半成品或直接报「xelatex 超时」。
+# 故按大导出重新取值：pandoc 保持 120 秒（9.8MB 实测约 20 秒），xelatex 放宽到
+# 900 秒（约 4.5 倍余量）。
+_PANDOC_TIMEOUT_SECONDS = 120
+_XELATEX_TIMEOUT_SECONDS = 900
+
+
 def _run(cmd: list[str], cwd: Path, step: str):
     """跑外部命令，失败抛 ExportError（参数列表形式，避免注入）。"""
+    timeout = (_XELATEX_TIMEOUT_SECONDS if step == "xelatex"
+               else _PANDOC_TIMEOUT_SECONDS)
     try:
         proc = subprocess.run(
             cmd, cwd=str(cwd), capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=120,
+            encoding="utf-8", errors="replace", timeout=timeout,
         )
     except FileNotFoundError:
         if step == "pandoc":
@@ -3945,7 +4011,7 @@ def _run(cmd: list[str], cwd: Path, step: str):
             )
         raise ExportError(f"[{step}] 找不到可执行文件：{cmd[0]}")
     except subprocess.TimeoutExpired:
-        raise ExportError(f"[{step}] 超时（>120s）")
+        raise ExportError(f"[{step}] 超时（>{timeout}s）")
 
     if proc.returncode != 0:
         tail = (proc.stdout or "")[-800:] + (proc.stderr or "")[-800:]

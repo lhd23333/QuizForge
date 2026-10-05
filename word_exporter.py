@@ -268,16 +268,37 @@ def _standard_exam_front(title: str, std_opts: dict) -> list[str]:
     return blocks
 
 
+def _output_numbering(questions: list[dict], mode: str) -> list[tuple[int, dict]]:
+    """按实际【输出顺序】给题目编题号，返回 [(题号, question), ...]。
+
+    2026-10-04 P1-7：分桶模式（exam/exam_std/practice）按题型重排后输出，题号必须
+    跟着输出顺序走——否则出现「2. 单选题 / 1. 解答题」，且「答案与解析」区仍按原始
+    顺序编号、与题面区互相错位。非分桶模式输出顺序即原始顺序，行为不变。
+    """
+    if mode not in _GROUPED_MODES:
+        return list(enumerate(questions, start=1))
+    numbered: list[tuple[int, dict]] = []
+    number = 1
+    for _name, type_questions in _ordered_types(questions):
+        for question in type_questions:
+            numbered.append((number, question))
+            number += 1
+    return numbered
+
+
 def _render_questions(questions: list[dict], mode: str, solution_mode: str,
                       std_opts: dict, fullpage_ids=None) -> list[str]:
     blocks: list[str] = []
-    numbered = list(enumerate(questions, start=1))
+    numbered = _output_numbering(questions, mode)
     fullpage_ids = {str(value) for value in (fullpage_ids or [])}
     if mode not in _GROUPED_MODES:
         for index, (number, question) in enumerate(numbered):
-            is_fullpage = (mode == "handout"
+            # 2026-10-04 P1-7：note 与 handout 一样支持「整页」标记——PDF 侧 note
+            # 走 _paginate_two，fullpage_ids 生效；Word 此前只认 handout，同一标记
+            # 在两个介质里行为不一致。
+            is_fullpage = (mode in {"handout", "note"}
                            and str(question.get("id")) in fullpage_ids)
-            previous_fullpage = (index > 0 and mode == "handout"
+            previous_fullpage = (index > 0 and mode in {"handout", "note"}
                                  and str(numbered[index - 1][1].get("id"))
                                  in fullpage_ids)
             if is_fullpage and index > 0 and not previous_fullpage:
@@ -304,9 +325,14 @@ def _render_questions(questions: list[dict], mode: str, solution_mode: str,
     return blocks
 
 
-def _render_separate_solutions(questions: list[dict]) -> list[str]:
+def _render_separate_solutions(questions: list[dict], mode: str) -> list[str]:
+    """答案与解析区：题号必须与题面区共用 _output_numbering（P1-7）。
+
+    分桶模式下题面按题型重排，若解析区仍按原始顺序从 1 编号，两个区的题号会
+    整体错位（例如题面「2. 单选题」的解析被标成 1）。
+    """
     blocks = [_styled("QuestionType", "答案与解析")]
-    for number, question in enumerate(questions, start=1):
+    for number, question in _output_numbering(questions, mode):
         solution = str(question.get("solution") or "").strip() or "（无解析）"
         # fenced div 必须独占块级位置；拼到列表项同行会被 Pandoc 当普通文本输出。
         blocks.append(_styled(
@@ -368,7 +394,7 @@ def build_word_plan(questions, *, title, mode, keypoints="", fullpage_ids=None,
         marker = "QF_SECTION_SOLUTIONS"
         sections.append(SectionSpec(marker, start="newPage"))
         blocks.append(_marker(marker))
-        blocks.extend(_render_separate_solutions(questions))
+        blocks.extend(_render_separate_solutions(display_questions, mode))
 
     return WordPlan(
         markdown="\n\n".join(block for block in blocks if block).rstrip() + "\n",
@@ -424,8 +450,14 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "docx",
            mode: str = "list", keypoints: str = "", fullpage_ids=None,
            header_footer: dict | None = None, solution_mode: str = "none",
            std_opts: dict | None = None, paper_tone: str = "white",
-           wimath_logo: bool = False, bank_subject: str = "math") -> Path:
-    """生成可继续编辑的 DOCX，失败不暴露半成品。"""
+           wimath_logo: bool = False, bank_subject: str = "math",
+           cjk_font: str = "", latin_font: str = "") -> Path:
+    """生成可继续编辑的 DOCX，失败不暴露半成品。
+
+    cjk_font / latin_font 仅为与 /export 路由统一传参而接收——字体选择只作用于
+    PDF/TeX，Word 版式字体由参考模板 word-reference.docx 控制，此处忽略。
+    （2026-10-04 前缺少这两个参数：/export 无条件传参 → TypeError → HTTP 500。）
+    """
     if fmt != "docx":
         raise ExportError("Word 导出器只接受 docx 格式")
     if paper_tone not in ("", "white", None):

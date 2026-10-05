@@ -66,12 +66,15 @@ class SlidesExportTests(unittest.TestCase):
                         md.index(r"\end{minipage}\par"))
 
     def test_template_raises_slide_image_height_cap(self):
+        # 2026-10-04 P1-15：限高值收敛到模板顶部「图片高度上限全景」的命名宏，
+        # slides 文档段只引用 \qhcapslides；数值断言的归属随之转移到宏定义处。
         template = exporter.config.TEX_TEMPLATE.read_text(encoding="utf-8")
         slides_document = template.split(r"\begin{document}", 1)[1]
         slides_document = slides_document.split("$endif$", 1)[0]
 
-        self.assertIn(r"\setlength{\qfigmaxh}{0.62\textheight}",
+        self.assertIn(r"\setlength{\qfigmaxh}{\qhcapslides\textheight}",
                       slides_document)
+        self.assertIn(r"\def\qhcapslides{0.62}", template)
 
     def test_template_supports_math_in_markdown_heading(self):
         template = exporter.config.TEX_TEMPLATE.read_text(encoding="utf-8")
@@ -165,6 +168,20 @@ class SlidesExportTests(unittest.TestCase):
         repaired = exporter._repair_incomplete_math_commands(source)
 
         self.assertIn(r"\left| P F_1 \right.", repaired)
+
+    def test_bare_frac_first_argument_before_font_command_gets_braces(self):
+        # 源数据里的 `\dfrac1\mathrm{e}` 会让 TeX 把 \mathrm 当成第二个参数，
+        # 之后连环报 Argument of \math@egroup has an extra }。
+        source = "若 $\\displaystyle 0<a<\\dfrac1\\mathrm{e}$，且 $\\displaystyle " \
+                 "a\\ge\\dfrac1\\mathrm{e}$"
+
+        repaired = exporter._repair_incomplete_math_commands(source)
+
+        self.assertEqual(repaired.count(r"\dfrac{1}{\mathrm{e}}"), 2)
+        self.assertNotIn(r"\dfrac1\mathrm", repaired)
+        # 合法的 TeX 简写不能被改写。
+        keep = "$\\displaystyle \\dfrac12$ 与 $\\displaystyle \\frac{1}{2}$"
+        self.assertEqual(exporter._repair_incomplete_math_commands(keep), keep)
 
     def test_unicode_math_symbols_become_latex_and_ocr_junk_is_removed(self):
         source = "\x01条件 $α∈A，θ⩾π，①．f′′$\uf8f3，且 $a$\u0338=0"

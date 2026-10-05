@@ -29,6 +29,14 @@ _lock = threading.Lock()
 KINDS = ("job", "batch", "library", "source")
 _KINDS = KINDS
 
+# 来源监听里这些状态属于"等待用户处理"或"防重放指纹载体"。任务记录一旦被
+# 7 天清理掉，输入目录里内容未变的源文件会被扫描器当成新文件自动重放（可能
+# 重复消耗 OCR 额度），而我们绝不允许自动重放。dismissed（用户已忽略的失败
+# 记录）同样必须留：它已经不计入红心，但删了记录指纹就没了。记录保留到用户
+# 处理（重试成 committed 后按普通规则过期），代价只是几十字节的常驻条目。
+_SOURCE_UNRESOLVED = frozenset({"queued", "converting", "validating",
+                                "failed", "interrupted", "dismissed"})
+
 
 def _empty() -> dict:
     return {kind: {} for kind in _KINDS}
@@ -216,6 +224,11 @@ def purge_expired(days: int = 7) -> list[dict]:
                     expired = True
                 if not expired:
                     continue
+                if kind == "source":
+                    payload = item.get("payload") if isinstance(item, dict) else None
+                    if isinstance(payload, dict) and str(
+                            payload.get("status") or "") in _SOURCE_UNRESOLVED:
+                        continue
                 payload = item.get("payload") if isinstance(item, dict) else None
                 if isinstance(payload, dict):
                     removed.append(payload)

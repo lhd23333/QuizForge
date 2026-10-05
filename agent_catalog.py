@@ -1438,8 +1438,12 @@ def _validate_preference(key: Any, value: Any) -> tuple[str, Any]:
         return name, _validate_workdir(value)
     if name == "ocr_backend":
         backend = _text(value, "OCR 后端", limit=40, required=True).casefold()
-        if backend not in {"mineru", "doc2x", "local", "none"}:
-            raise CatalogError("OCR 后端必须是 mineru、doc2x、local 或 none", code="invalid_value")
+        # "local" 与转换层的规范名 "mineru_local" 是同一后端；设置页历史上用
+        # "local"，统一存规范名，读取方（normalize_ocr_backend）另有别名兜底。
+        if backend == "local":
+            backend = "mineru_local"
+        if backend not in {"mineru", "doc2x", "mineru_local", "none"}:
+            raise CatalogError("OCR 后端必须是 mineru、doc2x、mineru_local 或 none", code="invalid_value")
         return name, backend
     if name in {"template_id", "default_template_id"}:
         if value in (None, ""):
@@ -1799,6 +1803,17 @@ def preferences_endpoint():
         return jsonify(ok=True, preferences=update_preferences(payload))
     except CatalogError as exc:
         return _error(exc)
+
+
+@bp.route("/api/agent/mineru-local/status")
+def mineru_local_status_endpoint():
+    """本地 MinerU 服务可用性探测（识别后端下拉的动态选项用，见 agent.js）。
+
+    只读探测、不抛错；前端在渲染暂存卡时调用它，决定「本地 MinerU」选项
+    是否可选（未启动时禁用并提示启动命令）。
+    """
+    import mineru_local
+    return jsonify(ok=True, **mineru_local.probe_server())
 
 
 @bp.route("/api/agent/preferences/<key>", methods=["GET", "PUT", "PATCH", "DELETE"])

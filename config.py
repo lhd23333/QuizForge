@@ -154,6 +154,12 @@ WIMATH_LOGO_PDF = (
     _WIMATH_PACKAGED_LOGO if _WIMATH_PACKAGED_LOGO.is_file() else _WIMATH_BRAND_LOGO
 )
 
+# 作答空间参数覆写（exporter._answer_space 读取，2026-10-04 P1-10）。
+# 形如 {"practice": {"base": 4.0}, "solve": {"max": 5.0}}：按 scope 做字段子集
+# 合并，缺省即 exporter 内置默认表（默认值=历史视觉）。设置面板接入前后均可由
+# 测试/脚本注入；字段含义见 exporter._ANSWER_SPACE_DEFAULT。
+ANSWER_SPACE = {}
+
 def _tool_path(env_name: str, command: str, bundled: list[Path],
                installed: list[Path]) -> str:
     """按“显式覆盖 → 随软件附带 → PATH → 常见安装目录”寻找外部工具。"""

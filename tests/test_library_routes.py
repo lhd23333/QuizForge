@@ -621,6 +621,42 @@ class LibraryRouteTests(unittest.TestCase):
                 self.assertEqual(bool(status["batches"]), has_batch)
                 self.assertEqual(bool(status["library_tasks"]), has_library)
 
+    def test_nav_count_endpoint_matches_badge_including_source_tasks(self):
+        """/nav/count 是徽标的实时通道：数值必须与 context_processor 同口径
+        （批次 + 资料库任务 + 未处理的监控任务），不能各算各的。"""
+        active_batch = {
+            "status": "converting", "created_at": 1,
+            "groups": [{"status": "pending", "reviewed": None}],
+        }
+        with (mock.patch.dict(app_module._batch_jobs,
+                              {"b1": active_batch}, clear=True),
+              mock.patch.dict(app_module._library_tasks, {}, clear=True),
+              mock.patch.object(app_module._source_ingest_service,
+                                "unfinished_count", return_value=2)):
+            data = self.client.get("/nav/count").get_json()
+            badge = app_module._inject_nav_badge()["nav_batch_count"]
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["nav_batch_count"], 3)
+        self.assertEqual(data["nav_batch_count"], badge)
+
+    def test_source_dismiss_route_wires_service_and_reports_errors(self):
+        payload = {"task_id": "t1", "status": "dismissed"}
+        with mock.patch.object(app_module._source_ingest_service, "dismiss",
+                               return_value=payload) as dismiss:
+            res = self.client.post("/api/source-ingest/task/t1/dismiss",
+                                   headers=self.headers)
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.get_json()["task"]["status"], "dismissed")
+        dismiss.assert_called_once_with("t1")
+        with mock.patch.object(
+                app_module._source_ingest_service, "dismiss",
+                side_effect=ValueError("仅可忽略失败或已中断的任务记录")):
+            res = self.client.post("/api/source-ingest/task/t2/dismiss",
+                                   headers=self.headers)
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.get_json()["error"],
+                         "仅可忽略失败或已中断的任务记录")
+
     def test_library_task_snapshot_failure_rolls_back_memory(self):
         task_id = "snapshot-failure-task"
         fake_uuid = mock.Mock(hex=task_id)

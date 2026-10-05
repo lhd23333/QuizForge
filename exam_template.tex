@@ -10,15 +10,46 @@
 % 但部分 Electron/PDF.js 阅读器会把中文渲染成空白。所有导出模式统一优先改用带完整
 % Unicode 映射的 Noto Sans SC；Windows 没装 Noto 时回落到系统自带的微软雅黑。
 % 两者都不存在时保留 ctex 已加载的 Fandol，至少不让导出直接失败。
+$if(cjk_font)$
+% 导出面板显式选定的中文字体（pandoc -V cjk_font，值经后端白名单校验）。
+% 字体被卸载等边缘情况：探测失败即留空，不报错、不中断导出。
+\IfFontExistsTF{$cjk_font$}{%
+  \IfFontExistsTF{$cjk_font$ Bold}{%
+    \setCJKmainfont{$cjk_font$}[BoldFont={$cjk_font$ Bold}]%
+    \setCJKsansfont{$cjk_font$}[BoldFont={$cjk_font$ Bold}]%
+  }{%
+    \setCJKmainfont{$cjk_font$}%
+    \setCJKsansfont{$cjk_font$}%
+  }%
+}{}%
+$else$
 \IfFontExistsTF{Noto Sans SC}{%
-  \setCJKmainfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
-  \setCJKsansfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+  \IfFontExistsTF{Noto Sans SC Bold}{%
+    \setCJKmainfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+    \setCJKsansfont{Noto Sans SC}[BoldFont={Noto Sans SC Bold}]%
+  }{%
+    % 「家族内含 Bold」的安装形态（可变字体/单文件多字重，Windows 字体库里
+    % 只有 "Noto Sans SC" 一条）：独立 Bold 名不存在，显式指定会把 XeTeX
+    % 直接打崩（fontspec Error: font "Noto Sans SC Bold" cannot be found
+    % → No pages of output；2026-10-04 真实导出故障）。此时省略 BoldFont，
+    % 让 fontspec 按「家族+字重」自行解析；解析不到也只会警告退化，不中断。
+    \setCJKmainfont{Noto Sans SC}%
+    \setCJKsansfont{Noto Sans SC}%
+  }%
 }{%
   \IfFontExistsTF{Microsoft YaHei}{%
     \setCJKmainfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
     \setCJKsansfont{Microsoft YaHei}[BoldFont={Microsoft YaHei Bold}]%
   }{}%
 }
+$endif$
+$if(latin_font)$
+% 正文西文字体（正文西文与数字；数学区字体不受影响）
+\IfFontExistsTF{$latin_font$}{%
+  \setmainfont{$latin_font$}%
+  \setsansfont{$latin_font$}%
+}{}%
+$endif$
 % 罗马数字、圈号及部分 Unicode 数学符号默认会被 xeCJK 判给西文字体；Latin Modern
 % 不含这些字形，只报 Missing character 而继续出 PDF，结果是正文悄悄少字。明确归入
 % CJK 字符类，让文本区的这些字符走 Noto/微软雅黑；数学区另由 exporter 转成
@@ -77,6 +108,20 @@
   \fi%
 }
 \makeatother
+% —— 图片高度上限全景（2026-10-04 收敛：模板侧高度值只在此定义）——
+% 比例类（×\textheight，纯数字宏供 \setlength 拼接）：
+%   \qhcapdefault  A4 原位图默认（note/list/exam/exam_std/handout，\qfigmaxh 默认值）
+%   \qhcappractice practice 双栏与讲义 fragment（\qfigmaxh 局部覆盖）
+%   \qhcapslides   slides 帧（\qfigmaxh 局部覆盖）
+% 绝对类（长度寄存器，cm；旧幻灯片宏与四图配选项格）：
+%   \qhcapfig  \qfig/\qfigwrap 上限   \qhcappair  \qpairitem 配图格上限
+% Python 侧对应：exporter._HALF_INLINE_HCAP(0.15)、_split_img_hcap(0.72 系数、
+% 封顶 0.6)、_PRACTICE_IMG_HCAP(0.22，与 \qhcappractice 同值，改动必须同步)。
+\def\qhcapdefault{0.4}
+\def\qhcappractice{0.22}
+\def\qhcapslides{0.62}
+\newlength{\qhcapfig}\setlength{\qhcapfig}{3cm}
+\newlength{\qhcappair}\setlength{\qhcappair}{3.5cm}
 % QuizForge 题目插图统一版式：整题后靠右单独成行、等比缩放、
 % 宽<=3.6cm 且 高<=3cm（keepaspectratio 保证哪边先顶到就按哪边缩，绝不拉伸变形）。
 % exporter._stage_images 把 ![](file) 改写为 \qfig{file} 前的 md 图片引用，
@@ -85,7 +130,7 @@
 \newcommand{\qfig}[2]{%
   \par\nobreak\vspace{0.3em}%
   \noindent\hfill\begin{minipage}{3.6cm}%
-    \centering\includegraphics[width=3.6cm,height=3cm,keepaspectratio]{#1}%
+    \centering\includegraphics[width=3.6cm,height=\qhcapfig,keepaspectratio]{#1}%
     \ifx\relax#2\relax\else\par\vspace{0.2em}{\footnotesize #2}\fi%
   \end{minipage}%
   \par\vspace{0.3em}%
@@ -97,7 +142,7 @@
 \newcommand{\qfigwrap}[2]{%
   \begin{wrapfigure}{r}{4cm}%
     \vspace{-\baselineskip}%
-    \centering\includegraphics[width=3.6cm,height=3cm,keepaspectratio]{#1}%
+    \centering\includegraphics[width=3.6cm,height=\qhcapfig,keepaspectratio]{#1}%
     \ifx\relax#2\relax\else\par\vspace{0.2em}{\footnotesize #2}\fi%
   \end{wrapfigure}%
 }
@@ -129,14 +174,16 @@
   \vskip\z@skip
   \endgroup
 }
-% 双栏刷题的大题按真实排版高度决定是否留在当前栏。环境先把“大题标题 + 题干 +
-% 公式/图片 + 作答区”排进 vbox；高度不超过当前页单栏容量时作为不可分盒放出，
-% multicol 会在当前栏余量不足时把整盒移到下一栏。极长题超过整栏时改用 \unvbox，
-% 允许 TeX 自然跨栏，避免把内容裁掉或制造 overfull。后续大题间的 \columnbreak 由
-% exporter 明确写入，因此每栏至多起始一道大题。
+% 双栏刷题的大题：先把“大题标题 + 题干 + 公式/图片 + 作答区”排进 vbox，再整体
+% \unvbox 放出。**不要再改回按高度二分的 \box（不可分盒）写法**：2026-10-05 用
+% 真实导出（16282 题、5116 道大题）全量复现——\box 与题间 \columnbreak 交互会让
+% multicol 输出例程从第 767 页起死循环（Output loop---100 consecutive dead
+% cycles，共 1416 次），box255 失去分割能力后每次 shipout 都超满 1.6 万 pt，
+% 整份文档报废。全部 \unvbox 后死循环归零；修复前后健康区（前 767 页）的 PDF
+% content stream 逐字节一致，证明 \unvbox 不改变能正常排版时的版面。后续大题间的
+% \columnbreak 由 exporter 明确写入，因此每栏至多起始一道大题；首道大题前不断栏，
+% 由 TeX 按栏余量自然决定接排还是断到下一栏。
 \newbox\qpracticesolvebox
-\newdimen\qpracticesolveheight
-\newdimen\qpracticecolumnheight
 \newenvironment{qpracticesolve}{%
   \par\penalty0
   \setbox\qpracticesolvebox=\vbox\bgroup
@@ -146,12 +193,7 @@
   \setlength{\parindent}{0pt}%
 }{%
   \par\egroup
-  \qpracticesolveheight=\dimexpr\ht\qpracticesolvebox+\dp\qpracticesolvebox\relax
-  \ifdim\qpracticesolveheight>\qpracticecolumnheight
-    \unvbox\qpracticesolvebox
-  \else
-    \box\qpracticesolvebox
-  \fi
+  \unvbox\qpracticesolvebox
   \par
 }
 \makeatother
@@ -160,7 +202,9 @@
 % 0.5\textheight，按全页上限排的原位图会直接撑破版面。group 结束自动恢复，
 % 故只有半页块受影响，其它模式的图片尺寸与改动前逐字一致。
 \newlength{\qfigmaxh}
-\setlength{\qfigmaxh}{0.4\textheight}
+% 默认值在 geometry 声明之后设置（见下方「\qfigmaxh 默认限高求值点」）：
+% 长度寄存器一次冻结，若在此处用 \textheight，拿到的是文档类默认版心
+% （ctexart 约 541pt）而非真实版心，原位图上限会偏小约 30%（2026-10-04 P1-6）。
 % 用户自定义排版的图片本体：仅负责按宽度占比缩放，左右对齐由 exporter 用
 % \hfill 在外层拼好（见 exporter._place_image），避免在 TeX 宏里做字符串比较分支。
 % 高度不设硬上限（keepaspectratio 保证不变形），但用 \qfigmaxh 兜底，
@@ -184,7 +228,7 @@
     \setlength{\parskip}{0pt}\vspace{0pt}%
     \begin{minipage}[t]{1.8em}\vspace{0pt}\raggedright #2\end{minipage}\hfill%
     \begin{minipage}[t]{\dimexpr\linewidth-2.2em\relax}\vspace{0pt}%
-      \centering\includegraphics[width=\linewidth,height=3.5cm,keepaspectratio]{#3}%
+      \centering\includegraphics[width=\linewidth,height=\qhcappair,keepaspectratio]{#3}%
       \ifx\relax#4\relax\else\par\vspace{0.2em}{\footnotesize #4}\fi%
     \end{minipage}%
   \end{minipage}%
@@ -195,6 +239,17 @@ $if(fragment)$
 % 只裁掉页外空白；dvisvgm 再把字体转成路径，因此网页看到的是 XeLaTeX 本身。
 \geometry{paperwidth=$fragment_width$,paperheight=500mm,left=0pt,right=0pt,
           top=0pt,bottom=0pt,headheight=0pt,headsep=0pt,footskip=0pt}
+% —— 与最终 PDF 图片限高同源（2026-10-04 P1-6）——
+% paperheight=500mm 只是给 tightpage 裁切留足的虚拟画布，其 \textheight 不是
+% 目标版面的真实版心；若沿用默认 0.4\textheight，题卡里的图会放大到约 200mm，
+% 远超最终 PDF（实测同图 1.7×）。这里按 A4 真实版心换算——数值须与上方各模式
+% geometry 声明同步：practice 版心 297-15.5-14.5=267mm，其余 297-50=247mm。
+\newlength{\qtargettextheight}
+$if(practice)$
+\setlength{\qtargettextheight}{267mm}
+$else$
+\setlength{\qtargettextheight}{247mm}
+$endif$
 \usepackage[active,tightpage]{preview}
 \setlength\PreviewBorder{0pt}
 $else$
@@ -211,6 +266,15 @@ $else$
 \geometry{a4paper, margin=2.5cm}
 $endif$
 $endif$
+$endif$
+
+% —— \qfigmaxh 默认限高求值点（2026-10-04 P1-6/P1-15）——
+% 必须位于 geometry 之后：fragment 用目标版面真实版心 \qtargettextheight，
+% 其余模式用刚生效的真实 \textheight（practice/slides 会在正文里按需覆盖）。
+$if(fragment)$
+\setlength{\qfigmaxh}{\qhcapdefault\qtargettextheight}
+$else$
+\setlength{\qfigmaxh}{\qhcapdefault\textheight}
 $endif$
 \usepackage{xcolor}
 % 所有导出模式共用的可选米黄纸色。是否启用由导出面板的 paper_cream 模板变量
@@ -235,11 +299,10 @@ $endif$
   \setlength{\columnsep}{0.75cm}%
   \setlength{\columnseprule}{0.35pt}%
   \setlength{\parskip}{0pt}%
-  \setlength{\qfigmaxh}{0.22\textheight}%
+  \setlength{\qfigmaxh}{\qhcappractice\textheight}%
   \settasks{label={}, label-width=0pt, label-offset=0pt, item-indent=0pt,
             after-item-skip=3pt plus 2pt minus 1pt}%
   \begin{multicols*}{2}\raggedcolumns
-  \global\qpracticecolumnheight=\csname @colroom\endcsname
 }
 \newcommand{\qpracticeend}{\end{multicols*}\endgroup}
 % 局部题卡编译需要双栏模式的字号、题间距与图片上限，但不能真的开启 multicol；
@@ -247,7 +310,9 @@ $endif$
 \newcommand{\qfragmentpracticebegin}{%
   \begingroup
   \setlength{\parskip}{0pt}%
-  \setlength{\qfigmaxh}{0.22\textheight}%
+  % fragment 画布的 \textheight 是虚拟值（见 geometry 段的同源说明），
+  % 用 \qtargettextheight（目标版面真实版心）。
+  \setlength{\qfigmaxh}{\qhcappractice\qtargettextheight}%
   \settasks{label={}, label-width=0pt, label-offset=0pt, item-indent=0pt,
             after-item-skip=3pt plus 2pt minus 1pt}%
 }
@@ -297,6 +362,7 @@ $endif$
 % 断页判定也在这里：槽位高度超过本页余量就 \clearpage。所以「填空题结束后余量
 % 够就放一道解答题、不够就另起一页顶头」不需要 Python 预先算页——那同样是算不准的。
 \newsavebox{\qslotbox}
+\newsavebox{\qslotsplit}   % 超长槽按页切出的临时段（见 \qslotclose）
 \newlength{\qslotnat}
 \newlength{\qslotgoal}
 \newlength{\qslotfree}
@@ -351,11 +417,19 @@ $endif$
   \fi
 }
 % #1 = 目标槽位占本页可用高度的比例（0.25 / 0.5 / 1）
+%
+% 收集为**可切的垂直材料**（vbox）而非 lrbox+minipage：minipage/lrbox 是
+% 不可断的整体盒，超长题只能画到纸外（2026-10-04 审查实测内容溢出到
+% y=-1599pt、无报错）；vbox 的段落可被 \qslotclose 用 \vsplit 按页切开。
+% 限宽三件套与 \qpracticesolve 环境同款；正常槽位的外观与 minipage 版等价
+% （同 \hsize、同字体、同 parskip）。
 \newcommand{\qslotopen}[1]{%
   \edef\qslotfrac{#1}%
-  \begin{lrbox}{\qslotbox}%
-  \begin{minipage}[t]{\linewidth}%
-  \setlength{\parskip}{0.4em}%
+  \setbox\qslotbox=\vbox\bgroup
+    \hsize=\linewidth
+    \linewidth=\hsize
+    \columnwidth=\hsize
+    \setlength{\parskip}{0.4em}%
 }
 % \vss 吸收槽内底部余白，内容顶对齐；\nointerlineskip 防止基线间距把两个
 % 半页槽的高度之和顶过 \textheight（那会把第二题挤到下一页）。
@@ -365,16 +439,35 @@ $endif$
   \par\nobreak
 }
 \newcommand{\qslotclose}{%
-  \end{minipage}%
-  \end{lrbox}%
+  \par\egroup
   \setlength{\qslotnat}{\dimexpr\ht\qslotbox+\dp\qslotbox\relax}%
   \qslotpageunit
   \qslotsetgoal
+  \ifqslotpagerel
+    \ifdim\qslotnat>\qslotunit
+      % 相对模式基准=本页余量：超基准未必超整页——换到新页按整页基准重排，
+      % 不提前独占（2026-10-04 审查实测：旧行为把它当「超整页」强制 clearpage，
+      % 首页稍长的题白白废掉半页纸）。真超整页（nat>\textheight）留给下方切割。
+      \ifdim\qslotnat>\textheight\else
+        \clearpage
+        \setlength{\qslotunit}{\textheight}%
+        \setlength{\qslotused}{0pt}%
+        \qslotsetgoal
+      \fi
+    \fi
+  \fi
   \ifdim\qslotnat>\qslotunit
-    % 连整页都装不下：原样放出，让 TeX 自行跨页断开（不套 \vbox，否则 overfull）。
-    % 排完强制换页——这种超长题按规则独占版面，下一题必须另起一页。
+    % 超过整页：把槽内容按页切开、逐段放出——vbox 的段落可用 \vsplit 在页间
+    % 断开（2026-10-04 审查：旧版 \usebox 放不可断整盒，实测内容溢出纸外
+    % 且无报错）。非末段满页后强制换页，超长题按规则独占版面。
     \ifdim\qslotused>0pt \clearpage \fi
-    \par\noindent\usebox{\qslotbox}\par
+    \loop
+      \setbox\qslotsplit=\vsplit\qslotbox to \textheight
+      \ifvoid\qslotsplit\else
+        \par\noindent\box\qslotsplit
+        \ifvoid\qslotbox\else\clearpage\fi
+      \fi
+    \ifvoid\qslotbox\else\repeat
     \clearpage
     \setlength{\qslotunit}{\textheight}%
     \setlength{\qslotused}{0pt}%
@@ -444,18 +537,38 @@ $if(hf_fr)$\fancyfoot[R]{$hf_fr$}$endif$
 
 $if(wimath_logo)$
 % 品牌标志使用正式矢量 PDF，不重绘、不变形。A4 放左上安全区，横版课件放左下；
+% 若该角落已有左页眉/左页脚文字（hf_hl/hf_fl），标志让位到对侧角落——practice
+% 与 slides 会在原位置与文字叠字（2026-10-04 审查实测）。
 % AddToShipoutPictureFG 无星号，故正文每一页与横版每一帧都会一致出现。
 \usepackage{eso-pic}
 $if(slides)$
+$if(hf_fl)$
+% eso-pic 无 AtPageLowerRight：LowerLeft 锚点 + 整页宽右对齐盒子实现右下角定位。
+\AddToShipoutPictureFG{%
+  \AtPageLowerLeft{\makebox[\paperwidth][r]{%
+    \raisebox{0.25cm}[0pt][0pt]{\includegraphics[width=2.3cm,keepaspectratio]{$wimath_logo$}}%
+    \hspace*{0.55cm}}}%
+}
+$else$
 \AddToShipoutPictureFG{%
   \AtPageLowerLeft{\raisebox{0.25cm}[0pt][0pt]{%
     \hspace*{0.55cm}\includegraphics[width=2.3cm,keepaspectratio]{$wimath_logo$}}}%
+}
+$endif$
+$else$
+$if(hf_hl)$
+% 同上：UpperLeft 锚点 + 整页宽右对齐盒子实现右上角定位。
+\AddToShipoutPictureFG{%
+  \AtPageUpperLeft{\makebox[\paperwidth][r]{%
+    \raisebox{-1.25cm}[0pt][0pt]{\includegraphics[width=2.4cm,keepaspectratio]{$wimath_logo$}}%
+    \hspace*{0.8cm}}}%
 }
 $else$
 \AddToShipoutPictureFG{%
   \AtPageUpperLeft{\raisebox{-1.25cm}[0pt][0pt]{%
     \hspace*{0.8cm}\includegraphics[width=2.4cm,keepaspectratio]{$wimath_logo$}}}%
 }
+$endif$
 $endif$
 $endif$
 
@@ -472,7 +585,7 @@ $if(slides)$
 % 横版页面更矮，旧的 0.4\textheight 会让方图/竖图先碰高度上限，题卡把宽度从
 % 35% 调到 70% 时图片本体几乎不变。提高横版专属上限后，宽度重新成为主要缩放量；
 % 极端竖图仍由 0.62\textheight 兜底，不会撑出页面。
-\setlength{\qfigmaxh}{0.62\textheight}
+\setlength{\qfigmaxh}{\qhcapslides\textheight}
 $endif$
 $if(fragment)$
 \begin{preview}

@@ -41,6 +41,12 @@
   const handles = [...document.querySelectorAll('[data-split-resizer]')];
   const states = new Map();
   const storagePrefix = 'quizforge.split.';
+  const collapseButtonsByClass = new Map(
+    collapseButtons.map(button => [button.dataset.sidebarCollapse, button])
+  );
+  // 往左拖过最小宽度后再多拖这么多像素才触发收起；回拉则要重新超过最小宽度才展开。
+  // 两个阈值刻意不同，形成回滞区，避免在阈值附近抖动时边栏反复收放。
+  const COLLAPSE_DRAG_OVERSHOOT = 60;
 
   function resolveState(handle) {
     const owner = handle.dataset.splitOwner === 'root'
@@ -66,6 +72,10 @@
       customized: false,
       // 面板可能由 hidden 父节点承载，等它真正可见后再恢复本地宽度。
       pendingStored: null,
+      // 支持“拖到收起”的侧栏才有这两个字段；Agent 面板等 resizer 不带 data-split-collapse。
+      collapseClass: handle.dataset.splitCollapse || '',
+      collapseButton: collapseButtonsByClass.get(handle.dataset.splitCollapse || '') || null,
+      dragCollapsed: false,
     };
   }
 
@@ -117,6 +127,21 @@
     }
   }
 
+  // 拖动过程中的“收起预览”：直接复用真正收起时的类，保证预览与松手后的版式逐像素一致；
+  // 额外加的 sidebar-collapse-dragging 只做一件事——让 resizer 保持可命中，pointer capture
+  // 不会因为折叠态把它 display:none 而中断。预览不写 localStorage，状态到松手才固化。
+  function previewCollapse(state, collapsed) {
+    if (!state.collapseClass || state.dragCollapsed === collapsed) return;
+    state.dragCollapsed = collapsed;
+    root.classList.toggle(state.collapseClass, collapsed);
+    root.classList.toggle('sidebar-collapse-dragging', collapsed);
+    if (state.collapseButton) syncCollapseButton(state.collapseButton, collapsed);
+  }
+
+  function collapseDragThreshold(state) {
+    return Math.max(24, state.min - COLLAPSE_DRAG_OVERSHOOT);
+  }
+
   handles.forEach(handle => {
     const state = resolveState(handle);
     if (!state) return;
@@ -129,6 +154,7 @@
       event.preventDefault();
       startX = event.clientX;
       startWidth = state.panel.getBoundingClientRect().width;
+      state.dragCollapsed = false;
       handle.setPointerCapture(event.pointerId);
       handle.classList.add('is-dragging');
       document.documentElement.classList.add('is-resizing-pane');
@@ -136,13 +162,37 @@
     handle.addEventListener('pointermove', event => {
       if (!handle.hasPointerCapture(event.pointerId)) return;
       const delta = event.clientX - startX;
-      apply(state, startWidth + (state.side === 'right' ? -delta : delta), false);
+      const raw = startWidth + (state.side === 'right' ? -delta : delta);
+      if (state.collapseClass) {
+        if (raw <= collapseDragThreshold(state)) {
+          previewCollapse(state, true);
+        } else if (state.dragCollapsed && raw < state.min) {
+          // 回滞区：已进入收起预览但还没拉回最小宽度，保持收起，避免阈值附近抖动。
+          return;
+        } else {
+          previewCollapse(state, false);
+        }
+      }
+      // 收起预览期间由折叠类把宽度压到 0，不再写内联宽度（回拉展开后自动恢复）。
+      if (state.dragCollapsed) return;
+      apply(state, raw, false);
     });
     function finish(event) {
       if (!handle.hasPointerCapture(event.pointerId)) return;
       handle.releasePointerCapture(event.pointerId);
       handle.classList.remove('is-dragging');
       document.documentElement.classList.remove('is-resizing-pane');
+      if (state.dragCollapsed && state.collapseButton) {
+        // 松手时仍停在收起预览：固化为真正的收起状态。先把当前（已被压到最小值的）
+        // 宽度落盘，这样“本次会话里点开”和“重启后展开”恢复出同一宽度。
+        state.dragCollapsed = false;
+        root.classList.remove('sidebar-collapse-dragging');
+        apply(state, state.panel.getBoundingClientRect().width, true);
+        setCollapsed(state.collapseButton, true, true);
+        window.dispatchEvent(new Event('resize'));
+        return;
+      }
+      state.dragCollapsed = false;
       apply(state, state.panel.getBoundingClientRect().width, true);
     }
     handle.addEventListener('pointerup', finish);

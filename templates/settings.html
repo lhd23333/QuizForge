@@ -54,14 +54,20 @@
     <div class="settings-section">
       <div class="settings-section-title source-settings-head">
         <div><h2>自动导入工作站</h2>
-          <p class="settings-note">稳定文件才会进入队列；默认监听关闭。</p></div>
+          <p class="settings-note">稳定文件才会进入队列；默认监听关闭，识别默认走机械拆题，不调用大模型。监视目录内的子文件夹会递归扫描；“输入=输出”（原地替换）时产物写回源文件所在子文件夹，输入与输出不同时统一放在输出目录根下。</p></div>
         <button type="button" class="btn btn-primary" id="source-profiles-save">保存</button>
       </div>
+      {% if not has_md_provider %}
+      <p class="settings-note" id="source-llm-hint" role="note">当前没有已启用的「导入识别」模型：勾选"大模型规范化"的监控任务会失败，需要先在「识别模型」标签页配置并启用。</p>
+      {% endif %}
       {% for key, label in [('good_question', '好题'), ('good_paper', '好卷'), ('good_material', '好资料')] %}
       {% set profile = source_profiles.get(key, {}) %}
       <div class="source-profile-card" data-source-profile="{{ key }}">
         <div class="source-profile-card-head"><h3>{{ label }}</h3>
-          <label class="source-watch-toggle"><input type="checkbox" name="enabled" {% if profile.get('enabled') %}checked{% endif %}> 监控输入目录</label></div>
+          <span class="source-card-toggles">
+            <label class="source-watch-toggle"><input type="checkbox" name="enabled" {% if profile.get('enabled') %}checked{% endif %}> 监控输入目录</label>
+            <label class="source-watch-toggle"><input type="checkbox" name="normalize_with_llm" {% if profile.get('normalize_with_llm') %}checked{% endif %}> 大模型规范化</label>
+          </span></div>
         <label class="field">输入目录<input class="input source-dir-input" name="input_dir" value="{{ profile.get('input_dir', '') }}" readonly data-dir-role="input" title="点击选择文件夹"></label>
         <label class="field">输出目录<input class="input source-dir-input" name="output_dir" value="{{ profile.get('output_dir', '') }}" readonly data-dir-role="output" title="点击选择文件夹"></label>
       </div>

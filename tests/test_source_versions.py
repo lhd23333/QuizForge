@@ -132,6 +132,97 @@ class SourceVersionsTests(unittest.TestCase):
                 output, "名称", is_directory=False, source_key="legacy-call")
         self.assertEqual(record["profile"], "真实档案")
 
+    def test_commit_publishes_file_via_hidden_temp_without_residue(self):
+        """暂存与目标不同目录时，发布要经"目标同卷隐藏临时名 + 原子替换"；
+        目标是真实路径且不残留 .qf-tmp 临时件。"""
+        stage = self.root / "stage"
+        stage.mkdir()
+        output = self.root / "publish-out"
+        output.mkdir()
+        source = self.root / "源.png"
+        source.write_bytes(b"img")
+        card = stage / "卡.md"
+        card.write_text("hello", encoding="utf-8")
+        record = source_versions.reserve_version(
+            output, "卡", is_directory=False, source_key="publish", profile="好题")
+        with mock.patch("source_recycle.send_to_recycle_bin") as recycle:
+            committed = source_versions.commit_outputs(record, stage, {
+                "source_path": str(source),
+                "files": [{"path": "卡.md",
+                           "sha256": source_versions.sha256_file(card)}]})
+        recycle.assert_called_once()
+        self.assertEqual(committed["status"], "committed")
+        target = Path(record["path"])
+        self.assertEqual(target.read_text(encoding="utf-8"), "hello")
+        self.assertEqual(list(output.glob(".卡.md.qf-tmp-*")), [])
+
+    def test_commit_publishes_directory_version(self):
+        stage = self.root / "stage2"
+        stage.mkdir()
+        output = self.root / "dir-out"
+        output.mkdir()
+        source = self.root / "源卷.pdf"
+        source.write_bytes(b"pdf")
+        version_root = stage / "圆梦杯"
+        version_root.mkdir()
+        (version_root / "第1题.md").write_text("a", encoding="utf-8")
+        (version_root / "第2题.md").write_text("b", encoding="utf-8")
+        files = [
+            {"path": "圆梦杯/第1题.md",
+             "sha256": source_versions.sha256_file(version_root / "第1题.md")},
+            {"path": "圆梦杯/第2题.md",
+             "sha256": source_versions.sha256_file(version_root / "第2题.md")},
+        ]
+        record = source_versions.reserve_version(
+            output, "圆梦杯", is_directory=True, source_key="dir", profile="好卷")
+        with mock.patch("source_recycle.send_to_recycle_bin"):
+            source_versions.commit_outputs(record, stage, {
+                "source_path": str(source), "files": files})
+        target = Path(record["path"])
+        self.assertTrue(target.is_dir())
+        self.assertEqual((target / "第1题.md").read_text(encoding="utf-8"), "a")
+        self.assertEqual(list(output.glob(".圆梦杯.qf-tmp-*")), [])
+
+    def test_publish_verification_failure_cleans_temp_and_leaves_no_target(self):
+        stage_file = self.root / "x.md"
+        stage_file.write_text("data", encoding="utf-8")
+        output = self.root / "ver-out"
+        output.mkdir()
+        with self.assertRaises(ValueError):
+            source_versions._publish_item(
+                stage_file, output / "x.md",
+                [{"path": "x.md", "sha256": "0" * 64}],
+                is_directory=False, version_id="v1")
+        self.assertFalse((output / "x.md").exists())
+        self.assertEqual(list(output.glob(".x.md.qf-tmp-*")), [])
+
+    def test_dangling_reserved_with_existing_target_is_healed(self):
+        """发布成功但账本未写成会留下"reserved 且目标已存在"的悬挂行；
+        再次预留必须自愈重分配，而不是让同一指纹永久卡死。"""
+        output = self.root / "heal-out"
+        output.mkdir()
+        first = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="d1", profile="好题")
+        Path(first["path"]).write_text("published", encoding="utf-8")
+        again = source_versions.reserve_version(
+            output, "名称", is_directory=False, source_key="d1", profile="好题")
+        self.assertNotEqual(again["version_id"], first["version_id"])
+        self.assertEqual(Path(again["path"]).name, "名称_2.md")
+
+    def test_non_active_status_rows_do_not_block_reserve(self):
+        """中断标记行（无 path 产出）不能把显式重试挡在 reserve 外面。"""
+        output = self.root / "status-out"
+        output.mkdir()
+        config.SOURCE_VERSIONS_PATH.write_text(json.dumps([
+            {"version_id": "old", "profile": "好题", "source_key": "kk",
+             "path": str(output / "x.md"), "is_directory": False,
+             "status": "interrupted"},
+        ]), encoding="utf-8")
+        record = source_versions.reserve_version(
+            output, "x", is_directory=False, source_key="kk", profile="好题")
+        self.assertNotEqual(record["version_id"], "old")
+        self.assertEqual(record["status"], "reserved")
+
 
 if __name__ == "__main__":
     unittest.main()

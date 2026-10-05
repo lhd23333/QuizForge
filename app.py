@@ -1026,10 +1026,14 @@ def _inject_desktop_host():
     }
 
 
-@app.context_processor
-def _inject_nav_badge():
-    """导航栏「转换任务」后面的未处理批次数。放 context_processor 是因为它要
-    出现在 base.html，每个页面都要算——各视图逐个传参必然漏。
+def _nav_pending_count() -> int:
+    """导航徽标计数：批次 + 资料库任务 + 实时监控任务里"还没处理完"的数量。
+
+    抽成独立函数是因为它有两个消费者：整页渲染的 context_processor，以及
+    /nav/count 轮询端点——监控任务完成不会触发整页刷新（桌面壳只换 iframe、
+    面板轮询只改行），只靠渲染时算一次，红心数字会永远停在打开页面时的旧值。
+    注意 _batch_jobs_lock / _library_tasks_lock 是非重入锁：本函数不得在已
+    持有它们的 with 块里被调用。
     """
     with _batch_jobs_lock:
         n = sum(1 for b in _batch_jobs.values()
@@ -1037,7 +1041,17 @@ def _inject_nav_badge():
     with _library_tasks_lock:
         n += sum(1 for task in _library_tasks.values()
                  if task.get("status") != "done")
-    return {"nav_batch_count": n}
+    # 实时监控任务读服务内存镜像（首次调用会懒加载一次快照，之后是内存计数）。
+    n += _source_ingest_service.unfinished_count()
+    return n
+
+
+@app.context_processor
+def _inject_nav_badge():
+    """导航栏「转换任务」后面的未处理批次数。放 context_processor 是因为它要
+    出现在 base.html，每个页面都要算——各视图逐个传参必然漏。
+    """
+    return {"nav_batch_count": _nav_pending_count()}
 
 
 @app.template_global()
@@ -4273,6 +4287,34 @@ def restore_persisted_tasks() -> None:
         _library_tasks.clear()
         _library_tasks.update(dict(restored_library))
 
+    # 来源监听的在途任务同样不可安全续跑：标成中断等用户显式重试。扫描器
+    # 只对"从未见过的源指纹"建任务，因此这些中断的源文件不会被自动重放。
+    task_store.mark_interrupted(
+        "source", {"queued", "converting", "validating"}, _RESTART_INTERRUPTED)
+
+
+def resume_enabled_source_monitors() -> None:
+    """进程启动时恢复用户已开启的来源监听。
+
+    只恢复"监听"：重启前在途的任务已在 restore_persisted_tasks 里标成中断，
+    扫描器对已有指纹不会再自动建任务；这里开始处理的是目录里从未处理过的
+    新文件——正是用户开启监控时预期的持续行为。
+
+    **只能在真正的启动入口调用**（`python app.py` 与 desktop.py），不要挂在
+    import 路径上：`import app` 的测试与维护脚本会读到真实配置，从而扫描真实
+    目录、甚至真的发起付费 OCR 调用。
+    """
+    profiles = source_settings.load_profiles()
+    _source_ingest_service.profiles = profiles
+    if not any(row.get("enabled") for row in profiles.values()):
+        return
+    for name, row in profiles.items():
+        if row.get("enabled"):
+            _source_ingest_service.resume(name)
+        else:
+            _source_ingest_service.pause(name)
+    _source_ingest_service.start()
+
 
 
 
@@ -6471,6 +6513,85 @@ def _all_library_tasks(show_all: bool) -> list[dict]:
     return rows
 
 
+_SOURCE_TASK_LABELS = {
+    "good_question": "好题实时监控项目",
+    "good_paper": "好卷实时监控项目",
+    "good_material": "好资料实时监控项目",
+}
+
+# 状态 → (面板文案, 进度百分比)。单文件任务的"进度"就是阶段。
+_SOURCE_TASK_STATUS = {
+    "queued": ("排队中", 10),
+    "converting": ("识别中", 40),
+    "validating": ("正在提交", 80),
+    "committed": ("已完成", 100),
+    "failed": ("失败", 0),
+    "interrupted": ("已中断", 0),
+    # 用户对失败/中断记录点过"忽略"：记录仍在（防重放指纹不能丢），但已移出
+    # 红心计数与默认列表，只在本视图可见、可重试恢复。
+    "dismissed": ("已忽略", 0),
+}
+
+
+def _source_task_overview(task_id: str, payload: dict) -> dict:
+    """把来源监听任务收敛成总任务页所需的只读摘要。
+
+    来源任务是"一个源文件一个任务"，没有标准批次的分组与审核阶段；这里只
+    标记 kind 与可做的管理动作（重试/移除记录），不伪造 groups。
+    """
+    profile = str(payload.get("profile") or "")
+    status = str(payload.get("status") or "queued")
+    status_text, percent = _SOURCE_TASK_STATUS.get(status, (status or "未知", 0))
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    pending_recycle = status == "committed" \
+        and str(result.get("status") or "") == "recycle_pending"
+    output = ""
+    if status == "committed":
+        raw_path = str(result.get("path") or "")
+        output = Path(raw_path).name if raw_path else ""
+        if pending_recycle:
+            # 源文件还在输入目录（系统回收站调用失败），必须让用户看见，
+            # 否则"已完成"却留着原文件，用户会手动再放一次。
+            status_text = "已完成（源文件待入回收站）"
+    raw_warnings = payload.get("warnings")
+    warnings = ([str(item) for item in raw_warnings if str(item).strip()]
+                if isinstance(raw_warnings, list) else [])
+    return {
+        "kind": "source",
+        "task_id": str(task_id),
+        "profile": profile,
+        "label": _SOURCE_TASK_LABELS.get(profile, "实时监控项目"),
+        "source_name": Path(str(payload.get("source") or "")).name,
+        "status": status,
+        "status_text": status_text,
+        "percent": percent,
+        "error": str(payload.get("error") or ""),
+        "output": output,
+        "pending_recycle": pending_recycle,
+        "warnings": warnings,
+        "retryable": status in ("failed", "interrupted", "dismissed"),
+        "dismissible": status in ("failed", "interrupted"),
+        "removable": status == "committed",
+        "created_at": payload.get("created_at", 0),
+    }
+
+
+def _all_source_tasks(show_all: bool) -> list[dict]:
+    """返回实时监控任务摘要（读服务内存镜像，不解析任务快照文件）。"""
+    rows = [_source_task_overview(task_id, payload)
+            for task_id, payload in _source_ingest_service.tasks_snapshot()]
+    rows.sort(key=lambda row: (float(row.get("created_at") or 0),
+                               row["task_id"]), reverse=True)
+    if not show_all:
+        # 默认视图隐藏普通已完成项（避免逐文件堆积），但"待入回收站"要保留：
+        # 它还有一步需要用户注意的动作。已忽略项也隐藏——它已经不计入红心，
+        # 留在默认列表只会让"用户已经处理过"的记录重新堆积。
+        rows = [row for row in rows
+                if (row["status"] not in ("committed", "dismissed")
+                    or row["pending_recycle"])]
+    return rows
+
+
 @app.route("/batches")
 def batches_overview():
     """转换任务总面板。默认只列还没处理完的批次。"""
@@ -6479,6 +6600,7 @@ def batches_overview():
     return render_template("batches_overview.html",
                            batches=_all_batches(show_all),
                            library_tasks=_all_library_tasks(show_all),
+                           source_tasks=_all_source_tasks(show_all),
                            show_all=show_all, concurrency=concurrency)
 
 
@@ -6487,7 +6609,18 @@ def batches_status():
     """总面板轮询。"""
     show_all = request.args.get("all") in ("1", "true", "on")
     return jsonify(ok=True, batches=_all_batches(show_all),
-                   library_tasks=_all_library_tasks(show_all))
+                   library_tasks=_all_library_tasks(show_all),
+                   source_tasks=_all_source_tasks(show_all))
+
+
+@app.route("/nav/count")
+def nav_count():
+    """导航徽标的轻量轮询端点（static/js/nav-badge.js）。
+
+    刻意不复用 /batches/status：那个每次要序列化三个任务列表，而徽标只关心
+    一个数字，且是常驻整个会话的 10s 轮询——不该拖着列表走。
+    """
+    return jsonify(ok=True, nav_batch_count=_nav_pending_count())
 
 
 @app.route("/batch/<batch_id>/delete", methods=["POST"])
@@ -7011,6 +7144,9 @@ def settings_page():
     return render_template(
         "settings.html", providers=enriched,
         source_profiles=source_settings.load_profiles(),
+        # 自动导入卡片在勾选"大模型规范化"但没有任何已启用识别模型时给出提示。
+        # resolve_active() 走与转换时同一条解析（含 key 解密），显示口径一致。
+        has_md_provider=providers.resolve_active() is not None,
         llm_presets=providers.LLM_PROVIDER_PRESETS,
         default_max_tokens=llm_client.MAX_TOKENS_DEFAULT,
         # has_mineru_token 而不是 token 本身：明文绝不进模板上下文，
@@ -7128,6 +7264,28 @@ def source_ingest_retry(task_id):
         return jsonify(ok=True, task=_source_ingest_service.retry(task_id))
     except (ValueError, OSError) as exc:
         return jsonify(ok=False, error=str(exc)), 400
+
+
+@app.route("/api/source-ingest/task/<task_id>/delete", methods=["POST"])
+def source_ingest_task_delete(task_id):
+    """从总面板移除一条已完成的监控任务记录；产物与源文件都不动。"""
+    try:
+        payload = _source_ingest_service.remove(task_id)
+    except (ValueError, OSError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, task=({"task_id": task_id, **payload}
+                                  if payload else None))
+
+
+@app.route("/api/source-ingest/task/<task_id>/dismiss", methods=["POST"])
+def source_ingest_task_dismiss(task_id):
+    """忽略一条失败/中断的监控记录：移出红心与默认列表，但保留防重放指纹。"""
+    try:
+        payload = _source_ingest_service.dismiss(task_id)
+    except (ValueError, OSError) as exc:
+        return jsonify(ok=False, error=str(exc)), 400
+    return jsonify(ok=True, task=({"task_id": task_id, **payload}
+                                  if payload else None))
 
 
 @app.route("/api/source-ingest/recycle/<version_id>", methods=["POST"])
@@ -8702,6 +8860,8 @@ if __name__ == "__main__":
     # debug 默认关闭：开启时 Werkzeug reloader 会另派生一个子进程，父进程被
     # 杀掉后子进程仍占着端口（Obsidian 插件托管本进程时会残留），故只在显式
     # 设置 QUIZFORGE_DEBUG=1 时才开。
+    # 运行入口（而非 import 路径）才恢复来源监听，见函数注释。
+    resume_enabled_source_monitors()
     port = int(os.environ.get("QUIZFORGE_PORT", "5000"))
     debug = os.environ.get("QUIZFORGE_DEBUG", "") == "1"
     app.run(host="127.0.0.1", port=port, debug=debug)

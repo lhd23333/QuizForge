@@ -78,6 +78,9 @@
         {% if q['source'] %}
           <span class="card-head-source" title="题源：{{ q['source'] }}">{{ q['source'] }}</span>
         {% endif %}
+        {% if q['source_page_start'] %}
+          <span class="card-head-source" title="来源页码">第 {{ q['source_page_start'] }}{% if q['source_page_end'] and q['source_page_end'] != q['source_page_start'] %}–{{ q['source_page_end'] }}{% endif %} 页</span>
+        {% endif %}
       </span>
     </span>
     <div class="spacer"></div>

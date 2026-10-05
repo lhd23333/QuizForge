@@ -109,9 +109,26 @@ def reserve_version(output_dir: Path, base_name: str, *, is_directory: bool,
             raise ValueError("来源类型不能为空")
     with _lock:
         rows = _read()
+        # 幂等匹配只认三种"真实存在过"的状态。dismissed/interrupted 等标记行
+        # 不能在这条路上返回，否则用户显式重试时 commit_version 会因为
+        # "仅可提交有效的版本预留"永久卡死。
+        dangling = None
         for row in rows:
-            if row.get("source_key") == source_key:
-                return dict(row)
+            if row.get("source_key") != source_key \
+                    or row.get("status") not in {"reserved", "committed",
+                                                 "recycle_pending"}:
+                continue
+            if row.get("status") == "reserved" \
+                    and Path(row.get("path") or "").exists():
+                # 提交在"预留已登记、目标已存在"之间中断（发布成功但账本未写成，
+                # 或发布前崩溃留下同名目标）。这条预留永远不会被提交，就地自愈
+                # 删除，按新版本重新分配序号，避免同一指纹永久卡死。
+                dangling = row
+                break
+            return dict(row)
+        if dangling is not None:
+            rows.remove(dangling)
+            _write(rows)
         n = 1
         while True:
             name = base if n == 1 else f"{base}_{n}"
@@ -187,6 +204,70 @@ def validate_manifest(manifest: dict) -> dict:
     return {**manifest, "source_path": str(Path(source)), "files": clean}
 
 
+def _verify_tree(root: Path, files: list[dict]) -> None:
+    """逐一复核清单文件存在且哈希一致（符号链接直接拒绝）。"""
+    for item in files:
+        file_path = root / item["path"]
+        if (file_path.is_symlink() or not file_path.is_file()
+                or sha256_file(file_path) != item["sha256"]):
+            raise ValueError(f"输出文件校验失败: {item['path']}")
+
+
+def _publish_item(staged_item: Path, target: Path, files: list[dict], *,
+                  is_directory: bool, version_id: str) -> None:
+    """把暂存产物发布到目标路径；跨卷安全，最终发布仍原子。
+
+    暂存工作区与输出目录可能位于不同磁盘（桌面版运行态在 C 盘、题库常在 D
+    盘），Windows 的 ``os.replace`` 跨卷会直接 ``WinError 17``。这里先把产物
+    复制到目标父目录内的点开头隐藏临时名（同卷），复验哈希后 ``os.replace``
+    到最终名——复制期间崩溃只会留下可识别的临时件，不会出现半个公开版本。
+    """
+    parent = target.parent
+    tmp = parent / f".{target.name}.qf-tmp-{version_id}"
+    # 只清理带本目标名前缀的旧残留（上次中断留下），不碰其他版本的临时件。
+    for leftover in parent.glob(f".{target.name}.qf-tmp-*"):
+        if leftover == tmp:
+            continue
+        try:
+            if leftover.is_dir() and not leftover.is_symlink():
+                shutil.rmtree(leftover)
+            else:
+                leftover.unlink()
+        except OSError:
+            pass
+    try:
+        if tmp.is_dir() and not tmp.is_symlink():
+            shutil.rmtree(tmp)
+        elif tmp.exists() or tmp.is_symlink():
+            tmp.unlink()
+        if is_directory:
+            shutil.copytree(staged_item, tmp)
+            # 目录清单 path 的第一段就是版本目录名，副本内要去掉这一段。
+            for item in files:
+                relative = Path(*Path(item["path"]).parts[1:])
+                file_path = tmp / relative
+                if (file_path.is_symlink() or not file_path.is_file()
+                        or sha256_file(file_path) != item["sha256"]):
+                    raise ValueError(f"输出文件复制后校验失败: {item['path']}")
+        else:
+            shutil.copy2(staged_item, tmp)
+            item = files[0]
+            if (tmp.is_symlink() or not tmp.is_file()
+                    or sha256_file(tmp) != item["sha256"]):
+                raise ValueError(f"输出文件复制后校验失败: {item['path']}")
+        # 同一父目录内的 os.replace 必然同卷，保持发布动作本身的原子性。
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            try:
+                if tmp.is_dir() and not tmp.is_symlink():
+                    shutil.rmtree(tmp)
+                else:
+                    tmp.unlink()
+            except OSError:
+                pass
+
+
 def commit_outputs(record: dict, staged_output: Path, manifest: dict) -> dict:
     """校验暂存输出、提交版本，再把源文件送入系统回收站。"""
     import source_recycle
@@ -195,11 +276,7 @@ def commit_outputs(record: dict, staged_output: Path, manifest: dict) -> dict:
     staged = Path(staged_output)
     if not staged.exists():
         raise FileNotFoundError(str(staged))
-    for item in clean["files"]:
-        file_path = staged / item["path"]
-        if (file_path.is_symlink() or not file_path.is_file()
-                or sha256_file(file_path) != item["sha256"]):
-            raise ValueError(f"输出文件校验失败: {item['path']}")
+    _verify_tree(staged, clean["files"])
     source = Path(clean["source_path"])
     if not source.is_file():
         raise FileNotFoundError(str(source))
@@ -220,7 +297,9 @@ def commit_outputs(record: dict, staged_output: Path, manifest: dict) -> dict:
         staged_item = staged / clean["files"][0]["path"]
         if staged_item.is_symlink() or not staged_item.is_file():
             raise ValueError("单卡版本输出无效")
-    os.replace(staged_item, target)
+    _publish_item(staged_item, target, clean["files"],
+                  is_directory=bool(record.get("is_directory")),
+                  version_id=str(record.get("version_id") or "v"))
     committed = commit_version(record, clean)
     try:
         source_recycle.send_to_recycle_bin(source)

@@ -109,6 +109,10 @@ def _defaults() -> dict[str, dict]:
             "input_dir": str(Path(config.BANK_DIR) / label),
             "output_dir": str(Path(config.BANK_DIR) / label),
             "enabled": False,
+            # 大模型规范化默认关闭：自动监听是无人值守的，默认不消耗 LLM 额度
+            # （与资料库制卡"大模型规范化必须另行勾选"同一约定）。关闭时走
+            # no_ai 两阶段机械链路，只消耗 OCR 额度。
+            "normalize_with_llm": False,
         }
         for name, label in _DEFAULT_PROFILES.items()
     }
@@ -136,7 +140,9 @@ def load_profiles() -> dict[str, dict]:
                     continue
                 profiles[name] = {"input_dir": str(input_dir),
                                   "output_dir": str(output_dir),
-                                  "enabled": row.get("enabled") is True}
+                                  "enabled": row.get("enabled") is True,
+                                  "normalize_with_llm": row.get(
+                                      "normalize_with_llm") is True}
             else:
                 _record_invalid_profile(str(name), "invalid_schema")
                 logger.warning("source profile rejected: invalid profile schema")
@@ -182,24 +188,32 @@ def save_profiles(profiles: dict[str, dict]) -> dict[str, dict]:
             output_dir = validate_local_directory(row.get("output_dir", ""))
             merged[name] = {"input_dir": str(input_dir),
                             "output_dir": str(output_dir),
-                            "enabled": row.get("enabled") is True}
+                            "enabled": row.get("enabled") is True,
+                            "normalize_with_llm": row.get(
+                                "normalize_with_llm") is True}
         _save(merged)
     return load_profiles()
 
 
 def save_profile(name: str, *, input_dir: str | Path, output_dir: str | Path,
-                 enabled: bool) -> dict:
+                 enabled: bool, normalize_with_llm: bool | None = None) -> dict:
     name = str(name).strip()
     if not name:
         raise ValueError("来源类型不能为空")
     with _lock:
         profiles = load_profiles()
+        raw_rows = _read_profile_rows()
+        if normalize_with_llm is None:
+            # 调用方（如 Agent 工具）没带这个字段时沿用现值，避免顺手把用户
+            # 已勾选的开关重置掉。
+            current = raw_rows.get(name) or profiles.get(name) or {}
+            normalize_with_llm = current.get("normalize_with_llm") is True
         profile = {
             "input_dir": str(validate_local_directory(input_dir)),
             "output_dir": str(validate_local_directory(output_dir)),
             "enabled": bool(enabled),
+            "normalize_with_llm": bool(normalize_with_llm),
         }
-        raw_rows = _read_profile_rows()
         raw_rows[name] = profile
         _save(raw_rows)
     return profile
@@ -214,6 +228,7 @@ def reset_profile(name: str) -> dict:
         "input_dir": str(Path(config.BANK_DIR) / _DEFAULT_PROFILES.get(name, name)),
         "output_dir": str(Path(config.BANK_DIR) / _DEFAULT_PROFILES.get(name, name)),
         "enabled": False,
+        "normalize_with_llm": False,
     })
     with _lock:
         load_profiles()  # Validate and audit other rows before changing this profile.

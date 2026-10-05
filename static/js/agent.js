@@ -1726,6 +1726,33 @@
     }
   }
 
+  // 自动发现本地 MinerU：可用 → 追加可选「本地 MinerU」；未启动 → 列出但禁用并
+  // 提示启动命令，避免用户选中后才在转换阶段失败。已探测到可用后不再重复请求；
+  // 未可用时每次聚焦重查（用户可能刚执行 mineru server start）。
+  async function refreshLocalOcrOption(select) {
+    if (select.dataset.localOcr === 'available') return;
+    let available = false;
+    let version = '';
+    try {
+      const data = await request('/api/agent/mineru-local/status');
+      available = Boolean(data.available);
+      version = data.version || '';
+    } catch (error) {
+      available = false;
+    }
+    const previous = [...select.options].find(item => item.value === 'mineru_local');
+    if (previous) previous.remove();
+    const option = new Option(available ? '本地 MinerU' : '本地 MinerU（未启动）', 'mineru_local');
+    if (available) {
+      option.title = version ? `本地 MinerU 服务运行中（${version}）` : '本地 MinerU 服务运行中';
+    } else {
+      option.disabled = true;
+      option.title = '先启动本地服务：mineru server start';
+    }
+    select.add(option);
+    select.dataset.localOcr = available ? 'available' : 'missing';
+  }
+
   function createStagedCard(sessionId, staged, fallbackName) {
     const stageId = staged?.stage_id || staged?.id;
     if (!stageId) return null;
@@ -1766,6 +1793,8 @@
       return select;
     };
     const ocr = makeChoice('识别后端', [{id: 'mineru', label: 'MinerU'}, {id: 'doc2x', label: 'Doc2X'}]);
+    refreshLocalOcrOption(ocr);
+    ocr.addEventListener('focus', () => refreshLocalOcrOption(ocr));
     const engine = makeChoice('导入方式', [{id: 'block', label: '逐题切分'}, {id: 'whole', label: '整篇规范化'}]);
     const normalization = makeChoice('规范化', [{id: 'mechanical', label: '机械，不调用 LLM'}, {id: 'llm', label: 'LLM'}, {id: 'review', label: '人工审核'}]);
     const discard = document.createElement('button');

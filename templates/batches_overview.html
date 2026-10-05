@@ -81,8 +81,34 @@
 </section>
 {% endif %}
 
-{% if not batches and not library_tasks %}
-<div class="app-empty-state app-surface">
+<section class="bo-library-section" aria-label="实时监控任务">
+  <h2>实时监控任务</h2>
+  <div class="bo-list" id="bo-source-list">
+    {% for task in source_tasks %}
+    <div class="bo-row bo-source-row{% if task['status'] == 'committed' %} bo-finished{% endif %}"
+         data-task-id="{{ task['task_id'] }}">
+      <span class="bo-name">{{ task['label'] }}{% if task['source_name'] %} · {{ task['source_name'] }}{% endif %}</span>
+      <span class="bo-prog"><span class="bo-bar"><span class="bo-bar-fill"
+        style="width:{{ task['percent'] }}%"></span></span>
+        <span class="bo-num">{{ task['status_text'] }}</span></span>
+      <span class="bo-chips">
+        {% if task['warnings'] %}<span class="bp-st" title="{{ task['warnings'] | join('；') }}">需人工校对</span>{% endif %}
+        {% if task['error'] %}<span class="muted bo-library-error">{{ task['error'] }}</span>{% endif %}
+        {% if task['output'] %}<span class="muted bo-library-output">{{ task['output'] }}</span>{% endif %}
+      </span>
+      <span class="bo-act">
+        {% if task['retryable'] %}<button type="button" class="btn btn-sm bo-source-retry">重试</button>{% endif %}
+        {% if task['dismissible'] %}<button type="button" class="btn btn-sm bo-source-dismiss">忽略</button>{% endif %}
+        {% if task['removable'] %}<button type="button" class="btn btn-sm bo-source-remove">移除记录</button>{% endif %}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted bo-source-empty" id="bo-source-empty" {% if source_tasks %}hidden{% endif %}>暂无实时监控任务；在「设置 → 自动导入」开启监听后，送入目录的稳定文件会自动出现在这里。</p>
+</section>
+
+{% if not batches and not library_tasks and not source_tasks %}
+<div class="app-empty-state app-surface" id="bo-empty-state">
   <strong>{% if show_all %}暂无转换任务{% else %}没有待处理的任务{% endif %}</strong>
   <a class="btn" href="{{ url_for('import_md') }}">新建任务</a>
 </div>

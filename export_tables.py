@@ -41,11 +41,56 @@ def html_table_rows(inner: str) -> list[list[tuple[str, int]]]:
     return rows
 
 
+def split_pipe_row(text: str) -> list[str]:
+    r"""按 ``|`` 切分一行管道表格，跳过转义竖线与行内数学里的竖线。
+
+    GFM 规定单元格内的竖线要写成 ``\|``；题库里的 OCR/迁移数据却大量直接写
+    ``$\displaystyle |a|=3$``（绝对值、集合、行列式的竖线）。照着 ``|`` 无条件
+    切会把数学式劈成好几格，片段里的 ``$`` 再不成对 —— 导出侧 ``_cell_tex_text``
+    于是把 ``\displaystyle`` 当普通文本转义，tabular 里出现
+    ``$\textbackslash{}displaystyle & a & =3$``，PDF 那一整行错位（2026-10-05
+    高考真题全量导出实测：1981 年全国卷（理）第 3 题的充分/必要条件表格）。
+
+    只在 ``$...$`` / ``$$...$$`` 之外、且未被反斜杠转义的 ``|`` 作为单元格分隔。
+    转义竖线 ``\|`` 还原成字面 ``|``。
+    """
+    cells: list[str] = []
+    buf: list[str] = []
+    in_math = False
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "\\" and i + 1 < len(text):
+            following = text[i + 1]
+            buf.append("|" if following == "|" else char + following)
+            i += 2
+            continue
+        if char == "$":
+            if text.startswith("$$", i):
+                in_math = not in_math
+                buf.append("$$")
+                i += 2
+                continue
+            in_math = not in_math
+            buf.append(char)
+            i += 1
+            continue
+        if char == "|" and not in_math:
+            cells.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(char)
+        i += 1
+    cells.append("".join(buf))
+    return cells
+
+
 def pipe_text_cells(line: str) -> list[tuple[str, int]]:
-    """一行 Markdown 管道表格转为纯文本单元格。"""
+    """一行 Markdown 管道表格转为纯文本单元格（切分规则见 split_pipe_row）。"""
     text = line.strip()
     if text.startswith("|"):
         text = text[1:]
     if text.endswith("|"):
         text = text[:-1]
-    return [(cell_text(cell), 1) for cell in text.split("|")]
+    return [(cell_text(cell), 1) for cell in split_pipe_row(text)]

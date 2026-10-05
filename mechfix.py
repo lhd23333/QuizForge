@@ -1246,3 +1246,15 @@ def normalize_block(text: str, keep_images: bool = True) -> str:
     # 收敛连续空行：切块时保留了原文空行，三行以上压成两行（Markdown 段落）
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def light_clean(text: str) -> str:
+    """文档向轻量清理：合并 MinerU 拆开的 HTML 上下标、收敛连续空行。
+
+    与 normalize_block 的分工：那是"题目排版"规范化（中文标点改半角、公式加
+    \\displaystyle、填空补线），套在讲义/教材正文上会改变散文观感——好资料
+    的正文与解析块只过这一层；题块才走完整 normalize_block。
+    """
+    text = normalize_html_subscripts(str(text or ""))
+    text = normalize_html_superscripts(text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
