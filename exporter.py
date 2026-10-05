@@ -4402,13 +4402,30 @@ def _stage_wimath_logo(stem: str, work_dir: Path,
     return local
 
 
+# 自定义纸色的唯一放行格式：严格 #RRGGBB（导出抽屉「自定义色卡」，2026-10-05）。
+# 值域数学上封闭（7 字符 hex），所以可以安全地经 -V 直拼进模板的
+# \definecolor{...}{HTML}{...}——模板侧不必再做二次校验。不要放宽为「# 开头
+# 任意串」：模板变量不做上下文转义，注入防线只在 Python 这一处。
+_PAPER_TONE_HEX_RE = re.compile(r"#[0-9A-Fa-f]{6}\Z")
+
+
 def _paper_tone_variable_args(paper_tone: str) -> list[str]:
     """把纸张底色转换成 pandoc 模板变量；白色不传变量即使用 PDF 默认白底。
 
-    只认固定枚举，不把表单值直接拼进命令。cream 传布尔变量后，PDF、单独 tex
-    和 tex+图片压缩包都在生成的 tex 里固化同一背景；预览与正式导出也天然同源。
+    只认固定枚举与严格 #RRGGBB，不把表单值直接拼进命令。cream 传布尔变量后，
+    PDF、单独 tex 和 tex+图片压缩包都在生成的 tex 里固化同一背景；预览与正式
+    导出也天然同源。非法值一律按白色（不传变量）——路由层已归一，这里是重试
+    回放 / Agent 调用等旁路的第二道防线。
     """
-    return ["-V", "paper_cream=1"] if paper_tone == "cream" else []
+    if isinstance(paper_tone, str):
+        value = paper_tone.strip()
+        if value == "cream":
+            return ["-V", "paper_cream=1"]
+        if _PAPER_TONE_HEX_RE.fullmatch(value):
+            # 传值剥掉 `#`：\definecolor 的 HTML 模型惯例不带 #（与模板里
+            # qpapercream 的 {FAF8F1} 同构），由模板负责 {HTML}{$paper_color$}。
+            return ["-V", f"paper_color={value[1:]}"]
+    return []
 
 
 # —— 导出面板字体选项（2026-10-04 新增）——

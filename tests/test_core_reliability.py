@@ -2098,15 +2098,23 @@ class PageTests(unittest.TestCase):
         self.assertIn("await loadFolderFragment(location.href, false)", template)
         self.assertNotIn("（点击重试）", template)
 
-    def test_export_paper_tone_accepts_only_white_or_cream(self):
+    def test_export_paper_tone_accepts_white_cream_or_hex(self):
         with app_module.app.test_request_context(
                 "/export", method="POST", data={"paper_tone": "cream"}):
             self.assertEqual(app_module._read_export_params()["paper_tone"],
                              "cream")
+        # 自定义色卡：严格 #RRGGBB 原样保留，其余非法值回落白色。
         with app_module.app.test_request_context(
-                "/export", method="POST", data={"paper_tone": "red"}):
+                "/export", method="POST", data={"paper_tone": "#ADD8E6"}):
             self.assertEqual(app_module._read_export_params()["paper_tone"],
-                             "white")
+                             "#ADD8E6")
+        for bad in ("red", "#GGGGGG", "#12345", "#ADD8E6;"):
+            with self.subTest(bad=bad):
+                with app_module.app.test_request_context(
+                        "/export", method="POST", data={"paper_tone": bad}):
+                    self.assertEqual(
+                        app_module._read_export_params()["paper_tone"],
+                        "white")
 
     def test_export_wimath_checkbox_parameter_and_service_port_forwarding(self):
         page = app_module.app.test_client().get("/?all=1")

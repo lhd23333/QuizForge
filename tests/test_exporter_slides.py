@@ -89,10 +89,24 @@ class SlidesExportTests(unittest.TestCase):
         self.assertIn(r"\definecolor{qpapercream}{HTML}{FAF8F1}", template)
         self.assertIn("$if(paper_cream)$", template)
         self.assertIn(r"\pagecolor{qpapercream}", template)
+        self.assertIn("$if(paper_color)$", template)
+        self.assertIn(r"\definecolor{qpapercustom}{HTML}{$paper_color$}",
+                      template)
+        self.assertIn(r"\pagecolor{qpapercustom}", template)
         self.assertEqual(exporter._paper_tone_variable_args("cream"),
                          ["-V", "paper_cream=1"])
         self.assertEqual(exporter._paper_tone_variable_args("white"), [])
         self.assertEqual(exporter._paper_tone_variable_args("invalid"), [])
+        # 自定义色卡：严格 #RRGGBB 放行（原样传，不强制大小写），其余全回落白色。
+        self.assertEqual(exporter._paper_tone_variable_args("#ADD8E6"),
+                         ["-V", "paper_color=ADD8E6"])
+        self.assertEqual(exporter._paper_tone_variable_args(" #add8e6 "),
+                         ["-V", "paper_color=add8e6"])
+        for bad in ("#GGGGGG", "#12345", "#1234567", "#ADD8E6;",
+                    "#ADD8E6 \\input{x}", "ADD8E6", None, 123):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    exporter._paper_tone_variable_args(bad), [])
         self.assertNotIn("qslideblue", template)
         self.assertNotIn("QuizForge 课堂课件", template)
         self.assertNotIn(r"\colorbox", template)

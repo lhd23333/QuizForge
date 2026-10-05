@@ -280,6 +280,11 @@ $endif$
 % 所有导出模式共用的可选米黄纸色。是否启用由导出面板的 paper_cream 模板变量
 % 决定；不传变量就是 PDF 默认纯白。只改整页底色，不叠渐变、纹理或装饰色块。
 \definecolor{qpapercream}{HTML}{FAF8F1}
+$if(paper_color)$
+% 「自定义色卡」的十六进制纸色（2026-10-05 导出抽屉新增）。exporter 只放行
+% 严格 #RRGGBB，值域封闭所以此处直拼安全；与米黄互斥，由 exporter 单值产出。
+\definecolor{qpapercustom}{HTML}{$paper_color$}
+$endif$
 \usepackage{enumitem}
 % 选择题选项整齐分列（QuizForge：短4列/中2列/长1列，由 exporter._choice_tasks 决定列数）
 % 保留题目自带的 A./B./C./D. 标签，故关闭 tasks 自身编号（label 置空、宽度归零）。
@@ -596,6 +601,9 @@ $body$
 $else$
 $if(paper_cream)$
 \pagecolor{qpapercream}
+$endif$
+$if(paper_color)$
+\pagecolor{qpapercustom}
 $endif$
 $if(title)$
 \maketitle

@@ -8636,8 +8636,11 @@ def _read_export_params():
     """从 request.form 读取所有导出参数（export 与 preview 共用）。"""
     # 纸张底色是所有模式共用的导出参数。白色是安全默认值：旧页面没有这个字段、
     # 或有人手工提交非法值时，不能把任意字符串继续拼进 pandoc 变量。
-    paper_tone = request.form.get("paper_tone", "white")
-    if paper_tone not in ("white", "cream"):
+    # 自定义色卡只放行严格 #RRGGBB（与 exporter._paper_tone_variable_args 同一
+    # 口径，那边是重试回放旁路的第二道防线）。
+    paper_tone = request.form.get("paper_tone", "white").strip()
+    if paper_tone not in ("white", "cream") and not re.fullmatch(
+            r"#[0-9A-Fa-f]{6}", paper_tone):
         paper_tone = "white"
     # 四维自定义组合（导出抽屉「自定义」路径）。layout 空 = 未启用，全部走
     # mode 原逻辑（旧页面 / 插件 / Agent 不带这些字段，行为逐字节不变）；
