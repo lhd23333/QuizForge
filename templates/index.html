@@ -341,7 +341,8 @@
         <input type="hidden" name="collection" value="{{ active_collection or '' }}">
         <input type="hidden" name="starred" value="{{ '1' if starred_only else '' }}">
         <input type="hidden" name="all" value="{{ '1' if show_all else '' }}">
-        <button type="submit" class="btn">全选</button>
+        <button type="submit" class="btn"
+                title="已全部选中时再次点击，将取消本范围的选择">全选</button>
       </form>
     </div>
 
@@ -3582,9 +3583,12 @@ document.getElementById('select-all-form')?.addEventListener('submit', async eve
       if (!response.ok || !payload.ok) throw new Error(payload.error || '全选失败');
       return payload;
     });
-    setVisibleCardsSelected(true);
+    // 服务端按勾选篮现状决定这次点击是全选还是“取消本范围选择”（切换语义），
+    // 前端只跟随 action 同步可见题卡勾选态，不做自己的切换猜测。
+    const deselect = data.action === 'deselect';
+    setVisibleCardsSelected(!deselect);
     syncSelectionSummary(data.count);
-    flashToast(data.message || `已全选 ${data.matched || 0} 道题`);
+    flashToast(data.message || (deselect ? '已取消本范围的选择' : `已全选 ${data.matched || 0} 道题`));
   } catch (error) {
     flashToast(error.message, 'err');
   } finally {

@@ -3399,6 +3399,24 @@ def select_all(ids: list[str]):
         _save_selected_unlocked()
 
 
+def deselect_ids(ids: list[str]) -> int:
+    """从勾选篮移除指定 id，返回实际移除数。
+
+    “全选”按钮的二次点击 = 取消本范围选择。是否该走取消分支（本范围已全部
+    选中）由路由层按勾选篮现状判断——这里只做集合操作，与 select_ids 对称。
+    无实际变化时不落盘：取消常发生在重复点击上，不该每次都原子重写 selections。
+    """
+    with _selected_lock:
+        if not ids:
+            return 0
+        before = len(_selected)
+        _selected.difference_update(ids)
+        removed = before - len(_selected)
+        if removed:
+            _save_selected_unlocked()
+        return removed
+
+
 def count_selected() -> int:
     with _selected_lock:
         return len(_selected)

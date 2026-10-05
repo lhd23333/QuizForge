@@ -1501,6 +1501,67 @@ class PageTests(unittest.TestCase):
         finally:
             app_module.filestore.clear_selected()
 
+    def test_select_all_second_click_deselects_scope(self):
+        """“全选”按钮切换语义：本范围已全选时，再次点击取消本范围选择。"""
+        folder = app_module.filestore.get_or_create_collection("全选切换测试", "")
+        qid = app_module.filestore.create_question(
+            "全选切换题", qtype="填空题", folder=folder)
+        app_module.filestore.clear_selected()
+        headers = {
+            "X-CSRF-Token": app_module._WRITE_TOKEN,
+            "Accept": "application/json",
+        }
+        try:
+            with mock.patch.object(
+                    app_module.filestore, "_all_records",
+                    side_effect=AssertionError("单卷全选/取消都不应扫描全库")):
+                client = app_module.app.test_client()
+                first = client.post("/select_all", data={"collection": folder},
+                                    headers=headers)
+                self.assertEqual(first.status_code, 200)
+                self.assertEqual(first.get_json()["action"], "select")
+                self.assertEqual(first.get_json()["count"], 1)
+
+                second = client.post("/select_all", data={"collection": folder},
+                                     headers=headers)
+                self.assertEqual(second.status_code, 200)
+                self.assertEqual(second.get_json()["action"], "deselect")
+                self.assertEqual(second.get_json()["count"], 0)
+                self.assertEqual(app_module.filestore.count_selected(), 0)
+                self.assertNotIn(qid, app_module.filestore.selected_ids())
+
+                third = client.post("/select_all", data={"collection": folder},
+                                    headers=headers)
+                self.assertEqual(third.get_json()["action"], "select")
+                self.assertEqual(app_module.filestore.count_selected(), 1)
+        finally:
+            app_module.filestore.clear_selected()
+
+    def test_select_all_with_partial_selection_still_selects(self):
+        """本范围只选中一部分时，点击仍是全选（补满），不能误入取消分支。"""
+        folder = app_module.filestore.get_or_create_collection("全选部分选中测试", "")
+        first = app_module.filestore.create_question(
+            "部分选中题一", qtype="填空题", folder=folder, number=1)
+        second = app_module.filestore.create_question(
+            "部分选中题二", qtype="填空题", folder=folder, number=2)
+        app_module.filestore.clear_selected()
+        app_module.filestore.toggle_selected(first)  # 手动只勾一道
+        headers = {
+            "X-CSRF-Token": app_module._WRITE_TOKEN,
+            "Accept": "application/json",
+        }
+        try:
+            response = app_module.app.test_client().post(
+                "/select_all", data={"collection": folder}, headers=headers)
+            payload = response.get_json()
+        finally:
+            app_module.filestore.clear_selected()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["action"], "select")
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["matched"], 2)
+
     def test_folder_mutations_return_json_for_local_tree_refresh(self):
         client = app_module.app.test_client()
         headers = {

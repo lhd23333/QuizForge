@@ -3542,10 +3542,22 @@ def select_all():
                                     difficulty=difficulty, search=search_query,
                                     starred=starred_only,
                                     collection=collection_id, records=records)
-    filestore.select_ids([r["id"] for r in rows])
-    message = f"已全选 {len(rows)} 道题"
+    # “全选”是切换语义（2026-10-05 用户要求）：本范围已全部在勾选篮里时，
+    # 再次点击 = 取消本范围的选择，而不是把同一批题重选一遍。判断以服务端
+    # 勾选篮现状为准——前端只记“点过一次”的状态会在刷新/换范围后失真。
+    # 单题手动勾选与全选共用同一个篮子，所以“手动全勾满再点全选”同样进入取消分支。
+    ids = [r["id"] for r in rows]
+    selected_now = set(filestore.selected_ids())
+    if ids and all(qid in selected_now for qid in ids):
+        removed = filestore.deselect_ids(ids)
+        message = f"已取消本范围 {removed} 道题的选择"
+        action = "deselect"
+    else:
+        filestore.select_ids(ids)
+        message = f"已全选 {len(rows)} 道题"
+        action = "select"
     if request.accept_mimetypes.best == "application/json":
-        return jsonify(ok=True, count=filestore.count_selected(),
+        return jsonify(ok=True, action=action, count=filestore.count_selected(),
                        matched=len(rows), message=message)
     flash(message, "ok")
     return redirect(request.referrer or url_for("index"))
