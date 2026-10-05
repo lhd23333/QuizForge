@@ -38,7 +38,7 @@
   const SCOPE_LABEL = {selected: '已勾选题目', filtered: '当前筛选结果', all: '全部题目'};
   // 四维自定义组合的维度文案：与 exporter._LAYOUT_LABELS / _RATIO_LABELS 逐字
   // 一致（组合摘要要与后端 ExportLayoutSpec.label 同措辞）。
-  const LAYOUT_LABEL = {flow: '流式', compact: '紧凑', one: '一页一题', two: '一页两题'};
+  const LAYOUT_LABEL = {flow: '流式', compact: '紧凑', adaptive: '自适应', one: '一页一题', two: '一页两题'};
   const RATIO_LABEL = {a4: 'A4', wide: '横版 16:9'};
   // 命中 exporter._DIMS_TO_LEGACY 等价表的组合直接显示预设名：同一组四维不管
   // 从预设还是自定义进入，产物逐字节一致，对用户来说它就是那个预设。

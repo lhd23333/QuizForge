@@ -174,7 +174,8 @@
 
   // UI 防呆（后端 resolve_export_layout 有同规则 clamp 兜底，这里只是让用户
   // 点不出不存在的组合）：横版 16:9 只有「一页一题 + 单栏」；「一页 N 题」
-  // 是单栏页结构；双栏只服务流式/紧凑。
+  // 是单栏页结构；双栏只服务流式/紧凑/自适应（自适应+双栏 = 双栏刷题本来的
+  // 留白口径，不锁）。
   function syncDimsAvailability() {
     const layout = getRadio('layout');
     const columns = getRadio('columns');
@@ -182,6 +183,7 @@
     const pageLayout = layout === 'one' || layout === 'two';
     lockRadio('layout', 'flow', wide);
     lockRadio('layout', 'compact', wide);
+    lockRadio('layout', 'adaptive', wide);
     lockRadio('layout', 'two', wide || columns === '2');
     lockRadio('layout', 'one', columns === '2');
     lockRadio('columns', '2', wide || pageLayout);

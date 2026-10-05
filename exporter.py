@@ -2316,6 +2316,45 @@ def _paginate_stream(questions, *, compact=False):
     return [page] if page else []
 
 
+def _paginate_adaptive(questions, bank_subject="math", *, grouped=True):
+    """自适应版式（单栏）：流式排列，解答题不用半页槽——题后作答留白按难度与
+    一级小问数自动给（与双栏刷题的解答题同一公式，_answer_space 的 practice
+    参数，运行时可经 config.ANSWER_SPACE 覆写）。
+
+    grouped=True 按题型分桶重排（试卷/exam 同构：题号按桶序全卷连续、桶标题
+    独立成块），False 按选入顺序不重排。选填紧凑随文、无作答位；解答题留白量
+    由题目属性（难度、小问数）决定，与半页槽（按整题实测高度升级、最少占半页）
+    是两种取舍——自适应不为短题浪费半页，也不为长题自动升整页（长题自然跨页）。
+    """
+    page = []
+    num = 0
+
+    def add(q, qtype, solve):
+        nonlocal num
+        num += 1
+        item = {"kind": "question", "num": num, "body": q["body"],
+                "layout": "flow", "solution": q.get("solution"),
+                "type": qtype, **_img_fields(q)}
+        if solve:
+            # difficulty 进 block：渲染层 _practice_answer_space 要读它算留白
+            # （exam/practice 分页器同款处理；导出边界不能丢用户设的难度）。
+            item["adaptive_solve"] = True
+            item["difficulty"] = q.get("difficulty")
+        page.append(item)
+
+    if grouped:
+        for sec, (pkey, name, bucket) in enumerate(_bucket_questions(questions)):
+            page.append(_bucket_heading(sec, pkey, name, len(bucket),
+                                        bank_subject, None))
+            for q in bucket:
+                add(q, q.get("type"), pkey == "solve")
+    else:
+        for q in questions:
+            add(q, q.get("type"),
+                q.get("type") not in _SINGLE | _MULTI | _BLANK)
+    return [page] if page else []
+
+
 def _paginate_practice_stream(questions, *, compact=False):
     """双栏 + 不分题型：按选入顺序，整题走 practice 盒（双栏里不设半页槽——
     \\qslotopen 的测高基于页/栏余量，在 multicols 里不成立，legacy 双栏本来
@@ -2448,6 +2487,9 @@ def _paginate_custom(questions, spec, keypoints="", fullpage_ids=None,
         if spec.layout == "two":
             return _paginate_two_grouped(questions, fullpage_ids, bank_subject,
                                          std_points=sp)
+        if spec.layout == "adaptive":
+            return _paginate_adaptive(questions, bank_subject,
+                                      grouped=spec.grouped)
         return _paginate_stream(questions, compact=(spec.layout == "compact"))
 
     pages = dispatch()
@@ -2746,6 +2788,11 @@ def _render_block(b: dict, solution_mode: str = "none") -> str:
     else:
         md = _q_md(b["num"], body, b.get("type"), img_align, img_width,
                    img_split, img_layouts, img_files)
+        if b.get("adaptive_solve"):
+            # 自适应版式：解答题作答留白随难度与一级小问数自动变化（与双栏刷题
+            # 同一公式）；留白必须落在题干之后、解析之前——作答区不能被解析隔开。
+            md = md + _raw(
+                f"\\vspace{{{_practice_answer_space(body, b.get('difficulty'))}}}")
         if inline_solution:
             md += "\n\n" + inline_solution
         # flow / full / solve_compact 都直接排
@@ -2818,10 +2865,10 @@ SUPPORTED_FORMATS = frozenset({"pdf", "tex", "zip"})
 # 元组，所有已注册自定义模板的 supported_modes 都按它校验，Word 侧与任务面板
 # 另有多份白名单——新增枚举值会让全部存量模板与白名单失效。四维参数则不碰
 # 任何既有枚举。
-EXPORT_LAYOUTS = ("flow", "compact", "one", "two")
+EXPORT_LAYOUTS = ("flow", "compact", "adaptive", "one", "two")
 EXPORT_RATIOS = ("a4", "wide")
-_LAYOUT_LABELS = {"flow": "流式", "compact": "紧凑", "one": "一页一题",
-                  "two": "一页两题"}
+_LAYOUT_LABELS = {"flow": "流式", "compact": "紧凑", "adaptive": "自适应",
+                  "one": "一页一题", "two": "一页两题"}
 _RATIO_LABELS = {"a4": "A4", "wide": "横版 16:9"}
 
 # 四维组合 → 既有 mode 的等价表：命中即整体复用对应 legacy 路径（分页器、标题

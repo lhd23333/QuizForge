@@ -43,6 +43,7 @@ function makeDom(url = 'http://localhost/') {
         <input type="radio" name="preset" value="handout">
         <input type="radio" name="layout" value="flow" checked>
         <input type="radio" name="layout" value="compact">
+        <input type="radio" name="layout" value="adaptive">
         <input type="radio" name="layout" value="one">
         <input type="radio" name="layout" value="two">
         <input type="radio" name="grouped" value="1" checked>
@@ -206,6 +207,7 @@ test('选横版 16:9：收敛一页一题 + 单栏，不兼容项被禁用', () 
     doc.querySelector(`input[name="layout"][value="${value}"]`);
   assert.ok(layout('flow').disabled);
   assert.ok(layout('compact').disabled);
+  assert.ok(layout('adaptive').disabled);
   assert.ok(layout('two').disabled);
   assert.equal(layout('one').disabled, false);
   assert.ok(doc.querySelector('input[name="columns"][value="2"]').disabled);

@@ -73,6 +73,23 @@ class ResolveSpecTests(unittest.TestCase):
         self.assertTrue(spec.pagerel)
         self.assertEqual(spec.template_mode, "note")
 
+    def test_adaptive_derivation_and_wide_clamp(self):
+        spec = exporter.resolve_export_layout("adaptive", True, 1, "a4")
+        self.assertEqual(spec.layout, "adaptive")
+        self.assertEqual(spec.compat_mode, "list")
+        self.assertEqual(spec.template_mode, "exam")
+        self.assertFalse(spec.pagerel)
+        self.assertEqual(spec.label, "自适应·分题型·单栏·A4")
+        # 横版 16:9 不支持自适应：clamp 到一页一题（前端同步禁用该选项）。
+        wide = exporter.resolve_export_layout("adaptive", True, 1, "wide")
+        self.assertEqual((wide.layout, wide.columns), ("one", 1))
+
+    def test_adaptive_two_columns_keeps_columns(self):
+        spec = exporter.resolve_export_layout("adaptive", True, 2, "a4")
+        self.assertEqual(spec.columns, 2)
+        self.assertTrue(spec.two_columns)
+        self.assertEqual(spec.template_mode, "practice")
+
     def test_grouped_accepts_form_style_values(self):
         self.assertTrue(exporter.resolve_export_layout("flow", "1").grouped)
         self.assertFalse(exporter.resolve_export_layout("flow", "0").grouped)
@@ -216,6 +233,54 @@ class NewComboPaginationTests(unittest.TestCase):
             _questions(), TITLE, mode="list",
             layout="flow", grouped=False, columns=2, ratio="a4")
         self.assertIn("\\qpracticebegin", md)
+
+    def test_adaptive_solve_space_scales_with_difficulty_and_subquestions(self):
+        """自适应版式：解答题留白随难度与一级小问数变化，选填不留白。"""
+        questions = [
+            {"id": "a1", "type": "单选题",
+             "body": "1. 选 A 还是 B？（  ）\nA. 甲\nB. 乙\nC. 丙\nD. 丁"},
+            {"id": "a2", "type": "解答题", "body": "2. 求证 $a^2+b^2\\ge 2ab$。",
+             "difficulty": 1},
+            {"id": "a3", "type": "解答题",
+             "body": "3. 已知函数。\n（1）求导。\n（2）讨论单调性。\n（3）求最值。",
+             "difficulty": 5},
+        ]
+        pages = exporter.paginate(questions, mode="list", layout="adaptive",
+                                  grouped=False, columns=1, ratio="a4")
+        blocks = [b for p in pages for b in p]
+        self.assertEqual([b["layout"] for b in blocks], ["flow"] * 3)
+        self.assertFalse(blocks[0].get("adaptive_solve"))
+        self.assertTrue(blocks[1].get("adaptive_solve"))
+        self.assertEqual(blocks[1].get("difficulty"), 1)
+
+        md = exporter.build_markdown(
+            questions, TITLE, mode="list", layout="adaptive",
+            grouped=False, columns=1, ratio="a4")
+        # 低难度 1 问：base 3.0；高难度 3 问：3.0 + 1.5×2 + 1.0×4 = 10.0
+        self.assertIn("\\vspace{3.00\\baselineskip}", md)
+        self.assertIn("\\vspace{10.00\\baselineskip}", md)
+        # 只有解答题带留白（单选题不出现 \baselineskip 结尾的 vspace）
+        self.assertEqual(md.count("\\baselineskip}"), 2)
+
+    def test_adaptive_grouped_buckets_with_headings(self):
+        pages = self._paginate(layout="adaptive", grouped=True, columns=1,
+                               ratio="a4")
+        blocks = self._blocks(pages)
+        self.assertEqual(
+            [b["text"] for b in blocks if b["kind"] == "heading"],
+            ["一、单选题", "二、多选题", "三、填空题", "四、解答题"])
+        solve = [b for b in blocks if b.get("adaptive_solve")]
+        self.assertEqual(len(solve), 1)
+        self.assertEqual([b["num"] for b in blocks if b["kind"] == "question"],
+                         [1, 2, 3, 4])
+
+    def test_adaptive_two_columns_reuses_practice_stream(self):
+        """自适应 + 双栏 = 双栏流式的既有留白口径（qpracticesolve 作答盒）。"""
+        adaptive = self._paginate(layout="adaptive", grouped=False, columns=2,
+                                  ratio="a4")
+        flow = self._paginate(layout="flow", grouped=False, columns=2, ratio="a4")
+        self.assertEqual(adaptive, flow)
+        self.assertTrue(any(b.get("practice_solve") for b in adaptive[0]))
 
     def test_wide_separate_solutions_one_per_page(self):
         pages = self._paginate(layout="one", grouped=True, columns=None,
