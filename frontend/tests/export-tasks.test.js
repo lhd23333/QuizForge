@@ -259,3 +259,82 @@ test('空任务列表显示空状态提示', () => {
   assert.equal(doc.getElementById('export-empty-active').hidden, false);
   assert.equal(doc.querySelectorAll('.export-row').length, 0);
 });
+
+
+test('四维 payload：命中等价表显示预设名，行与详情一致', () => {
+  const dom = makeDom([
+    task({id: 'd1', status: 'done', stage_text: '已完成', percent: 100,
+          finished_at: 2000,
+          payload: {mode: 'list', scope: 'selected', solution_mode: 'none',
+                    layout: 'flow', grouped: '1', columns: '2', ratio: 'a4'}}),
+  ]);
+  boot(dom, {tasks: []});
+  const doc = dom.window.document;
+  // 四维仍是 mode="list" 占位，但组合等于「双栏刷题」预设 → 显示预设名。
+  assert.equal(doc.querySelector('.export-source').textContent,
+               '来源：数学题库 · 双栏刷题');
+
+  doc.querySelector('.export-name').click();
+  assert.ok(doc.getElementById('export-detail-body').textContent
+    .includes('双栏刷题'));
+});
+
+
+test('四维 payload：未命中组合显示维度摘要；讲义/笔记按知识要点区分', () => {
+  const dom = makeDom([
+    task({id: 'd2', status: 'failed', stage_text: '失败', finished_at: 5,
+          payload: {mode: 'list', layout: 'compact', grouped: '0',
+                    columns: '2', ratio: 'a4'}}),
+    task({id: 'd3', status: 'failed', stage_text: '失败', finished_at: 6,
+          payload: {mode: 'list', layout: 'two', grouped: '0',
+                    columns: '1', ratio: 'a4', keypoints: '本讲要点'}}),
+    task({id: 'd4', status: 'failed', stage_text: '失败', finished_at: 7,
+          payload: {mode: 'list', layout: 'two', grouped: '0',
+                    columns: '1', ratio: 'a4', keypoints: ''}}),
+  ]);
+  boot(dom, {tasks: []});
+  const doc = dom.window.document;
+  const sourceOf = id => doc.querySelector(
+    `.export-row[data-task-id="${id}"] .export-source`).textContent;
+
+  assert.equal(sourceOf('d2'), '来源：数学题库 · 紧凑·不分题型·双栏·A4');
+  assert.equal(sourceOf('d3'), '来源：数学题库 · 讲义');
+  assert.equal(sourceOf('d4'), '来源：数学题库 · 笔记');
+});
+
+
+test('四维 std_exam：mode 占位为 list 时详情仍显示卷首配置', () => {
+  const dom = makeDom([
+    task({id: 'd5', status: 'failed', stage_text: '失败', finished_at: 8,
+          payload: {mode: 'list', layout: 'flow', grouped: '1', columns: '1',
+                    ratio: 'a4', std_exam: true, solution_mode: 'none',
+                    std_opts: {subject: '数学',
+                               section_points: {single: '5', solve: '12'}}}}),
+  ]);
+  boot(dom, {tasks: []});
+  const doc = dom.window.document;
+  doc.querySelector('.export-name').click();
+  const body = doc.getElementById('export-detail-body').textContent;
+  assert.ok(body.includes('标准试卷'));
+  assert.ok(body.includes('科目'));
+  assert.ok(body.includes('单选 5 分'));
+  assert.ok(body.includes('解答 12 分'));
+});
+
+
+test('纸张底色：cream 显示米黄护眼，自定义色值原样显示', () => {
+  const dom = makeDom([
+    task({id: 'p1', status: 'failed', finished_at: 1, stage_text: '失败',
+          payload: {mode: 'exam', paper_tone: 'cream'}}),
+    task({id: 'p2', status: 'failed', finished_at: 2, stage_text: '失败',
+          payload: {mode: 'exam', paper_tone: '#ADD8E6'}}),
+  ]);
+  boot(dom, {tasks: []});
+  const doc = dom.window.document;
+  const detailOf = id => {
+    doc.querySelector(`.export-row[data-task-id="${id}"] .export-name`).click();
+    return doc.getElementById('export-detail-body').textContent;
+  };
+  assert.ok(detailOf('p1').includes('米黄护眼'));
+  assert.ok(detailOf('p2').includes('#ADD8E6'));
+});

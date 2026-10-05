@@ -36,6 +36,16 @@
   };
   const SOLUTION_LABEL = {none: '不带解析', inline: '题后附解析', separate: '解析另起页'};
   const SCOPE_LABEL = {selected: '已勾选题目', filtered: '当前筛选结果', all: '全部题目'};
+  // 四维自定义组合的维度文案：与 exporter._LAYOUT_LABELS / _RATIO_LABELS 逐字
+  // 一致（组合摘要要与后端 ExportLayoutSpec.label 同措辞）。
+  const LAYOUT_LABEL = {flow: '流式', compact: '紧凑', one: '一页一题', two: '一页两题'};
+  const RATIO_LABEL = {a4: 'A4', wide: '横版 16:9'};
+  // 命中 exporter._DIMS_TO_LEGACY 等价表的组合直接显示预设名：同一组四维不管
+  // 从预设还是自定义进入，产物逐字节一致，对用户来说它就是那个预设。
+  const DIMS_PRESET_LABEL = {
+    'flow|1|1|a4': '试卷', 'compact|1|1|a4': '清单', 'one|0|1|a4': '讲解',
+    'two|0|1|a4': '笔记', 'flow|1|2|a4': '双栏刷题', 'one|0|1|wide': '横版课件',
+  };
   const NON_ACTIVE = new Set(['done', 'cancelled', 'failed', 'interrupted']);
 
   function esc(text) { return String(text == null ? '' : text); }
@@ -67,6 +77,40 @@
     return 'bp-st bp-err-st';
   }
   function fmtLabel(fmt) { return FMT_LABEL[fmt] || fmt || ''; }
+  // 四维 payload → 规范化维度：clamp 与后端 resolve_export_layout 同口径
+  // （横版强制一页一题单栏、一页 N 题回落单栏；空值按后端 _as_bool 默认补全）。
+  // 旧 payload（无 layout 字段）返回 null，调用方回落 mode 文案——旧任务快照
+  // 的重试/展示因此逐字节不变。
+  function normalizeDims(payload) {
+    const p = payload || {};
+    let layout = p.layout;
+    if (!layout) return null;
+    let columns = String(p.columns == null ? '' : p.columns) === '2' ? 2 : 1;
+    const ratio = String(p.ratio || '').toLowerCase() === 'wide' ? 'wide' : 'a4';
+    if (ratio === 'wide') {
+      layout = 'one';
+      columns = 1;
+    } else if (columns === 2 && (layout === 'one' || layout === 'two')) {
+      columns = 1;
+    }
+    const grouped = !(String(p.grouped == null ? '' : p.grouped) === '0');
+    return {layout, grouped, columns, ratio};
+  }
+
+  function modeSummary(payload) {
+    const dims = normalizeDims(payload);
+    if (!dims) return MODE_LABEL[payload?.mode] || esc(payload?.mode || '');
+    const key = [dims.layout, dims.grouped ? '1' : '0', dims.columns, dims.ratio].join('|');
+    // 等价表里的两个组合各有内容型区分字段（与导出抽屉 highlightPresetFromDims
+    // 同口径）：std_exam 开→标准试卷；keypoints 非空→讲义。
+    if (key === 'flow|1|1|a4' && payload.std_exam) return '标准试卷';
+    if (key === 'two|0|1|a4' && payload.keypoints) return '讲义';
+    if (DIMS_PRESET_LABEL[key]) return DIMS_PRESET_LABEL[key];
+    return [LAYOUT_LABEL[dims.layout] || dims.layout,
+            dims.grouped ? '分题型' : '不分题型',
+            dims.columns === 2 ? '双栏' : '单栏',
+            RATIO_LABEL[dims.ratio] || dims.ratio].join('·');
+  }
   // 服务端的进度上限是 88，完成才是 100；失败/终止时进度条停在最后阶段，
   // 用户一眼能看出卡在哪一步（比如 50% 编译中）。
   function percentOf(task) {
@@ -144,7 +188,7 @@
     name.type = 'button';
     name.appendChild(el('span', 'export-title', esc(task.title) || '试卷'));
     const source = [task.bank ? '来源：' + esc(task.bank) : '',
-                    MODE_LABEL[task.payload?.mode] || ''].filter(Boolean).join(' · ');
+                    modeSummary(task.payload)].filter(Boolean).join(' · ');
     name.appendChild(el('span', 'muted export-source', source));
     row.appendChild(name);
 
@@ -177,7 +221,7 @@
     return [task.status, task.stage_text || '', percentOf(task),
             Number(task.question_count) || 0, task.error || '',
             task.artifact?.name || '', task.title || '', task.fmt || '',
-            task.bank || '', task.payload?.mode || ''].join('|');
+            task.bank || '', modeSummary(task.payload)].join('|');
   }
 
   function updateRow(row, task) {
@@ -193,7 +237,7 @@
     const source = row.querySelector('.export-source');
     if (source) {
       source.textContent = [task.bank ? '来源：' + esc(task.bank) : '',
-                            MODE_LABEL[task.payload?.mode] || '']
+                            modeSummary(task.payload)]
         .filter(Boolean).join(' · ');
     }
     const oldChips = row.querySelector('.bo-chips');
@@ -346,7 +390,7 @@
       + (task.bank_path ? '（' + esc(task.bank_path) + '）' : ''));
     const payload = task.payload || {};
     detailRow(dl, '导出格式', fmtLabel(task.fmt));
-    detailRow(dl, '版式模式', MODE_LABEL[payload.mode] || esc(payload.mode));
+    detailRow(dl, '版式模式', modeSummary(payload));
     const scopeText = SCOPE_LABEL[payload.scope] || esc(payload.scope) || '';
     detailRow(dl, '范围', scopeText
       + (payload.scope === 'selected' && payload.pinned_ids?.length
@@ -356,7 +400,9 @@
       ? task.question_count + ' 题' : '');
     if (payload.keypoints) detailRow(dl, '知识要点', truncate(payload.keypoints, 200));
     const so = payload.std_opts || {};
-    if (payload.mode === 'exam_std') {
+    // 四维自定义 + std_exam 开关的任务 mode 是 "list" 占位，按开关判断才能
+    // 显示卷首配置（旧 payload 没有 std_exam 字段，保持原 mode 判断兼容）。
+    if (payload.mode === 'exam_std' || payload.std_exam) {
       detailRow(dl, '科目', esc(so.subject));
       if (so.secret_notice) detailRow(dl, '保密说明', esc(so.secret_notice));
       if (so.exam_notes) detailRow(dl, '卷首说明', truncate(so.exam_notes, 200));
@@ -372,7 +418,8 @@
         .filter(Boolean).join(' / '));
     }
     if (payload.paper_tone && payload.paper_tone !== 'white') {
-      detailRow(dl, '纸张底色', '米黄护眼');
+      detailRow(dl, '纸张底色', payload.paper_tone === 'cream'
+        ? '米黄护眼' : esc(payload.paper_tone));
     }
     if (payload.wimath_logo) detailRow(dl, 'WIMath 标志', '已启用');
     if (payload.show_source) detailRow(dl, '显示题源', '已启用');
