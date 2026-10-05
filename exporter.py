@@ -20,6 +20,7 @@ import time
 import unicodedata
 import zipfile
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -1908,19 +1909,30 @@ def _img_fields(q: dict) -> dict:
 
 def paginate(questions: list[dict], mode: str = "list", keypoints: str = "",
              fullpage_ids=None, solution_mode: str = "none",
-             std_opts: dict = None, bank_subject: str = "math") -> list[list[dict]]:
+             std_opts: dict = None, bank_subject: str = "math",
+             *, layout=None, grouped=None, columns=None, ratio=None,
+             std_exam=False) -> list[list[dict]]:
     """把题目按模式分页，返回 list[page]（page=block 列表）。纯函数，无副作用。
 
     solution_mode='separate' 时，在题目页之后追加「解析」独占页（题号对应）。
     inline/none 由 _render_block 逐题处理，不影响分页。
     std_opts: 标准试卷（exam_std）的分值说明等选项。
+    layout/grouped/columns/ratio/std_exam: 导出抽屉的四维度自定义组合；全不传
+    （layout=None）时走原 mode 逻辑，行为与改动前逐字节一致。互斥/折算规则见
+    resolve_export_layout。
     """
+    spec = resolve_export_layout(layout=layout, grouped=grouped, columns=columns,
+                                 ratio=ratio, std_exam=std_exam)
     _validate_export_options(mode=mode, solution_mode=solution_mode)
     # 与 Word 侧一致做 str 归一：Agent/插件可能按文档传数字 id，裸比较会让
     # 「独占整页」静默失效（2026-10-04 审查）。
     fullpage_ids = {str(v) for v in (fullpage_ids or [])}
 
-    if mode == "exam_std":
+    if spec is not None:
+        pages = _paginate_custom(questions, spec, keypoints=keypoints,
+                                 fullpage_ids=fullpage_ids, std_opts=std_opts,
+                                 bank_subject=bank_subject)
+    elif mode == "exam_std":
         pages = _paginate_exam_std(questions, std_opts or {}, bank_subject)
     elif mode == "exam":
         pages = _paginate_exam(questions, bank_subject)
@@ -1938,7 +1950,9 @@ def paginate(questions: list[dict], mode: str = "list", keypoints: str = "",
         pages = _paginate_list(questions, bank_subject)
 
     if solution_mode == "separate":
-        pages = pages + _solution_pages(pages, one_per_page=(mode == "slides"))
+        # 解析一页一条只属于 16:9 课件语义（含自定义的 one+wide 组合）。
+        one_pp = spec.one_solution_per_page if spec is not None else (mode == "slides")
+        pages = pages + _solution_pages(pages, one_per_page=one_pp)
     return pages
 
 
@@ -2247,6 +2261,200 @@ def _paginate_handout(questions, keypoints, fullpage_ids):
     if keypoints.strip():
         pages.append([{"kind": "keypoints", "text": keypoints.strip()}])
     pages.extend(_paginate_two(questions, fullpage_ids, start_num=1))
+    return pages
+
+
+# ---------------------------------------------------------------------------
+# 四维度自定义组合的分页（2026-10-05 导出抽屉）
+# 只在 layout 非 None 时进入。命中等价表的组合直接复用上面的 legacy 分页器；
+# 其余 8 个组合走下面 4 个薄函数。渲染层与模板零改动——这里只产出既有的
+# layout 标记（flow / slot_half / full / practice / slide）与 heading 块。
+# ---------------------------------------------------------------------------
+
+_BUCKET_ORDER = (("single", "单选题"), ("multi", "多选题"),
+                 ("blank", "填空题"), ("solve", "解答题"))
+
+
+def _bucket_questions(questions):
+    """按四类题型分桶（与 _paginate_list/_paginate_practice 同一归类），空桶剔除。"""
+    buckets = {
+        "single": [q for q in questions if q.get("type") in _SINGLE],
+        "multi": [q for q in questions if q.get("type") in _MULTI],
+        "blank": [q for q in questions if q.get("type") in _BLANK],
+        "solve": [q for q in questions
+                  if q.get("type") not in _SINGLE | _MULTI | _BLANK],
+    }
+    return [(pkey, name, buckets[pkey]) for pkey, name in _BUCKET_ORDER
+            if buckets[pkey]]
+
+
+def _bucket_heading(sec, pkey, name, count, bank_subject, std_points):
+    """分桶大题标题块。std_points 非空时按标准试卷样式附分值说明（exam_std 语义）。"""
+    block = {"kind": "heading",
+             "text": f"{_CN_NUM[sec]}、{_display_type_name(name, bank_subject)}"}
+    if std_points is not None:
+        block["points"] = _std_section_desc(pkey, count, std_points.get(pkey, ""))
+        block["colon"] = True
+    return block
+
+
+def _paginate_stream(questions, *, compact=False):
+    """流式 / 紧凑 + 不分题型：严格按选入顺序，不重排、不加大题标题。
+
+    compact=False（流式）：选填紧凑流排、解答题半页槽（放不下由 TeX 自动升级
+    整页）——与试卷（exam）同一条「自动留空」规则，只是不按题型分桶；
+    compact=True（紧凑）：全部 flow 连续排，零留白（相当于去掉分桶的清单）。
+    """
+    page = []
+    for i, q in enumerate(questions, 1):
+        qtype = q.get("type")
+        solve = qtype not in _SINGLE | _MULTI | _BLANK
+        layout = "flow" if (compact or not solve) else "slot_half"
+        page.append({"kind": "question", "num": i, "body": q["body"],
+                     "layout": layout, "solution": q.get("solution"),
+                     "type": qtype, **_img_fields(q)})
+    return [page] if page else []
+
+
+def _paginate_practice_stream(questions, *, compact=False):
+    """双栏 + 不分题型：按选入顺序，整题走 practice 盒（双栏里不设半页槽——
+    \\qslotopen 的测高基于页/栏余量，在 multicols 里不成立，legacy 双栏本来
+    就把整题交给 qpracticesolve 盒子）。
+
+    compact=False（流式）：解答题用 qpracticesolve 作答盒、题间断栏（与 legacy
+    双栏的解答题口径一致）；compact=True（紧凑）：全部题走 samepage 题干盒、
+    不留作答空白——「不留空」在双栏下靠的就是不设 practice_solve，渲染层零改动。
+    """
+    page = []
+    solve_idx = 0
+    for i, q in enumerate(questions, 1):
+        qtype = q.get("type")
+        solve = qtype not in _SINGLE | _MULTI | _BLANK
+        block = {"kind": "question", "num": i, "body": q["body"],
+                 "layout": "practice", "solution": q.get("solution"),
+                 "type": qtype, **_img_fields(q)}
+        if solve and not compact:
+            block["practice_solve"] = True
+            block["practice_solve_index"] = solve_idx
+            solve_idx += 1
+        page.append(block)
+    return [page] if page else []
+
+
+def _paginate_one_grouped(questions, bank_subject="math", *,
+                          slide_mode=False, std_points=None):
+    """一页一题 + 分题型：分桶重排（题号按桶序连续），桶内每题独占一页。
+
+    slide_mode（16:9 横版）：全部 layout="slide"（课件渲染，每题一张）；
+    否则选填 slot_half（超半页自动升级）、解答 full 独占——与讲解（lecture）
+    同一条规则，保证「一页一题」在 ±分题型两个选法下行为一致，差异只有重排
+    与桶标题。桶标题是独立 heading 块：full / slide 两种 layout 都不消费题目
+    block 上的 heading 字段（见 _render_block），绑定在题上会整段消失。
+    """
+    pages = []
+    page = _new_page(pages)
+    num = 1
+    for sec, (pkey, name, bucket) in enumerate(_bucket_questions(questions)):
+        page.append(_bucket_heading(sec, pkey, name, len(bucket),
+                                    bank_subject, std_points))
+        for q in bucket:
+            if slide_mode:
+                page.append({"kind": "question", "num": num, "body": q["body"],
+                             "layout": "slide", "solution": q.get("solution"),
+                             "type": q.get("type"), **_img_fields(q)})
+                page = _new_page(pages)
+            elif pkey == "solve":
+                page.append({"kind": "question", "num": num, "body": q["body"],
+                             "layout": "full", "solution": q.get("solution"),
+                             "type": q.get("type"), **_img_fields(q)})
+                page = _new_page(pages)
+            else:
+                page.append({"kind": "question", "num": num, "body": q["body"],
+                             "layout": "slot_half", "solution": q.get("solution"),
+                             "type": name, **_img_fields(q)})
+            num += 1
+    return [p for p in pages if p]
+
+
+def _paginate_two_grouped(questions, fullpage_ids, bank_subject="math", *,
+                          std_points=None):
+    """一页两题 + 分题型：分桶重排，桶内每题半页槽（note 规则），每桶从新页起。
+
+    fullpage_ids 的手动整页开关仍然生效（题卡上点过「独占整页」的题优先于
+    自适应槽位，与 _paginate_two 同一口径）。
+    """
+    pages = []
+    page = _new_page(pages)
+    num = 1
+    for sec, (pkey, name, bucket) in enumerate(_bucket_questions(questions)):
+        if any(page):
+            page = _new_page(pages)
+        page.append(_bucket_heading(sec, pkey, name, len(bucket),
+                                    bank_subject, std_points))
+        for q in bucket:
+            if q.get("id") in fullpage_ids:
+                if any(page):
+                    page = _new_page(pages)
+                page.append({"kind": "question", "num": num, "body": q["body"],
+                             "layout": "full", "solution": q.get("solution"),
+                             "type": q.get("type"), **_img_fields(q)})
+                page = _new_page(pages)
+                num += 1
+                continue
+            page.append({"kind": "question", "num": num, "body": q["body"],
+                         "layout": "slot_half", "solution": q.get("solution"),
+                         "type": q.get("type"), **_img_fields(q)})
+            num += 1
+    return [p for p in pages if p]
+
+
+def _paginate_custom(questions, spec, keypoints="", fullpage_ids=None,
+                     std_opts=None, bank_subject="math"):
+    """四维自定义组合的分页总入口：命中等价表复用 legacy 分页器，其余走薄策略。"""
+
+    def dispatch():
+        key = (spec.layout, spec.grouped, spec.columns, spec.ratio)
+        sp = None
+        if spec.std_head:
+            sp = (std_opts or {}).get("section_points") or {}
+            if key == ("flow", True, 1, "a4"):
+                # 标准试卷预设的四维 + 开关：与 legacy exam_std 完全同一条路径
+                return _paginate_exam_std(questions, std_opts or {}, bank_subject)
+        legacy = _DIMS_TO_LEGACY.get(key)
+        if legacy == "exam":
+            return _paginate_exam(questions, bank_subject)
+        if legacy == "list":
+            return _paginate_list(questions, bank_subject)
+        if legacy == "lecture":
+            return _paginate_lecture(questions)
+        if legacy == "note":
+            return _paginate_two(questions, fullpage_ids, start_num=1)
+        if legacy == "practice":
+            return _paginate_practice(questions, bank_subject)
+        if legacy == "slides":
+            return _paginate_slides(questions)
+        # —— 8 个新组合（薄策略；wide 与 columns=2 已被 resolve clamp 互斥）——
+        if spec.wide:
+            return _paginate_one_grouped(questions, bank_subject,
+                                         slide_mode=True, std_points=sp)
+        if spec.columns == 2:
+            if spec.layout == "compact" and spec.grouped:
+                return _paginate_list(questions, bank_subject)
+            return _paginate_practice_stream(
+                questions, compact=(spec.layout == "compact"))
+        if spec.layout == "one":
+            return _paginate_one_grouped(questions, bank_subject,
+                                         slide_mode=False, std_points=sp)
+        if spec.layout == "two":
+            return _paginate_two_grouped(questions, fullpage_ids, bank_subject,
+                                         std_points=sp)
+        return _paginate_stream(questions, compact=(spec.layout == "compact"))
+
+    pages = dispatch()
+    # 知识要点是内容型字段（非空即生效）：与讲义（handout）同一规则，一页两题
+    # 组合带知识要点时独占首页。其余组合没有「讲义首页」的语义，忽略。
+    if keypoints and keypoints.strip() and spec.layout == "two":
+        pages = [[{"kind": "keypoints", "text": keypoints.strip()}]] + pages
     return pages
 
 
@@ -2599,6 +2807,152 @@ SUPPORTED_MODES = frozenset(_MODES)
 SUPPORTED_SOLUTION_MODES = frozenset({"none", "inline", "separate"})
 SUPPORTED_FORMATS = frozenset({"pdf", "tex", "zip"})
 
+# —— 四维度布局规格（2026-10-05 导出抽屉）——
+# 「版式 / 分类模式 / 页面模式 / 比例」从 mode 枚举里拆出来，成为四个独立维度。
+# 历史上四者收敛在 mode 一个枚举里，只能覆盖 6 种有效组合，用户在自定义里选
+# 「一页两题 + 分题型」这类组合就没有生成路径。本层只服务自定义组合：调用方
+# 不传 layout（None）时完全不经过这里，旧调用方 / 旧任务快照 / Agent / Word
+# 链路的 mode 行为一个字节不变（tests/test_export_golden.py 逐字符钉住）。
+#
+# 为什么不直接扩 mode 枚举：template_pipeline.SUPPORTED_MODES 是硬编码 8 值
+# 元组，所有已注册自定义模板的 supported_modes 都按它校验，Word 侧与任务面板
+# 另有多份白名单——新增枚举值会让全部存量模板与白名单失效。四维参数则不碰
+# 任何既有枚举。
+EXPORT_LAYOUTS = ("flow", "compact", "one", "two")
+EXPORT_RATIOS = ("a4", "wide")
+_LAYOUT_LABELS = {"flow": "流式", "compact": "紧凑", "one": "一页一题",
+                  "two": "一页两题"}
+_RATIO_LABELS = {"a4": "A4", "wide": "横版 16:9"}
+
+# 四维组合 → 既有 mode 的等价表：命中即整体复用对应 legacy 路径（分页器、标题
+# 样式、槽位基准、模板变量全同），保证「预设 = 把选项选好」——同一组四维不管
+# 从预设还是自定义进入，产物逐字节一致（tests/test_export_layout_spec.py 对拍
+# 钉住）。std_exam 是另开的正交开关（见 resolve_export_layout）：它把
+# (flow, 分题型, 单栏, A4) 提升为 exam_std 完整路径，避免「选了标准试卷再动
+# 一个维度，卷头静默消失」。
+_DIMS_TO_LEGACY = {
+    ("flow", True, 1, "a4"): "exam",
+    ("compact", True, 1, "a4"): "list",
+    ("one", False, 1, "a4"): "lecture",
+    ("two", False, 1, "a4"): "note",
+    ("flow", True, 2, "a4"): "practice",
+    ("one", False, 1, "wide"): "slides",
+}
+
+
+@dataclass(frozen=True)
+class ExportLayoutSpec:
+    """自定义导出组合归一化后的规格（layout=None 时由 resolve 返回 None）。
+
+    前 5 个字段是 clamp 后的用户维度；其余是按它们推导的派生值——分页、标题、
+    槽位基准、模板变量、任务面板各消费点统一读这里，避免各自重复推导出不一致。
+    compat_mode 是命中等价表时的 legacy mode（否则 "list"）：自定义组合的标题
+    样式等按它锚定，与预设路径保持同源。
+    """
+
+    layout: str
+    grouped: bool
+    columns: int
+    ratio: str
+    std_exam: bool
+    wide: bool
+    two_columns: bool
+    pagerel: bool
+    one_solution_per_page: bool
+    std_head: bool
+    compat_mode: str
+    template_mode: str
+    label: str
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    """宽松布尔解析：表单 / 快照 / Agent 可能给 bool、1/0 或 "1"/"0"/""。
+
+    空串视为「未提供」返回 default——表单没填和明确填 0 是两种语义，不能把
+    没填的复选框静默当成「关」。"""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text == "":
+            return default
+        return text not in ("0", "false", "off", "no")
+    return bool(value)
+
+
+def resolve_export_layout(layout=None, grouped=None, columns=None, ratio=None,
+                          std_exam=False) -> "ExportLayoutSpec | None":
+    """四维度原始值 → ExportLayoutSpec；layout 为 None 时返回 None（legacy 路径）。
+
+    clamp 规则（前端会同步禁用矛盾组合，这里只是后端兜底，不报错）：
+      - 横版 16:9 只支持「一页一题」：ratio=wide 强制 layout=one、columns=1；
+      - 「一页一题 / 一页两题」是单栏页结构：columns=2 一律回落单栏；
+      - 卷首开关 std_exam 只在单栏 A4 下生效（横版是课件没有卷头概念；双栏里
+        卷头与双栏标题各行其是，与其渲染错位，不如明确只在单栏 A4 生效）。
+    非法枚举值不静默回落——与 mode 校验同一原则，拼写错误要立刻报出来。
+    """
+    if layout is None:
+        return None
+    if not isinstance(layout, str) or layout not in EXPORT_LAYOUTS:
+        raise ExportError(f"不支持的版式：{layout}")
+    if ratio in (None, ""):
+        ratio = "a4"
+    if not isinstance(ratio, str) or ratio not in EXPORT_RATIOS:
+        raise ExportError(f"不支持的比例：{ratio}")
+    if columns in (None, ""):
+        columns = 1
+    try:
+        columns = int(columns)
+    except (TypeError, ValueError):
+        columns = 0
+    if columns not in (1, 2):
+        raise ExportError(f"不支持的页面模式：{columns}")
+    grouped = _as_bool(grouped, default=True)
+    std_exam = _as_bool(std_exam)
+
+    wide = ratio == "wide"
+    if wide:
+        layout = "one"          # 横版只支持一页一题
+        columns = 1
+    elif columns == 2 and layout in ("one", "two"):
+        columns = 1             # 一页 N 题是单栏页结构
+
+    std_head = std_exam and columns == 1 and not wide
+    key = (layout, grouped, columns, ratio)
+    if std_head and key == ("flow", True, 1, "a4"):
+        compat = "exam_std"     # 与标准试卷预设完全同一条路径
+    else:
+        compat = _DIMS_TO_LEGACY.get(key, "list")
+
+    # 模板门禁折算（_resolve_template_path 的 ensure_mode 用）：按组合实际需要的
+    # 运行时宏对齐 template_pipeline._RUNTIME_BY_MODE——横版要 qslide 宏、双栏要
+    # qpractice 宏、槽位类要 qslot 宏、卷头要 qnotebox。同类里取要求更宽松的那个
+    # （如流式解答题的槽位宏在 exam 与 note 下相同，取 exam 即可）。
+    if wide:
+        template_mode = "slides"
+    elif columns == 2:
+        template_mode = "practice"
+    elif std_head:
+        template_mode = "exam_std"
+    elif layout == "two":
+        template_mode = "note"
+    elif layout == "one":
+        template_mode = "lecture"
+    elif layout == "compact":
+        template_mode = "list"
+    else:
+        template_mode = "exam"
+
+    label = (f"{_LAYOUT_LABELS[layout]}·"
+             f"{'分题型' if grouped else '不分题型'}·"
+             f"{'双栏' if columns == 2 else '单栏'}·{_RATIO_LABELS[ratio]}")
+    return ExportLayoutSpec(
+        layout=layout, grouped=grouped, columns=columns, ratio=ratio,
+        std_exam=std_exam, wide=wide, two_columns=columns == 2,
+        pagerel=layout in ("one", "two") and not wide,
+        one_solution_per_page=wide, std_head=std_head,
+        compat_mode=compat, template_mode=template_mode, label=label)
+
 
 def _validate_export_options(*, mode: str, solution_mode: str,
                              fmt: str | None = None) -> None:
@@ -2774,7 +3128,9 @@ def _std_head_latex(title: str, secret_notice: str, exam_notes: str,
 def build_markdown(questions: list[dict], title: str, mode: str = "list",
                    keypoints: str = "", fullpage_ids=None,
                    solution_mode: str = "none", std_opts: dict = None,
-                   bank_subject: str = "math") -> str:
+                   bank_subject: str = "math",
+                   *, layout=None, grouped=None, columns=None, ratio=None,
+                   std_exam=False) -> str:
     """按模式拼装整份 Markdown（含 raw-LaTeX 分页指令）。
 
     分页交给 paginate()（与预览同源），此处只把页结构渲染成 Markdown。
@@ -2783,25 +3139,41 @@ def build_markdown(questions: list[dict], title: str, mode: str = "list",
         exam_std 还在标题前后加保密说明/卷首说明并收紧行距；
       - 其他模式：走 pandoc 的 `% title` → \\maketitle（可能独占首页，可接受）。
     solution_mode: none 不出解析 / inline 题后 / separate 解析另起页。
+    layout/grouped/columns/ratio/std_exam: 四维自定义组合（见 paginate）；全不传
+    时走原 mode 逻辑，行为与改动前逐字节一致。
     """
+    spec = resolve_export_layout(layout=layout, grouped=grouped, columns=columns,
+                                 ratio=ratio, std_exam=std_exam)
     pages = paginate(questions, mode=mode, keypoints=keypoints,
                      fullpage_ids=fullpage_ids, solution_mode=solution_mode,
-                     std_opts=std_opts, bank_subject=bank_subject)
-    if mode == "slides":
+                     std_opts=std_opts, bank_subject=bank_subject,
+                     layout=layout, grouped=grouped, columns=columns,
+                     ratio=ratio, std_exam=std_exam)
+    # 文档族判定：自定义组合按 spec 派生值，legacy 按 mode。等价组合（含 std_exam
+    # 提升的 exam_std）下两者一致，由 golden 基线与等价对拍测试钉住。
+    slide_doc = spec.wide if spec is not None else mode == "slides"
+    two_col_doc = spec.two_columns if spec is not None else mode == "practice"
+    std_doc = spec.std_head if spec is not None else mode == "exam_std"
+    exam_doc = ((spec.compat_mode == "exam") if spec is not None
+                else mode == "exam")
+    if slide_doc:
         pages = [[{"kind": "slide_cover", "text": title}]] + pages
     body = (_render_practice_pages(pages, solution_mode)
-            if mode == "practice" else _render_pages(pages, solution_mode))
+            if two_col_doc else _render_pages(pages, solution_mode))
     # 槽位基准高度模式（见 exam_template.tex 的 \ifqslotpagerel）：
     # 讲义/讲解/笔记按「每页 N 题」平分本页可用高度——首页有标题块也要放满 N 题；
     # 简单试卷的「半页」是半张纸的作答空间，必须按整个版心算，放不下就整题挪下一页。
     if body:
-        rel = "true" if mode in _SLOT_PAGEREL_MODES else "false"
+        if spec is not None:
+            rel = "true" if spec.pagerel else "false"
+        else:
+            rel = "true" if mode in _SLOT_PAGEREL_MODES else "false"
         body = _slot_mode_latex(rel) + body
 
-    if mode == "slides":
+    if slide_doc:
         # 封面由 \qslidecover 渲染，不能再给 pandoc title，否则会多出一张默认标题页。
         parts = ["% ", "", body]
-    elif mode == "practice":
+    elif two_col_doc:
         # 标题与页眉页脚横跨两栏；正文自己的 qpracticebegin/qpracticeend 只包题目区。
         # 模板全局已有 \pagestyle{fancy}，这里再显式钉住首页，避免将来标题实现改回
         # \maketitle 或引入其它 page style 时，双栏首页悄悄退回 plain 丢掉页眉页脚。
@@ -2811,14 +3183,14 @@ def build_markdown(questions: list[dict], title: str, mode: str = "list",
             f"\\end{{center}}\\vspace{{0.3em}}"
         )
         parts = ["% ", "", head, body]
-    elif mode == "exam_std":
+    elif std_doc:
         so = std_opts or {}
         head = _std_head_latex(title, so.get("secret_notice", ""),
                                so.get("exam_notes", ""),
                                subject=so.get("subject", ""),
                                info_bar=so.get("info_bar", True))
         parts = ["% ", "", head, body]
-    elif mode == "exam":
+    elif exam_doc:
         # 不给 pandoc title（首行留空），自己在正文顶部加居中标题。
         # 这里是 raw LaTeX，标题必须自己转义（走 `% title` 的模式由 pandoc 负责）。
         head = _raw(
@@ -3813,7 +4185,9 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
            wimath_logo: bool = False, bank_subject: str = "math",
            template_path: str | Path | None = None,
            cjk_font: str = "", latin_font: str = "",
-           progress=None, cancel=None) -> Path:
+           progress=None, cancel=None,
+           *, layout=None, grouped=None, columns=None, ratio=None,
+           std_exam=False) -> Path:
     """在有界编译槽内导出；公开签名向后兼容（新增可选字体/进度/取消参数）。
 
     progress: ``callable(stage, detail)`` 进度回调。stage 取值 staging /
@@ -3823,6 +4197,8 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
         进度上报不能反过来杀死编译。
     cancel: 带 ``is_set()`` 的取消标记（threading.Event）。置位后终止整棵
         编译进程树并抛 ``ExportCancelled``；排队等待编译槽期间同样响应。
+    layout/grouped/columns/ratio/std_exam: 导出抽屉的四维自定义组合；全不传
+        时走原 mode 逻辑（旧调用方/快照零感知）。
     """
     _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
     # 循环轮询拿槽：排队期间被用户终止的任务不该继续占着工作线程白等
@@ -3840,6 +4216,8 @@ def export(questions: list[dict], title: str = "试卷", fmt: str = "pdf",
             bank_subject=bank_subject, template_path=template_path,
             cjk_font=cjk_font, latin_font=latin_font,
             progress=progress, cancel=cancel,
+            layout=layout, grouped=grouped, columns=columns, ratio=ratio,
+            std_exam=std_exam,
         )
     finally:
         _EXPORT_SLOTS.release()
@@ -3854,7 +4232,9 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
                      bank_subject: str = "math",
                      template_path: str | Path | None = None,
                      cjk_font: str = "", latin_font: str = "",
-                     progress=None, cancel=None) -> Path:
+                     progress=None, cancel=None,
+                     *, layout=None, grouped=None, columns=None, ratio=None,
+                     std_exam=False) -> Path:
     """导出为 tex / pdf / zip（tex + 插图打包），返回产物路径。
 
     questions: dict 列表，每项含 id/body/type/solution。
@@ -3871,6 +4251,10 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
     if not questions:
         raise ExportError("没有题目可导出")
     _validate_export_options(mode=mode, solution_mode=solution_mode, fmt=fmt)
+    # 四维组合在写任何文件之前归一（非法值要早于工作目录创建报错）；spec 为
+    # None 时以下各消费点全走原 mode 逻辑。
+    spec = resolve_export_layout(layout=layout, grouped=grouped, columns=columns,
+                                 ratio=ratio, std_exam=std_exam)
 
     def emit(stage: str, detail: dict | None = None) -> None:
         if progress is None:
@@ -3905,17 +4289,31 @@ def _export_unlocked(questions: list[dict], title: str = "试卷", fmt: str = "p
         md_path.write_text(
             build_markdown(questions, title, mode=mode, keypoints=keypoints,
                            fullpage_ids=fullpage_ids, solution_mode=solution_mode,
-                           std_opts=std_opts, bank_subject=bank_subject),
+                           std_opts=std_opts, bank_subject=bank_subject,
+                           layout=layout, grouped=grouped, columns=columns,
+                           ratio=ratio, std_exam=std_exam),
             encoding="utf-8",
         )
 
         # 2. pandoc → tex（页眉页脚用 -V 变量传入，不被 pandoc 转义）
-        template_source = _resolve_template_path(template_path, mode=mode)
+        # 模板门禁按四维组合折算后的 mode 校验（宽版要 qslide 宏、双栏要
+        # qpractice 宏、卷头要 qnotebox——见 resolve_export_layout）；legacy
+        # 调用即原 mode，校验面不变。
+        template_source = _resolve_template_path(
+            template_path,
+            mode=(spec.template_mode if spec is not None else mode))
         template_for_pandoc = _stage_template_resources(
             template_source, work_dir) if template_path is not None else template_source
         cmd = [config.PANDOC, str(md_path), "-o", str(tex_path),
                "--template", str(template_for_pandoc)]
-        if mode == "slides":
+        if spec is not None:
+            # 模板几何变量由组合本身决定（16:9 页面尺寸 / 双栏窄边距），与
+            # legacy slides/practice 的 -V 完全同源。
+            if spec.wide:
+                cmd += ["-V", "slides=1"]
+            elif spec.two_columns:
+                cmd += ["-V", "practice=1"]
+        elif mode == "slides":
             cmd += ["-V", "slides=1"]
         elif mode == "practice":
             cmd += ["-V", "practice=1"]

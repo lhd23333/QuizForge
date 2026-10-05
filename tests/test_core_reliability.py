@@ -2156,6 +2156,102 @@ class PageTests(unittest.TestCase):
             for call in export_mock.call_args_list
         ))
 
+    def test_dimension_export_passes_four_dims_and_normalizes_custom_mode(self):
+        produced = config.OUTPUT_DIR / "dims.pdf"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_bytes(b"%PDF-1.4\n")
+        question = {
+            "id": "dims-export", "body": "四维组合题", "solution": "",
+            "type": "填空题", "source": "", "difficulty": "", "tags": [],
+            "img_align": "", "img_width": None, "img_split": None,
+            "img_layouts": [], "sol_img_split": None, "sol_img_layouts": [],
+        }
+        service = export_service.ExportService(persist=False, autostart=False)
+        self.addCleanup(service.shutdown)
+        with (mock.patch.object(app_module, "_collect_questions",
+                                return_value=[question]),
+              mock.patch.object(app_module, "_export_service", service),
+              mock.patch.object(app_module.service_ports, "export_document",
+                                return_value=produced) as export_mock):
+            response = app_module.app.test_client().post(
+                "/export", data={"fmt": "pdf", "scope": "all", "mode": "custom",
+                                 "layout": "flow", "grouped": "0",
+                                 "columns": "1", "ratio": "a4"},
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+            self.assertEqual(response.status_code, 200)
+            service.run_task_sync(response.get_json()["task_id"])
+        kwargs = export_mock.call_args.kwargs
+        # "custom" 是前端过渡值：payload 里 mode 已归一为占位 list，
+        # 四维原样透传到导出入参。
+        self.assertEqual(kwargs["mode"], "list")
+        self.assertEqual(kwargs["layout"], "flow")
+        self.assertEqual(kwargs["grouped"], "0")
+        self.assertEqual(kwargs["columns"], "1")
+        self.assertEqual(kwargs["ratio"], "a4")
+        self.assertFalse(kwargs["std_exam"])
+
+    def test_dimension_export_rejects_invalid_layout_and_word(self):
+        for data in (
+            {"fmt": "pdf", "scope": "all", "layout": "grid"},
+            {"fmt": "pdf", "scope": "all", "layout": "flow", "columns": "3"},
+            {"fmt": "docx", "scope": "all", "layout": "flow"},
+        ):
+            with self.subTest(**data):
+                response = app_module.app.test_client().post(
+                    "/export", data=data,
+                    headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+                self.assertEqual(response.status_code, 400)
+
+    def test_retry_replays_dimension_payload(self):
+        produced = config.OUTPUT_DIR / "retry-dims.pdf"
+        produced.parent.mkdir(parents=True, exist_ok=True)
+        produced.write_bytes(b"%PDF-1.4\n")
+        question = {
+            "id": "dims-retry", "body": "重试四维题", "solution": "",
+            "type": "填空题", "source": "", "difficulty": "", "tags": [],
+            "img_align": "", "img_width": None, "img_split": None,
+            "img_layouts": [], "sol_img_split": None, "sol_img_layouts": [],
+        }
+        service = export_service.ExportService(persist=False, autostart=False)
+        self.addCleanup(service.shutdown)
+        with (mock.patch.object(app_module, "_collect_questions",
+                                return_value=[question]),
+              mock.patch.object(app_module, "_export_service", service),
+              mock.patch.object(app_module.service_ports, "export_document",
+                                return_value=produced) as export_mock):
+            first = app_module.app.test_client().post(
+                "/export", data={"fmt": "pdf", "scope": "all",
+                                 "layout": "two", "grouped": "1"},
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+            task_id = first.get_json()["task_id"]
+            service.run_task_sync(task_id)
+            retried = app_module.app.test_client().post(
+                f"/export-tasks/{task_id}/retry",
+                headers={"X-CSRF-Token": app_module._WRITE_TOKEN})
+            self.assertEqual(retried.status_code, 200)
+            service.run_task_sync(retried.get_json()["task_id"])
+        self.assertEqual(export_mock.call_count, 2)
+        for call in export_mock.call_args_list:
+            self.assertEqual(call.kwargs["layout"], "two")
+            self.assertEqual(call.kwargs["grouped"], "1")
+
+    def test_read_export_params_dimension_fields(self):
+        cases = (
+            ({}, ("list", "", "", "", "", False)),
+            ({"layout": "one", "grouped": "1", "columns": "2", "ratio": "wide",
+              "std_exam": "1"}, ("list", "one", "1", "2", "wide", True)),
+            ({"mode": "custom"}, ("list", "", "", "", "", False)),
+            ({"mode": "exam"}, ("exam", "", "", "", "", False)),
+        )
+        for data, expected in cases:
+            with self.subTest(**data):
+                with app_module.app.test_request_context(
+                        "/export", method="POST", data=data):
+                    p = app_module._read_export_params()
+                self.assertEqual(
+                    (p["mode"], p["layout"], p["grouped"], p["columns"],
+                     p["ratio"], p["std_exam"]), expected)
+
     def test_html_preview_returns_registered_inline_document(self):
         question = {
             "id": "html-preview", "body": "近似预览题 $x^2$", "solution": "答案",

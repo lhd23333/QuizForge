@@ -85,6 +85,12 @@ def export_document(*args, **kwargs):
     tex_backend = kwargs.pop("tex_backend", "local")
     fmt = kwargs.get("fmt", "pdf")
     if fmt == "docx":
+        # Word 链只接 8 个预设 mode（word_exporter.export 是显式签名，没有
+        # **kwargs）。四维自定义组合已由 /export 路由提交时拦截（400）；这里
+        # 再剥一次兜底——重试回放 / Agent 调用可能带 None 值，多传键会让
+        # Python 直接 TypeError。
+        for key in ("layout", "grouped", "columns", "ratio", "std_exam"):
+            kwargs.pop(key, None)
         return word_exporter.export(*args, **kwargs)
     if fmt == "pdf" and tex_backend == "cloud":
         raise exporter.ExportError("云 TeX 已停用，请安装本机 TeX 或导出 tex.zip")

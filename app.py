@@ -8639,9 +8639,23 @@ def _read_export_params():
     paper_tone = request.form.get("paper_tone", "white")
     if paper_tone not in ("white", "cream"):
         paper_tone = "white"
+    # 四维自定义组合（导出抽屉「自定义」路径）。layout 空 = 未启用，全部走
+    # mode 原逻辑（旧页面 / 插件 / Agent 不带这些字段，行为逐字节不变）；
+    # 非空时 mode 归一为兼容占位——"custom" 只是前端的过渡值，绝不让它流进
+    # exporter / Word / 模板门禁的 SUPPORTED_MODES 校验。合法性交给
+    # exporter.resolve_export_layout 在提交/执行时报错（拼写错误不静默回落）。
+    mode = request.form.get("mode", "list")
+    layout = request.form.get("layout", "").strip().lower()
+    if layout or mode == "custom":
+        mode = "list"
     return dict(
         scope=request.form.get("scope", "selected"),
-        mode=request.form.get("mode", "list"),
+        mode=mode,
+        layout=layout,
+        grouped=request.form.get("grouped", "").strip(),
+        columns=request.form.get("columns", "").strip(),
+        ratio=request.form.get("ratio", "").strip().lower(),
+        std_exam=request.form.get("std_exam", "") in ("1", "true", "on"),
         title=request.form.get("title", "").strip() or "试卷",
         keypoints=request.form.get("keypoints", ""),
         solution_mode=request.form.get("solution_mode", "none"),
@@ -8688,6 +8702,42 @@ def _read_export_params():
         },
         bank_subject=config.BANK_SUBJECT,
     )
+
+
+def _payload_to_export_kwargs(payload: dict, *, title: str, fmt: str,
+                              template_path=None) -> dict:
+    """导出配置（表单解析结果或任务快照 payload）→ 导出入参的唯一构造点。
+
+    /preview、_start_export_task、（任务重试经 payload 回放）三处共用：四维
+    参数若在多个入口各拼一遍必漏（导出任务面板历史上就出过这类病根）。四维
+    字段为空串时传 None——exporter 走原 mode 逻辑，旧 payload 天然兼容。
+
+    template_path 只在非 None 时加入：路径由提交线程解析好后闭包携带，不进
+    payload（面板回显配置时不该出现服务器内部路径）。
+    """
+    kwargs = dict(
+        title=title, fmt=fmt, mode=payload.get("mode", "list"),
+        keypoints=payload.get("keypoints", ""),
+        fullpage_ids=payload.get("fullpage_ids") or [],
+        header_footer=payload.get("header_footer") or {},
+        solution_mode=payload.get("solution_mode", "none"),
+        std_opts=payload.get("std_opts") or {},
+        paper_tone=payload.get("paper_tone", "white"),
+        wimath_logo=bool(payload.get("wimath_logo")),
+        bank_subject=payload.get("bank_subject") or config.BANK_SUBJECT,
+        cjk_font=payload.get("cjk_font", ""),
+        latin_font=payload.get("latin_font", ""),
+        tex_backend=payload.get("tex_backend", "local"),
+        # 四维自定义组合（空串 → None = legacy mode 路径）
+        layout=payload.get("layout") or None,
+        grouped=payload.get("grouped") or None,
+        columns=payload.get("columns") or None,
+        ratio=payload.get("ratio") or None,
+        std_exam=bool(payload.get("std_exam")),
+    )
+    if template_path is not None:
+        kwargs["template_path"] = str(template_path)
+    return kwargs
 
 
 def _export_template_path(template_id: str, *, fmt: str):
@@ -8815,16 +8865,12 @@ def preview():
     except agent_catalog.CatalogError as exc:
         return jsonify(ok=False, error=str(exc), code=exc.code), exc.status
     try:
+        kwargs = _payload_to_export_kwargs(
+            p, title=p["title"], fmt="pdf", template_path=template_path)
+        # 预览的 tex_backend 以表单为准（与 payload 分开：preview 不写任务快照）
+        kwargs["tex_backend"] = request.form.get("tex_backend", "local")
         out_path = service_ports.export_document(
-            questions, title=p["title"], fmt="pdf", mode=p["mode"],
-            keypoints=p["keypoints"], fullpage_ids=p["fullpage_ids"],
-            header_footer=p["header_footer"], solution_mode=p["solution_mode"],
-            std_opts=p["std_opts"], paper_tone=p["paper_tone"],
-            wimath_logo=p["wimath_logo"], bank_subject=p["bank_subject"],
-            cjk_font=p["cjk_font"], latin_font=p["latin_font"],
-            entitlement_feature="preview",
-            tex_backend=request.form.get("tex_backend", "local"),
-            **({"template_path": str(template_path)} if template_path else {}))
+            questions, **kwargs, entitlement_feature="preview")
     except exporter.ExportError as e:
         return jsonify(ok=False, error=f"预览生成失败：{e}"), 500
 
@@ -8891,22 +8937,8 @@ def _start_export_task(payload: dict) -> str:
         )
 
     def run(questions, progress, cancel):
-        kwargs = dict(
-            title=title, fmt=fmt, mode=payload.get("mode", "list"),
-            keypoints=payload.get("keypoints", ""),
-            fullpage_ids=payload.get("fullpage_ids") or [],
-            header_footer=payload.get("header_footer") or {},
-            solution_mode=payload.get("solution_mode", "none"),
-            std_opts=payload.get("std_opts") or {},
-            paper_tone=payload.get("paper_tone", "white"),
-            wimath_logo=bool(payload.get("wimath_logo")),
-            bank_subject=payload.get("bank_subject") or config.BANK_SUBJECT,
-            cjk_font=payload.get("cjk_font", ""),
-            latin_font=payload.get("latin_font", ""),
-            tex_backend=payload.get("tex_backend", "local"),
-        )
-        if template_path is not None:
-            kwargs["template_path"] = str(template_path)
+        kwargs = _payload_to_export_kwargs(
+            payload, title=title, fmt=fmt, template_path=template_path)
         return service_ports.export_document(
             questions, progress=progress, cancel=cancel, **kwargs)
 
@@ -8934,6 +8966,21 @@ def export():
     fmt = request.form.get("fmt", "pdf")             # pdf / tex / zip / docx
     if fmt not in {"pdf", "tex", "zip", "docx"}:
         return jsonify(ok=False, error="导出格式不支持"), 400
+    if p.get("layout"):
+        # 四维组合在提交时先做一次干跑校验：拼错的枚举值应当立刻 400，而不是
+        # 建了后台任务再在 worker 里失败。Word 链暂不支持四维组合（其导出器
+        # 只接 8 个预设 mode 的显式签名），显式拒绝而不是静默按清单模式导出。
+        try:
+            exporter.resolve_export_layout(
+                layout=p["layout"], grouped=p.get("grouped"),
+                columns=p.get("columns"), ratio=p.get("ratio"),
+                std_exam=p.get("std_exam"))
+        except exporter.ExportError as e:
+            return jsonify(ok=False, error=str(e)), 400
+        if fmt == "docx":
+            return jsonify(ok=False,
+                           error="Word 导出暂不支持自定义版式组合，"
+                                 "请改用 PDF 或选择预设"), 400
     if p["scope"] == "selected" and not p["pinned_ids"]:
         # 提交瞬间快照选题篮：任务在后台排队期间用户会继续勾选别的题，
         # 本任务必须仍是「点按钮那一刻的那批」。空选题直接拒绝，不建空任务。
